@@ -1,0 +1,64 @@
+diff --git a/internal/context/management_data.go b/internal/context/management_data.go
+index 6e1140e..0528bd6 100644
+--- a/internal/context/management_data.go
++++ b/internal/context/management_data.go
+@@ -381,6 +381,14 @@ func nnrfNFManagementOption(nf *models.NrfNfManagementNfProfile, nfprofile *mode
+ 	if nfprofile.NrfInfo != nil {
+ 		nf.NrfInfo = nfprofile.NrfInfo
+ 	}
++	// aanfInfoList (TS 29.510 table 6.1.6.2.2-1)
++	if nfprofile.AanfInfoList != nil {
++		aanfInfoList := make(map[string]models.AanfInfo, len(nfprofile.AanfInfoList))
++		for key, info := range nfprofile.AanfInfoList {
++			aanfInfoList[key] = info
++		}
++		nf.AanfInfoList = aanfInfoList
++	}
+ 	// recoveryTime
+ 	if nfprofile.RecoveryTime != nil {
+ 		// Update when restart (Setting by NF itself)
+diff --git a/internal/context/management_data_aanf_test.go b/internal/context/management_data_aanf_test.go
+new file mode 100644
+index 0000000..ddc082b
+--- /dev/null
++++ b/internal/context/management_data_aanf_test.go
+@@ -0,0 +1,39 @@
++package context
++
++import (
++	"testing"
++
++	"github.com/free5gc/nrf/pkg/factory"
++	"github.com/free5gc/openapi/models"
++)
++
++// TS 29.510 table 6.1.6.2.2-1: the NRF stores the aanfInfoList of an AAnF
++// profile, with the Routing Indicators as strings.
++func TestNnrfNFManagementDataModelKeepsAanfInfoList(t *testing.T) {
++	saved := factory.NrfConfig
++	factory.NrfConfig = &factory.Config{Configuration: &factory.Configuration{Sbi: &factory.Sbi{}}}
++	defer func() { factory.NrfConfig = saved }()
++
++	in := &models.NrfNfManagementNfProfile{
++		NfInstanceId: "b6f417f0-06fa-4c38-b291-33066f5a5fe7",
++		NfType:       models.NrfNfManagementNfType_AANF,
++		NfStatus:     models.NrfNfManagementNfStatus_REGISTERED,
++		AanfInfoList: map[string]models.AanfInfo{
++			"1": {RoutingIndicators: []string{"0000", "012"}},
++		},
++	}
++	var out models.NrfNfManagementNfProfile
++	if err := NnrfNFManagementDataModel(&out, in); err != nil {
++		t.Fatal(err)
++	}
++	got, ok := out.AanfInfoList["1"]
++	if !ok || len(got.RoutingIndicators) != 2 || got.RoutingIndicators[0] != "0000" || got.RoutingIndicators[1] != "012" {
++		t.Errorf("aanfInfoList = %+v", out.AanfInfoList)
++	}
++
++	// The stored map is a copy.
++	in.AanfInfoList["2"] = models.AanfInfo{}
++	if _, ok := out.AanfInfoList["2"]; ok {
++		t.Error("aanfInfoList shares the map of the request")
++	}
++}

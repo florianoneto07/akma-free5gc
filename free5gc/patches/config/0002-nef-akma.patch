@@ -1,0 +1,31 @@
+diff --git a/nefcfg.yaml b/nefcfg.yaml
+index 48f8fb6..2be4a5e 100644
+--- a/nefcfg.yaml
++++ b/nefcfg.yaml
+@@ -5,8 +5,8 @@ info:
+ configuration:
+   sbi:
+     scheme: http # The protocol for sbi (http or https)
+-    registerIPv4: 127.0.0.5 # IP used to register to NRF
+-    bindingIPv4: 127.0.0.5 # IP used to bind the service
++    registerIPv4: 192.168.16.130 # IP used to register to NRF; reachable from the external AF (AKMA, TS 33.535 cl. 6.3)
++    bindingIPv4: 192.168.16.130 # IP used to bind the service
+     port: 8000 # port used to bind the service
+     tls: # the local path of TLS key
+       pem: cert/nef.pem # NEF TLS Certificate
+@@ -18,6 +18,15 @@ configuration:
+     - serviceName: nnef-oam # OAM service
+     - serviceName: 3gpp-traffic-influence # AF-facing Traffic Influence API
+     - serviceName: nnef-callback # Inbound SMF event notification callback
++    - serviceName: 3gpp-akma # AF-facing AKMA API (3GPP TS 29.522 clause 5.14)
++  akma: # AKMA API
++    authorizedAfs: # local policy, 3GPP TS 33.535 clause 6.3 step 2
++      - afId: af1.akma.example.FF00000001 # "<FQDN>.<Ua* security protocol id>"
++        sourceAddresses: # addresses from which this AF may request its K_AF
++          - 192.168.16.129
++      - afId: af3.akma.example.FF00000001 # test only: accepted here and not by the AAnF (negative test E07)
++        sourceAddresses:
++          - 192.168.16.129
+ 
+ logger: # log output setting
+   enable: true # true or false

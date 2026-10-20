@@ -1,0 +1,15 @@
+diff --git a/config/free5gc-ue.yaml b/config/free5gc-ue.yaml
+index 9c83902..3d3e9f4 100644
+--- a/config/free5gc-ue.yaml
++++ b/config/free5gc-ue.yaml
+@@ -30,8 +30,9 @@ imei: '356938035643803'
+ imeiSv: '4370816125816151'
+ 
+ # List of gNB IP addresses for Radio Link Simulation
++# (the host side of the veth pair of the UE namespace, af/scripts/ue-netns.sh)
+ gnbSearchList:
+-  - 127.0.0.1
++  - 10.100.0.1
+ 
+ # UAC Access Identities Configuration
+ uacAic:

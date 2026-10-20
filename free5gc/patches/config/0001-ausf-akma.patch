@@ -1,0 +1,14 @@
+diff --git a/ausfcfg.yaml b/ausfcfg.yaml
+index 34c29b2..1ec16b5 100644
+--- a/ausfcfg.yaml
++++ b/ausfcfg.yaml
+@@ -22,6 +22,9 @@ configuration:
+       mnc: 45  # Mobile Network Code (2 or 3 digits string, digit: 0~9)
+   groupId: ausfGroup001 # ID for the group of the AUSF
+   eapAkaSupiImsiPrefix: false # including "imsi-" prefix or not when using the SUPI to do EAP-AKA' authentication
++  akma: # AKMA, 3GPP TS 33.535
++    enable: true # derive K_AKMA and A-KID and register them at the AAnF when the UDM sends the AKMA indication
++    # aanfUri: http://192.168.16.130:8010 # AAnF apiRoot; when absent the AAnF is discovered at the NRF
+ 
+ logger: # log output setting
+   enable: true # true or false

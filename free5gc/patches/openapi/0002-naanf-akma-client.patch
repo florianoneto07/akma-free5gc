@@ -1,0 +1,446 @@
+diff -ruN a/aanf/AKMA/api_common.go b/aanf/AKMA/api_common.go
+--- a/aanf/AKMA/api_common.go
++++ b/aanf/AKMA/api_common.go
+@@ -0,0 +1,98 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package AKMA
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++// OperationError carries the error representation of a Naanf_AKMA operation:
++// a ProblemDetails for 4xx/5xx responses, or a RedirectResponse with the
++// Location and 3gpp-Sbi-Target-Nf-Id headers for 307/308.
++type OperationError struct {
++	Location             string
++	Var3gppSbiTargetNfId string
++	ProblemDetails       models.ProblemDetails
++	RedirectResponse     models.RedirectResponse
++}
++
++// mandatoryErrorCodes are the error status codes declared for every
++// operation in TS29535_Naanf_AKMA.yaml (TS 29.500 table 5.2.7.1-1, POST).
++var mandatoryErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 411: true, 413: true,
++	415: true, 429: true, 500: true, 502: true, 503: true,
++}
++
++// post sends a custom operation (TS 29.501 clause 4.4.2) and returns the raw
++// response.
++func post(ctx context.Context, cfg *Configuration, path string, body interface{}) ([]byte, *http.Response, error) {
++	localVarHeaderParams := map[string]string{
++		"Content-Type": "application/json",
++		"Accept":       "application/json, application/problem+json",
++	}
++
++	r, err := openapi.PrepareRequest(ctx, cfg, cfg.BasePath()+path, http.MethodPost, body,
++		localVarHeaderParams, url.Values{}, url.Values{}, "", "", nil)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	localVarHTTPResponse, err := openapi.CallAPI(cfg, r)
++	if err != nil || localVarHTTPResponse == nil {
++		return nil, nil, err
++	}
++
++	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
++	if err != nil {
++		return nil, nil, err
++	}
++	if err = localVarHTTPResponse.Body.Close(); err != nil {
++		return nil, nil, err
++	}
++	return localVarBody, localVarHTTPResponse, nil
++}
++
++// decodeError builds the GenericOpenAPIError for a non-successful status, or
++// returns false if the status is not declared for the operation.
++func decodeError(body []byte, resp *http.Response) (error, bool) {
++	apiError := openapi.GenericOpenAPIError{
++		RawBody:     body,
++		ErrorStatus: resp.StatusCode,
++	}
++	var v OperationError
++	contentType := resp.Header.Get("Content-Type")
++	switch {
++	case resp.StatusCode == 307 || resp.StatusCode == 308:
++		if len(body) > 0 {
++			if err := openapi.Deserialize(&v.RedirectResponse, body, contentType); err != nil {
++				return err, true
++			}
++		}
++		v.Location = resp.Header.Get("Location")
++		v.Var3gppSbiTargetNfId = resp.Header.Get("3gpp-Sbi-Target-Nf-Id")
++	case mandatoryErrorCodes[resp.StatusCode]:
++		if len(body) > 0 {
++			// A body that is not a ProblemDetails is kept only in RawBody.
++			_ = openapi.Deserialize(&v.ProblemDetails, body, contentType)
++		}
++	default:
++		return nil, false
++	}
++	apiError.ErrorModel = v
++	return apiError, true
++}
+diff -ruN a/aanf/AKMA/api_register_the_akma_related_key_material.go b/aanf/AKMA/api_register_the_akma_related_key_material.go
+--- a/aanf/AKMA/api_register_the_akma_related_key_material.go
++++ b/aanf/AKMA/api_register_the_akma_related_key_material.go
+@@ -0,0 +1,63 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package AKMA
++
++import (
++	"context"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type RegisterTheAKMARelatedKeyMaterialApiService service
++
++// RegisterAKMAKeyRequest
++type RegisterAKMAKeyRequest struct {
++	AkmaKeyInfo *models.AkmaKeyInfo
++}
++
++func (r *RegisterAKMAKeyRequest) SetAkmaKeyInfo(AkmaKeyInfo models.AkmaKeyInfo) {
++	r.AkmaKeyInfo = &AkmaKeyInfo
++}
++
++type RegisterAKMAKeyResponse struct {
++	AkmaKeyInfo models.AkmaKeyInfo
++}
++
++/*
++RegisterAKMAKey stores AKMA related key material in the AAnF:
++POST {apiRoot}/naanf-akma/v1/register-anchorkey (TS 29.535 clause 5.1.4.2).
++
++@return RegisterAKMAKeyResponse
++*/
++func (a *RegisterTheAKMARelatedKeyMaterialApiService) RegisterAKMAKey(
++	ctx context.Context, request *RegisterAKMAKeyRequest,
++) (*RegisterAKMAKeyResponse, error) {
++	var localVarReturnValue RegisterAKMAKeyResponse
++
++	body, resp, err := post(ctx, a.client.cfg, "/register-anchorkey", request.AkmaKeyInfo)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 200 {
++		err = openapi.Deserialize(&localVarReturnValue.AkmaKeyInfo, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in RegisterAKMAKey", resp.StatusCode)
++}
+diff -ruN a/aanf/AKMA/api_remove_the_akma_application_key_material_deletion.go b/aanf/AKMA/api_remove_the_akma_application_key_material_deletion.go
+--- a/aanf/AKMA/api_remove_the_akma_application_key_material_deletion.go
++++ b/aanf/AKMA/api_remove_the_akma_application_key_material_deletion.go
+@@ -0,0 +1,55 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package AKMA
++
++import (
++	"context"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type RemoveTheAKMAApplicationKeyMaterialDeletionApiService service
++
++// RemoveContextRequest
++type RemoveContextRequest struct {
++	CtxRemove *models.CtxRemove
++}
++
++func (r *RemoveContextRequest) SetCtxRemove(CtxRemove models.CtxRemove) {
++	r.CtxRemove = &CtxRemove
++}
++
++type RemoveContextResponse struct{}
++
++/*
++RemoveContext requests the AAnF to remove the AKMA context of a UE:
++POST {apiRoot}/naanf-akma/v1/remove-context (TS 29.535 clause 5.1.4.4).
++
++@return RemoveContextResponse
++*/
++func (a *RemoveTheAKMAApplicationKeyMaterialDeletionApiService) RemoveContext(
++	ctx context.Context, request *RemoveContextRequest,
++) (*RemoveContextResponse, error) {
++	body, resp, err := post(ctx, a.client.cfg, "/remove-context", request.CtxRemove)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 204 {
++		return &RemoveContextResponse{}, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in RemoveContext", resp.StatusCode)
++}
+diff -ruN a/aanf/AKMA/api_retrieve_the_akma_application_key_material_collection.go b/aanf/AKMA/api_retrieve_the_akma_application_key_material_collection.go
+--- a/aanf/AKMA/api_retrieve_the_akma_application_key_material_collection.go
++++ b/aanf/AKMA/api_retrieve_the_akma_application_key_material_collection.go
+@@ -0,0 +1,72 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package AKMA
++
++import (
++	"context"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type RetrieveTheAKMAApplicationKeyMaterialCollectionApiService service
++
++// GetAKMAAPPKeyMaterialRequest
++type GetAKMAAPPKeyMaterialRequest struct {
++	AkmaAfKeyRequest *models.AkmaAfKeyRequest
++}
++
++func (r *GetAKMAAPPKeyMaterialRequest) SetAkmaAfKeyRequest(AkmaAfKeyRequest models.AkmaAfKeyRequest) {
++	r.AkmaAfKeyRequest = &AkmaAfKeyRequest
++}
++
++// GetAKMAAPPKeyMaterialResponse holds the AkmaAfKeyData of a 200 response.
++// NoContent is true for a 204 response ("the requested data does not exist").
++type GetAKMAAPPKeyMaterialResponse struct {
++	AkmaAfKeyData models.AkmaAfKeyData
++	NoContent     bool
++}
++
++/*
++GetAKMAAPPKeyMaterial requests AKMA Application Key information:
++POST {apiRoot}/naanf-akma/v1/retrieve-applicationkey (TS 29.535 clause 5.1.4.3).
++The same operation serves Naanf_AKMA_ApplicationKey_AnonUser_Get when
++AkmaAfKeyRequest.AnonInd is true.
++
++@return GetAKMAAPPKeyMaterialResponse
++*/
++func (a *RetrieveTheAKMAApplicationKeyMaterialCollectionApiService) GetAKMAAPPKeyMaterial(
++	ctx context.Context, request *GetAKMAAPPKeyMaterialRequest,
++) (*GetAKMAAPPKeyMaterialResponse, error) {
++	var localVarReturnValue GetAKMAAPPKeyMaterialResponse
++
++	body, resp, err := post(ctx, a.client.cfg, "/retrieve-applicationkey", request.AkmaAfKeyRequest)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	switch resp.StatusCode {
++	case 200:
++		err = openapi.Deserialize(&localVarReturnValue.AkmaAfKeyData, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	case 204:
++		localVarReturnValue.NoContent = true
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in GetAKMAAPPKeyMaterial", resp.StatusCode)
++}
+diff -ruN a/aanf/AKMA/client.go b/aanf/AKMA/client.go
+--- a/aanf/AKMA/client.go
++++ b/aanf/AKMA/client.go
+@@ -0,0 +1,42 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package AKMA
++
++// APIClient manages communication with the Naanf_AKMA API v1.2.0
++// In most cases there should be only one, shared, APIClient.
++type APIClient struct {
++	cfg    *Configuration
++	common service // Reuse a single struct instead of allocating one for each service on the heap.
++
++	// API Services
++	RegisterTheAKMARelatedKeyMaterialApi               *RegisterTheAKMARelatedKeyMaterialApiService
++	RetrieveTheAKMAApplicationKeyMaterialCollectionApi *RetrieveTheAKMAApplicationKeyMaterialCollectionApiService
++	RemoveTheAKMAApplicationKeyMaterialDeletionApi     *RemoveTheAKMAApplicationKeyMaterialDeletionApiService
++}
++
++type service struct {
++	client *APIClient
++}
++
++// NewAPIClient creates a new API client.
++func NewAPIClient(cfg *Configuration) *APIClient {
++	c := &APIClient{}
++	c.cfg = cfg
++	c.common.client = c
++
++	// API Services
++	c.RegisterTheAKMARelatedKeyMaterialApi = (*RegisterTheAKMARelatedKeyMaterialApiService)(&c.common)
++	c.RetrieveTheAKMAApplicationKeyMaterialCollectionApi = (*RetrieveTheAKMAApplicationKeyMaterialCollectionApiService)(&c.common)
++	c.RemoveTheAKMAApplicationKeyMaterialDeletionApi = (*RemoveTheAKMAApplicationKeyMaterialDeletionApiService)(&c.common)
++
++	return c
++}
+diff -ruN a/aanf/AKMA/configuration.go b/aanf/AKMA/configuration.go
+--- a/aanf/AKMA/configuration.go
++++ b/aanf/AKMA/configuration.go
+@@ -0,0 +1,92 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package AKMA
++
++import (
++	"github.com/free5gc/openapi"
++	"net/http"
++	"strings"
++)
++
++type Configuration struct {
++	url           string
++	basePath      string
++	host          string
++	defaultHeader map[string]string
++	userAgent     string
++	httpClient    *http.Client
++	MetricsHook   openapi.RequestMetricsHook
++}
++
++func NewConfiguration() *Configuration {
++	cfg := &Configuration{
++		basePath:      "https://example.com/naanf-akma/v1",
++		url:           "{apiRoot}/naanf-akma/v1",
++		defaultHeader: make(map[string]string),
++		userAgent:     "OpenAPI-Generator/1.0.0/go",
++		MetricsHook:   nil, // no-op unless the caller sets it
++	}
++	return cfg
++}
++
++func (c *Configuration) SetBasePath(apiRoot string) {
++	url := c.url
++
++	// Replace apiRoot
++	url = strings.Replace(url, "{"+"apiRoot"+"}", apiRoot, -1)
++
++	c.basePath = url
++}
++
++func (c *Configuration) BasePath() string {
++	return c.basePath
++}
++
++func (c *Configuration) Host() string {
++	return c.host
++}
++
++func (c *Configuration) SetHost(host string) {
++	c.host = host
++}
++
++func (c *Configuration) UserAgent() string {
++	return c.userAgent
++}
++
++func (c *Configuration) SetUserAgent(userAgent string) {
++	c.userAgent = userAgent
++}
++
++func (c *Configuration) DefaultHeader() map[string]string {
++	return c.defaultHeader
++}
++
++func (c *Configuration) AddDefaultHeader(key string, value string) {
++	c.defaultHeader[key] = value
++}
++
++func (c *Configuration) HTTPClient() *http.Client {
++	return c.httpClient
++}
++
++func (c *Configuration) SetHTTPClient(client *http.Client) {
++	c.httpClient = client
++}
++
++func (c *Configuration) Metrics() openapi.RequestMetricsHook {
++	return c.MetricsHook
++}
++
++func (c *Configuration) SetMetrics(h openapi.RequestMetricsHook) {
++	c.MetricsHook = h
++}

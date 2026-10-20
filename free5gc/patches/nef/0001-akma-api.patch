@@ -1,0 +1,900 @@
+diff --git a/go.mod b/go.mod
+index ec581f6..315ec84 100644
+--- a/go.mod
++++ b/go.mod
+@@ -27,6 +27,7 @@ require (
+ 	github.com/cloudwego/iasm v0.2.0 // indirect
+ 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
+ 	github.com/felixge/httpsnoop v1.0.4 // indirect
++	github.com/florianoneto07/akma-free5gc/shared/akma v0.0.0
+ 	github.com/free5gc/aper v1.1.1 // indirect
+ 	github.com/free5gc/nas v1.2.3 // indirect
+ 	github.com/free5gc/ngap v1.1.3 // indirect
+@@ -69,9 +70,13 @@ require (
+ 	golang.org/x/arch v0.8.0 // indirect
+ 	golang.org/x/crypto v0.45.0 // indirect
+ 	golang.org/x/net v0.47.0 // indirect
+-	golang.org/x/oauth2 v0.27.0 // indirect
++	golang.org/x/oauth2 v0.27.0
+ 	golang.org/x/sys v0.38.0 // indirect
+ 	golang.org/x/text v0.31.0 // indirect
+ 	google.golang.org/protobuf v1.36.1 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ )
++
++replace github.com/florianoneto07/akma-free5gc/shared/akma => ../../../akma-free5gc/shared/akma
++
++replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi
+diff --git a/go.sum b/go.sum
+index f41492f..86574b3 100644
+--- a/go.sum
++++ b/go.sum
+@@ -25,8 +25,6 @@ github.com/free5gc/nas v1.2.3 h1:vMA9NGORw0zr26vQWWSTy8X9HrA+wGxFvwc2g9KqUTw=
+ github.com/free5gc/nas v1.2.3/go.mod h1:A8ODi6MW0fRJiLEH4GcUPbg3dd9xm3zi+fkBWqTjQ40=
+ github.com/free5gc/ngap v1.1.3 h1:uT+IE5PkWOYjPdxCyOAwLDOXUiADcOQCs05CudyC36s=
+ github.com/free5gc/ngap v1.1.3/go.mod h1:yGMO2GYV5DbbmudwD7Oo6dXQgz2ON29GhqtXDeXdyvA=
+-github.com/free5gc/openapi v1.2.4 h1:uhyaTggUhd9xgMFcs5y2rCqFOfXuv6Zsr+cLUU/x6gs=
+-github.com/free5gc/openapi v1.2.4/go.mod h1:V9CKQUqWp6kXL3SDtaIs4ZWeLipk5TSRXCnt+ntNceg=
+ github.com/free5gc/util v1.3.2 h1:3BjZq050WbaLJY0w1Bn51YZlCirs2ARoCUxD3LDSdbo=
+ github.com/free5gc/util v1.3.2/go.mod h1:wXObe2iF465VRdkE1Z5YkiSuHXlCT8HJ+yc7p9t5hMs=
+ github.com/gabriel-vasile/mimetype v1.4.3 h1:in2uUcidCuFcDKtdcBxlR0rJ1+fsokWf+uqxgUFjbI0=
+diff --git a/internal/context/akma.go b/internal/context/akma.go
+new file mode 100644
+index 0000000..7d52f6f
+--- /dev/null
++++ b/internal/context/akma.go
+@@ -0,0 +1,63 @@
++package context
++
++import (
++	"fmt"
++	"net/netip"
++	"sort"
++	"strings"
++
++	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
++	"github.com/free5gc/nef/pkg/factory"
++)
++
++// AkmaAfPolicy is the local policy with which the NEF authorizes an AF to
++// request K_AF, including the verification of the AF_ID (3GPP TS 33.535
++// clause 6.3 step 2). Each AF_ID is bound to the source addresses of the AF,
++// so that an AF cannot request the K_AF of another AF_ID.
++type AkmaAfPolicy struct {
++	sources map[string]map[netip.Addr]struct{}
++}
++
++// NewAkmaAfPolicy builds the policy from the configuration.
++func NewAkmaAfPolicy(afs []factory.AkmaAuthorizedAf) (*AkmaAfPolicy, error) {
++	p := &AkmaAfPolicy{sources: make(map[string]map[netip.Addr]struct{})}
++	for i, af := range afs {
++		id, err := afid.Parse(af.AfId)
++		if err != nil {
++			return nil, fmt.Errorf("akma.authorizedAfs[%d]: %w", i, err)
++		}
++		set := p.sources[id.Transport()]
++		if set == nil {
++			set = make(map[netip.Addr]struct{})
++			p.sources[id.Transport()] = set
++		}
++		for j, s := range af.SourceAddresses {
++			addr, err := netip.ParseAddr(strings.TrimSpace(s))
++			if err != nil {
++				return nil, fmt.Errorf("akma.authorizedAfs[%d].sourceAddresses[%d]: %w", i, j, err)
++			}
++			set[addr.Unmap()] = struct{}{}
++		}
++	}
++	return p, nil
++}
++
++// AfIds returns the authorized AF_IDs, in transport form, sorted.
++func (p *AkmaAfPolicy) AfIds() []string {
++	ids := make([]string, 0, len(p.sources))
++	for id := range p.sources {
++		ids = append(ids, id)
++	}
++	sort.Strings(ids)
++	return ids
++}
++
++// Authorize reports whether the AF at remote may obtain K_AF for id.
++func (p *AkmaAfPolicy) Authorize(id afid.AfID, remote netip.Addr) bool {
++	set, ok := p.sources[id.Transport()]
++	if !ok {
++		return false
++	}
++	_, ok = set[remote.Unmap()]
++	return ok
++}
+diff --git a/internal/context/nef_context.go b/internal/context/nef_context.go
+index 9ec190f..02b5898 100644
+--- a/internal/context/nef_context.go
++++ b/internal/context/nef_context.go
+@@ -31,7 +31,9 @@ type NefContext struct {
+ 	numCorreID     uint64
+ 	OAuth2Required bool
+ 	afs            map[string]*AfData
+-	mu             sync.RWMutex
++	// AkmaAfs is the local policy of the AKMA API (3GPP TS 33.535 clause 6.3).
++	AkmaAfs *AkmaAfPolicy
++	mu      sync.RWMutex
+ }
+ 
+ func NewContext(nef nef) (*NefContext, error) {
+@@ -40,6 +42,11 @@ func NewContext(nef nef) (*NefContext, error) {
+ 		nfInstID: nef.Config().GetNfInstanceId(),
+ 	}
+ 	c.afs = make(map[string]*AfData)
++	akmaAfs, err := NewAkmaAfPolicy(nef.Config().AkmaAuthorizedAfs())
++	if err != nil {
++		return nil, err
++	}
++	c.AkmaAfs = akmaAfs
+ 	logger.CtxLog.Infof("New nfInstID: [%s]", c.nfInstID)
+ 	return c, nil
+ }
+diff --git a/internal/logger/logger.go b/internal/logger/logger.go
+index 9449e29..5ca3f47 100644
+--- a/internal/logger/logger.go
++++ b/internal/logger/logger.go
+@@ -22,6 +22,7 @@ var (
+ 	PFDManageLog *logrus.Entry
+ 	PFDFLog      *logrus.Entry
+ 	OamLog       *logrus.Entry
++	AkmaLog      *logrus.Entry
+ )
+ 
+ const (
+@@ -54,4 +55,5 @@ func init() {
+ 	PFDManageLog = NfLog.WithField(logger_util.FieldCategory, "PFDMng")
+ 	PFDFLog = NfLog.WithField(logger_util.FieldCategory, "PFDF")
+ 	OamLog = NfLog.WithField(logger_util.FieldCategory, "OAM")
++	AkmaLog = NfLog.WithField(logger_util.FieldCategory, "AKMA")
+ }
+diff --git a/internal/sbi/api_akma.go b/internal/sbi/api_akma.go
+new file mode 100644
+index 0000000..d692cd5
+--- /dev/null
++++ b/internal/sbi/api_akma.go
+@@ -0,0 +1,59 @@
++package sbi
++
++import (
++	"mime"
++	"net/http"
++	"net/netip"
++
++	"github.com/free5gc/nef/internal/logger"
++	"github.com/free5gc/nef/internal/sbi/processor"
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	"github.com/gin-gonic/gin"
++)
++
++// getAkmaRoutes returns the custom operations of the AKMA API
++// (3GPP TS 29.522 table 5.14.3.1-1).
++func (s *Server) getAkmaRoutes() []Route {
++	return []Route{
++		{
++			Method:  http.MethodPost,
++			Pattern: "/retrieve",
++			APIFunc: s.apiPostAkmaRetrieve,
++		},
++	}
++}
++
++func (s *Server) apiPostAkmaRetrieve(gc *gin.Context) {
++	// 3GPP TS 29.122 table 5.2.6-1: 415 for a body format the server does
++	// not support.
++	mediaType, _, err := mime.ParseMediaType(gc.GetHeader("Content-Type"))
++	if err != nil || mediaType != "application/json" {
++		processor.WriteAkmaProblem(gc, &models.ProblemDetails{
++			Title:  "Unsupported Media Type",
++			Status: http.StatusUnsupportedMediaType,
++			Detail: "the request body must be application/json",
++		})
++		return
++	}
++	reqBody, err := gc.GetRawData()
++	if err != nil {
++		logger.SBILog.Errorf("Get Request Body error: %+v", err)
++		processor.WriteAkmaProblem(gc, openapi.ProblemDetailsSystemFailure(err.Error()))
++		return
++	}
++	var req models.AkmaAfKeyRequest
++	if err = openapi.Deserialize(&req, reqBody, "application/json"); err != nil {
++		logger.SBILog.Errorf("Deserialize Request Body error: %+v", err)
++		processor.WriteAkmaProblem(gc, openapi.ProblemDetailsMalformedReqSyntax(err.Error()))
++		return
++	}
++	// The source address of the AF is taken from the connection, never from
++	// forwarding headers, which the AF could set.
++	ap, err := netip.ParseAddrPort(gc.Request.RemoteAddr)
++	if err != nil {
++		processor.WriteAkmaProblem(gc, openapi.ProblemDetailsSystemFailure("source address of the request"))
++		return
++	}
++	s.Processor().RetrieveAkmaApplicationKey(gc, &req, ap.Addr().Unmap())
++}
+diff --git a/internal/sbi/consumer/aanf_service.go b/internal/sbi/consumer/aanf_service.go
+new file mode 100644
+index 0000000..a637618
+--- /dev/null
++++ b/internal/sbi/consumer/aanf_service.go
+@@ -0,0 +1,76 @@
++package consumer
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"sync"
++
++	"github.com/free5gc/openapi"
++	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/nrf/NFDiscovery"
++	sbi_metrics "github.com/free5gc/util/metrics/sbi"
++)
++
++type naanfService struct {
++	consumer *Consumer
++
++	mu      sync.RWMutex
++	clients map[string]*Naanf_AKMA.APIClient
++}
++
++func (s *naanfService) getClient(uri string) *Naanf_AKMA.APIClient {
++	s.mu.RLock()
++	client, ok := s.clients[uri]
++	s.mu.RUnlock()
++	if ok {
++		return client
++	}
++	cfg := Naanf_AKMA.NewConfiguration()
++	cfg.SetBasePath(uri)
++	cfg.SetMetrics(sbi_metrics.SbiMetricHook)
++	cfg.SetHTTPClient(http.DefaultClient)
++	client = Naanf_AKMA.NewAPIClient(cfg)
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.clients[uri] = client
++	return client
++}
++
++// AanfUri discovers at the NRF an AAnF that serves the Routing Indicator rid
++// (3GPP TS 33.535 clause 6.7; TS 29.510 table 6.2.3.2.3.1-1).
++func (s *naanfService) AanfUri(rid string) (string, error) {
++	param := &NFDiscovery.SearchNFInstancesRequest{
++		ServiceNames:     []models.ServiceName{models.ServiceName_NAANF_AKMA},
++		RoutingIndicator: &rid,
++	}
++	_, uri, err := s.consumer.SearchNFInstances(s.consumer.Config().NrfUri(), models.ServiceName_NAANF_AKMA,
++		models.NrfNfManagementNfType_AANF, models.NrfNfManagementNfType_NEF, param)
++	if err != nil {
++		return "", fmt.Errorf("AAnF discovery: %w", err)
++	}
++	return uri, nil
++}
++
++// GetAKMAAPPKeyMaterial sends Naanf_AKMA_ApplicationKey_Get to the AAnF at
++// uri (3GPP TS 29.535 clause 4.2.2.3.2).
++func (s *naanfService) GetAKMAAPPKeyMaterial(ctx context.Context, uri string, req models.AkmaAfKeyRequest) (
++	*Naanf_AKMA.GetAKMAAPPKeyMaterialResponse, error,
++) {
++	tokenCtx, pd, err := s.consumer.Context().GetTokenCtx(models.ServiceName_NAANF_AKMA,
++		models.NrfNfManagementNfType_AANF)
++	if err != nil {
++		return nil, fmt.Errorf("access token for naanf-akma: %w", err)
++	}
++	if pd != nil {
++		return nil, fmt.Errorf("access token for naanf-akma: %d %s", pd.Status, pd.Cause)
++	}
++	if tok := tokenCtx.Value(openapi.ContextOAuth2); tok != nil {
++		ctx = context.WithValue(ctx, openapi.ContextOAuth2, tok)
++	}
++	r := &Naanf_AKMA.GetAKMAAPPKeyMaterialRequest{}
++	r.SetAkmaAfKeyRequest(req)
++	return s.getClient(uri).RetrieveTheAKMAApplicationKeyMaterialCollectionApi.GetAKMAAPPKeyMaterial(ctx, r)
++}
+diff --git a/internal/sbi/consumer/consumer.go b/internal/sbi/consumer/consumer.go
+index 2b25af0..77e4efb 100644
+--- a/internal/sbi/consumer/consumer.go
++++ b/internal/sbi/consumer/consumer.go
+@@ -4,6 +4,7 @@ import (
+ 	"github.com/free5gc/nef/internal/logger"
+ 	"github.com/free5gc/nef/pkg/app"
+ 	"github.com/free5gc/openapi"
++	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
+ 	"github.com/free5gc/openapi/nrf/NFDiscovery"
+ 	"github.com/free5gc/openapi/nrf/NFManagement"
+ 	"github.com/free5gc/openapi/pcf/PolicyAuthorization"
+@@ -21,6 +22,7 @@ type Consumer struct {
+ 	*nnrfService
+ 	*npcfService
+ 	*nudrService
++	*naanfService
+ }
+ 
+ func NewConsumer(nef nef) (*Consumer, error) {
+@@ -43,6 +45,11 @@ func NewConsumer(nef nef) (*Consumer, error) {
+ 		consumer: c,
+ 		clients:  make(map[string]*DataRepository.APIClient),
+ 	}
++
++	c.naanfService = &naanfService{
++		consumer: c,
++		clients:  make(map[string]*Naanf_AKMA.APIClient),
++	}
+ 	return c, nil
+ }
+ 
+diff --git a/internal/sbi/processor/akma.go b/internal/sbi/processor/akma.go
+new file mode 100644
+index 0000000..0f5e6dd
+--- /dev/null
++++ b/internal/sbi/processor/akma.go
+@@ -0,0 +1,184 @@
++package processor
++
++import (
++	"errors"
++	"net/http"
++	"net/netip"
++	"time"
++
++	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/akid"
++	"github.com/free5gc/nef/internal/logger"
++	"github.com/free5gc/openapi"
++	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/util/metrics/sbi"
++	"github.com/gin-gonic/gin"
++)
++
++// causeKAkmaNotPresent is the application error of 3GPP TS 29.522
++// table 5.14.7.3-1, relayed from the AAnF.
++const causeKAkmaNotPresent = "K_AKMA_NOT_PRESENT"
++
++// RetrieveAkmaApplicationKey serves the Retrieve custom operation of the
++// AKMA API: the K_AF request of an AF outside the operator network
++// (3GPP TS 29.522 clause 4.4.23.2; TS 33.535 clause 6.3). remote is the
++// source address of the AF.
++func (p *Processor) RetrieveAkmaApplicationKey(c *gin.Context, req *models.AkmaAfKeyRequest, remote netip.Addr) {
++	if pd := validateAkmaAfKeyRequest(req); pd != nil {
++		WriteAkmaProblem(c, pd)
++		return
++	}
++	af, err := afid.Parse(req.AfId)
++	if err != nil {
++		WriteAkmaProblem(c, invalidParam("/afId", "expected \"<FQDN>.<Ua* security protocol id>\""))
++		return
++	}
++	id, err := akid.Parse(req.AKId, akid.DefaultOptions())
++	if err != nil {
++		WriteAkmaProblem(c, invalidParam("/aKId", "not an A-KID \"rid<RID>.<label><A-TID>@<realm>\""))
++		return
++	}
++
++	anonymous := ""
++	if req.AnonInd {
++		anonymous = ", anonymous"
++	}
++	logger.AkmaLog.Infof("K_AF request from AF_ID %s for A-KID %s%s", af.Transport(), req.AKId, anonymous)
++
++	// TS 33.535 clause 6.3 step 2: the NEF authorizes the AF, including the
++	// verification of the AF_ID. No cause is defined for the refusal
++	// (TS 29.522 table 5.14.7.3-1): 403 without cause.
++	if !p.Context().AkmaAfs.Authorize(af, remote) {
++		logger.AkmaLog.Warnf("AF at %s not authorized for AF_ID %s", remote, af.Transport())
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Detail: "AF not authorized by local policy",
++		})
++		return
++	}
++
++	// TS 33.535 clause 6.3 step 2 and clause 6.7: AAnF selection with the
++	// Routing Indicator of the A-KID.
++	uri, err := p.Consumer().AanfUri(string(id.RID))
++	if err != nil {
++		logger.AkmaLog.Warnf("No AAnF for Routing Indicator %s: %v", id.RID, err)
++		WriteAkmaProblem(c, serviceUnavailable("no AAnF available"))
++		return
++	}
++
++	// TS 33.535 clause 6.3 step 3.
++	rsp, err := p.Consumer().GetAKMAAPPKeyMaterial(c.Request.Context(), uri, models.AkmaAfKeyRequest{
++		AfId:    af.Transport(),
++		AKId:    req.AKId,
++		AnonInd: req.AnonInd,
++	})
++	if err != nil {
++		p.relayAanfError(c, af, req.AKId, err)
++		return
++	}
++	// TS 29.522 table 5.14.3.2.2-2: "204 No Content" if the requested data
++	// does not exist; the NEF learns it from a 204 of the AAnF.
++	if rsp.NoContent {
++		logger.AkmaLog.Infof("AAnF answered 204 for A-KID %s, relayed to AF_ID %s", req.AKId, af.Transport())
++		c.Status(http.StatusNoContent)
++		return
++	}
++
++	// TS 33.535 clause 6.3 step 5: "The NEF shall not send the SUPI to the
++	// AF". The GPSI is optional and not provided.
++	data := rsp.AkmaAfKeyData
++	out := models.AkmaAfKeyData{Kaf: data.Kaf, Expiry: data.Expiry}
++	expiry := ""
++	if data.Expiry != nil {
++		expiry = data.Expiry.UTC().Format(time.RFC3339)
++	}
++	logger.AkmaLog.Infof("K_AF for A-KID %s relayed to AF_ID %s, expires %s", req.AKId, af.Transport(), expiry)
++	c.JSON(http.StatusOK, out)
++}
++
++// relayAanfError answers the AF after an error of the AAnF
++// (3GPP TS 29.522 clause 4.4.23.2): K_AKMA_NOT_PRESENT is relayed; for the
++// other errors the clause asks only for "a proper error status code".
++func (p *Processor) relayAanfError(c *gin.Context, af afid.AfID, aKId string, err error) {
++	var apiErr openapi.GenericOpenAPIError
++	if !errors.As(err, &apiErr) {
++		logger.AkmaLog.Warnf("AAnF not reachable for AF_ID %s: %v", af.Transport(), err)
++		WriteAkmaProblem(c, serviceUnavailable("AAnF not reachable"))
++		return
++	}
++	var cause string
++	if opErr, ok := apiErr.Model().(Naanf_AKMA.OperationError); ok {
++		cause = opErr.ProblemDetails.Cause
++	}
++	logger.AkmaLog.Warnf("AAnF answered %d %s for A-KID %s and AF_ID %s", apiErr.ErrorStatus, cause, aKId,
++		af.Transport())
++	switch status := apiErr.ErrorStatus; {
++	case status == http.StatusForbidden && cause == causeKAkmaNotPresent:
++		// "shall relay this response to the AF".
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Cause:  causeKAkmaNotPresent,
++			Detail: "K_AKMA not present at the AAnF",
++		})
++	case status == http.StatusForbidden:
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Detail: "K_AF not provided by the AAnF",
++		})
++	case status >= 400 && status < 500:
++		WriteAkmaProblem(c, openapi.ProblemDetailsSystemFailure("request to the AAnF refused"))
++	default:
++		WriteAkmaProblem(c, serviceUnavailable("AAnF not available"))
++	}
++}
++
++// validateAkmaAfKeyRequest checks the mandatory attributes of
++// TS 29.522 table 5.14.5.3.2-1. "notifUri" belongs to the RoamingRestriction
++// feature, which is not supported, and is ignored.
++func validateAkmaAfKeyRequest(req *models.AkmaAfKeyRequest) *models.ProblemDetails {
++	var params []models.InvalidParam
++	if req.AfId == "" {
++		params = append(params, models.InvalidParam{Param: "/afId", Reason: "required"})
++	}
++	if req.AKId == "" {
++		params = append(params, models.InvalidParam{Param: "/aKId", Reason: "required"})
++	}
++	if len(params) == 0 {
++		return nil
++	}
++	return &models.ProblemDetails{
++		Title:         "Bad Request",
++		Status:        http.StatusBadRequest,
++		Detail:        "mandatory attribute missing",
++		InvalidParams: params,
++	}
++}
++
++func invalidParam(param, reason string) *models.ProblemDetails {
++	return &models.ProblemDetails{
++		Title:         "Bad Request",
++		Status:        http.StatusBadRequest,
++		Detail:        "attribute incorrect",
++		InvalidParams: []models.InvalidParam{{Param: param, Reason: reason}},
++	}
++}
++
++func serviceUnavailable(detail string) *models.ProblemDetails {
++	return &models.ProblemDetails{
++		Title:  "Service Unavailable",
++		Status: http.StatusServiceUnavailable,
++		Detail: detail,
++	}
++}
++
++// WriteAkmaProblem answers with a ProblemDetails in "application/problem+json"
++// (3GPP TS 29.122 table 5.2.6-1, NOTE 2).
++func WriteAkmaProblem(c *gin.Context, pd *models.ProblemDetails) {
++	c.Set(sbi.IN_PB_DETAILS_CTX_STR, pd.Cause)
++	c.Header("Content-Type", "application/problem+json")
++	c.JSON(int(pd.Status), pd)
++}
+diff --git a/internal/sbi/processor/akma_test.go b/internal/sbi/processor/akma_test.go
+new file mode 100644
+index 0000000..11ef638
+--- /dev/null
++++ b/internal/sbi/processor/akma_test.go
+@@ -0,0 +1,233 @@
++package processor
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/netip"
++	"strings"
++	"testing"
++
++	nef_context "github.com/free5gc/nef/internal/context"
++	"github.com/free5gc/nef/internal/logger"
++	"github.com/free5gc/nef/pkg/factory"
++	"github.com/free5gc/openapi/models"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"gopkg.in/h2non/gock.v1"
++)
++
++const (
++	akmaAfId   = "af1.akma.example.FF00000001"
++	akmaAfAddr = "192.0.2.10"
++	// A-KID and K_AF of the vector "testbed-ue" (RID 0000).
++	akmaAKId    = "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org"
++	akmaKaf     = "00c16845c2e4e1256755b84bb06d94e2e659d8ba53c59e874fc149bffd5ea04b"
++	akmaSupi    = "imsi-208930000000001"
++	akmaAanfUri = "http://127.0.0.30:8010"
++)
++
++func setAkmaPolicy(t *testing.T) {
++	t.Helper()
++	policy, err := nef_context.NewAkmaAfPolicy([]factory.AkmaAuthorizedAf{
++		{AfId: akmaAfId, SourceAddresses: []string{akmaAfAddr}},
++	})
++	require.NoError(t, err)
++	nefApp.Context().AkmaAfs = policy
++}
++
++// initNRFDiscAANFStub answers the AAnF discovery for the Routing Indicator
++// 0000 (3GPP TS 29.510 table 6.2.3.2.3.1-1).
++func initNRFDiscAANFStub(found bool) {
++	result := models.SearchResult{ValidityPeriod: 100}
++	if found {
++		result.NfInstances = []models.NrfNfDiscoveryNfProfile{{
++			NfInstanceId: "aanf-unit-testing",
++			NfType:       "AANF",
++			NfStatus:     "REGISTERED",
++			NfServices: []models.NrfNfDiscoveryNfService{{
++				ServiceInstanceId: "naanf-akma",
++				ServiceName:       "naanf-akma",
++				Versions:          []models.NfServiceVersion{{ApiVersionInUri: "v1", ApiFullVersion: "1.2.0"}},
++				Scheme:            "http",
++				NfServiceStatus:   "REGISTERED",
++				IpEndPoints: []models.IpEndPoint{{
++					Ipv4Address: "127.0.0.30",
++					Transport:   "TCP",
++					Port:        8010,
++				}},
++			}},
++		}}
++	}
++	gock.New("http://127.0.0.10:8000/nnrf-disc/v1").
++		Get("/nf-instances").
++		MatchParam("target-nf-type", "AANF").
++		MatchParam("requester-nf-type", "NEF").
++		MatchParam("routing-indicator", "0000").
++		Reply(http.StatusOK).
++		JSON(result)
++}
++
++// initAANFRetrieveStub answers Naanf_AKMA_ApplicationKey_Get for the request
++// the NEF must send.
++func initAANFRetrieveStub(anon bool, status int, body string) {
++	req := map[string]any{"afId": akmaAfId, "aKId": akmaAKId}
++	if anon {
++		req["anonInd"] = true
++	}
++	rsp := gock.New(akmaAanfUri + "/naanf-akma/v1").
++		Post("/retrieve-applicationkey").
++		MatchType("json").
++		JSON(req).
++		Reply(status)
++	switch {
++	case status == http.StatusOK:
++		rsp.SetHeader("Content-Type", "application/json").BodyString(body)
++	case body != "":
++		rsp.SetHeader("Content-Type", "application/problem+json").BodyString(body)
++	}
++}
++
++func akmaRetrieve(req models.AkmaAfKeyRequest, remote string) *httptest.ResponseRecorder {
++	w := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(w)
++	c.Request = httptest.NewRequest(http.MethodPost, factory.AkmaResUriPrefix+"/retrieve", nil)
++	nefApp.Processor().RetrieveAkmaApplicationKey(c, &req, netip.MustParseAddr(remote))
++	c.Writer.WriteHeaderNow()
++	return w
++}
++
++func akmaProblem(t *testing.T, w *httptest.ResponseRecorder) models.ProblemDetails {
++	t.Helper()
++	require.Equal(t, "application/problem+json", w.Header().Get("Content-Type"))
++	var pd models.ProblemDetails
++	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &pd))
++	require.Equal(t, int32(w.Code), pd.Status)
++	return pd
++}
++
++func TestRetrieveAkmaApplicationKey(t *testing.T) {
++	setAkmaPolicy(t)
++	const aanfOK = `{"kaf":"` + akmaKaf + `","expiry":"2026-10-19T20:00:00Z","supi":"` + akmaSupi + `"}`
++
++	t.Run("K_AF relayed without the SUPI", func(t *testing.T) {
++		initNRFDiscAANFStub(true)
++		initAANFRetrieveStub(false, http.StatusOK, aanfOK)
++
++		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
++		require.Equal(t, http.StatusOK, w.Code)
++		var rsp map[string]any
++		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rsp))
++		require.Equal(t, akmaKaf, rsp["kaf"])
++		require.Equal(t, "2026-10-19T20:00:00Z", rsp["expiry"])
++		// TS 33.535 clause 6.3 step 5.
++		require.NotContains(t, rsp, "supi")
++		require.NotContains(t, rsp, "gpsi")
++	})
++
++	t.Run("anonymous access relayed to the AAnF", func(t *testing.T) {
++		initNRFDiscAANFStub(true)
++		initAANFRetrieveStub(true, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
++
++		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId, AnonInd: true}, akmaAfAddr)
++		require.Equal(t, http.StatusOK, w.Code)
++		require.NotContains(t, w.Body.String(), "supi")
++		require.NotContains(t, w.Body.String(), "gpsi")
++	})
++
++	t.Run("AF not authorized", func(t *testing.T) {
++		cases := map[string]models.AkmaAfKeyRequest{
++			"192.0.2.10":        {AfId: "af2.akma.example.FF00000001", AKId: akmaAKId},
++			"192.0.2.99":        {AfId: akmaAfId, AKId: akmaAKId},
++			"::ffff:192.0.2.99": {AfId: akmaAfId, AKId: akmaAKId},
++		}
++		for remote, req := range cases {
++			w := akmaRetrieve(req, remote)
++			require.Equal(t, http.StatusForbidden, w.Code, remote)
++			require.Empty(t, akmaProblem(t, w).Cause)
++		}
++	})
++
++	t.Run("bad requests", func(t *testing.T) {
++		cases := []struct {
++			req   models.AkmaAfKeyRequest
++			param string
++		}{
++			{models.AkmaAfKeyRequest{AKId: akmaAKId}, "/afId"},
++			{models.AkmaAfKeyRequest{AfId: akmaAfId}, "/aKId"},
++			{models.AkmaAfKeyRequest{AfId: "af1.akma.example", AKId: akmaAKId}, "/afId"},
++			{models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: "not-an-akid"}, "/aKId"},
++		}
++		for _, tc := range cases {
++			w := akmaRetrieve(tc.req, akmaAfAddr)
++			require.Equal(t, http.StatusBadRequest, w.Code)
++			pd := akmaProblem(t, w)
++			require.Len(t, pd.InvalidParams, 1)
++			require.Equal(t, tc.param, pd.InvalidParams[0].Param)
++		}
++	})
++
++	errorCases := []struct {
++		name      string
++		status    int
++		body      string
++		wantCode  int
++		wantCause string
++	}{
++		{"K_AKMA_NOT_PRESENT relayed", http.StatusForbidden,
++			`{"status":403,"cause":"K_AKMA_NOT_PRESENT"}`, http.StatusForbidden, "K_AKMA_NOT_PRESENT"},
++		{"NEF not authorized at the AAnF", http.StatusForbidden,
++			`{"status":403,"detail":"AF_ID not accepted from this NEF"}`, http.StatusForbidden, ""},
++		{"other 4xx of the AAnF", http.StatusBadRequest,
++			`{"status":400,"cause":"MANDATORY_IE_INCORRECT"}`, http.StatusInternalServerError, "SYSTEM_FAILURE"},
++		{"AAnF unavailable", http.StatusServiceUnavailable, "", http.StatusServiceUnavailable, ""},
++	}
++	for _, tc := range errorCases {
++		t.Run(tc.name, func(t *testing.T) {
++			initNRFDiscAANFStub(true)
++			initAANFRetrieveStub(false, tc.status, tc.body)
++
++			w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
++			require.Equal(t, tc.wantCode, w.Code)
++			require.Equal(t, tc.wantCause, akmaProblem(t, w).Cause)
++		})
++	}
++
++	t.Run("204 of the AAnF relayed", func(t *testing.T) {
++		initNRFDiscAANFStub(true)
++		initAANFRetrieveStub(false, http.StatusNoContent, "")
++
++		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
++		require.Equal(t, http.StatusNoContent, w.Code)
++		require.Empty(t, w.Body.String())
++	})
++
++	t.Run("no AAnF at the NRF", func(t *testing.T) {
++		initNRFDiscAANFStub(false)
++
++		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
++		require.Equal(t, http.StatusServiceUnavailable, w.Code)
++		akmaProblem(t, w)
++	})
++}
++
++// The NEF never writes K_AF to the log.
++func TestAkmaNoKeyInLogs(t *testing.T) {
++	setAkmaPolicy(t)
++	var buf bytes.Buffer
++	out := logger.Log.Out
++	logger.Log.SetOutput(&buf)
++	defer logger.Log.SetOutput(out)
++
++	initNRFDiscAANFStub(true)
++	initAANFRetrieveStub(false, http.StatusOK,
++		`{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z","supi":"`+akmaSupi+`"}`)
++	w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
++	require.Equal(t, http.StatusOK, w.Code)
++
++	logs := buf.String()
++	require.Contains(t, logs, "relayed to AF_ID "+akmaAfId)
++	require.False(t, strings.Contains(strings.ToLower(logs), akmaKaf), "K_AF in the log")
++	require.NotContains(t, logs, akmaSupi)
++}
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index be49055..9e614c2 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -94,6 +94,15 @@ func NewServer(nef nef, tlsKeyLogPath string) (*Server, error) {
+ 				authCheck.Check(c, s.Context())
+ 			})
+ 			applyRoutes(tiGroup, s.getTrafficInfluenceRoutes())
++
++		case factory.ServiceAkma:
++			// 3gpp-akma is an AF-facing API (3GPP TS 29.522 clause 5.14).
++			authCheck := nef_util.NewRouterAuthorizationCheck(models.ServiceName_3GPP_AKMA)
++			akmaGroup := s.router.Group(factory.AkmaResUriPrefix)
++			akmaGroup.Use(func(c *gin.Context) {
++				authCheck.Check(c, s.Context())
++			})
++			applyRoutes(akmaGroup, s.getAkmaRoutes())
+ 		}
+ 	}
+ 
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 218fc10..f47e8a6 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -14,6 +14,7 @@ import (
+ 
+ 	"github.com/asaskevich/govalidator"
+ 	"github.com/davecgh/go-spew/spew"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
+ 	"github.com/free5gc/nef/internal/logger"
+ 	"github.com/free5gc/openapi/models"
+ 	"github.com/google/uuid"
+@@ -25,6 +26,8 @@ const (
+ 	ServiceNefPfd      string = string(models.ServiceName_NNEF_PFDMANAGEMENT)
+ 	ServiceNefOam      string = "nnef-oam"
+ 	ServiceNefCallback string = "nnef-callback"
++	// ServiceAkma is the AKMA API of the NEF (3GPP TS 29.522 clause 5.14).
++	ServiceAkma string = string(models.ServiceName_3GPP_AKMA)
+ )
+ 
+ const (
+@@ -47,6 +50,7 @@ const (
+ 	NefPfdMngResUriPrefix        = "/" + ServiceNefPfd + "/v1"
+ 	NefOamResUriPrefix           = "/" + ServiceNefOam + "/v1"
+ 	NefCallbackResUriPrefix      = "/" + ServiceNefCallback + "/v1"
++	AkmaResUriPrefix             = "/" + ServiceAkma + "/v1"
+ )
+ 
+ type Config struct {
+@@ -90,6 +94,38 @@ type Configuration struct {
+ 	NrfUri       string    `yaml:"nrfUri,omitempty" valid:"required"`
+ 	NrfCertPem   string    `yaml:"nrfCertPem,omitempty" valid:"optional"`
+ 	ServiceList  []Service `yaml:"serviceList,omitempty" valid:"required"`
++	Akma         *Akma     `yaml:"akma,omitempty" valid:"optional"`
++}
++
++// Akma configures the AKMA API (3GPP TS 29.522 clause 5.14).
++type Akma struct {
++	// AuthorizedAfs is the local policy with which the NEF authorizes the
++	// AFs that request K_AF (3GPP TS 33.535 clause 6.3 step 2).
++	AuthorizedAfs []AkmaAuthorizedAf `yaml:"authorizedAfs,omitempty" valid:"optional"`
++}
++
++// AkmaAuthorizedAf binds an AF_ID to the source addresses of the AF, so that
++// an AF cannot request the K_AF of another AF_ID.
++type AkmaAuthorizedAf struct {
++	AfId            string   `yaml:"afId" valid:"required"`
++	SourceAddresses []string `yaml:"sourceAddresses" valid:"required"`
++}
++
++func (a *Akma) validate() error {
++	for i, af := range a.AuthorizedAfs {
++		if _, err := afid.Parse(af.AfId); err != nil {
++			return fmt.Errorf("invalid akma.authorizedAfs[%d].afId: expected \"<FQDN>.<10 hex>\"", i)
++		}
++		if len(af.SourceAddresses) == 0 {
++			return fmt.Errorf("akma.authorizedAfs[%d]: at least one source address is required", i)
++		}
++		for j, addr := range af.SourceAddresses {
++			if !govalidator.IsIP(addr) {
++				return fmt.Errorf("invalid akma.authorizedAfs[%d].sourceAddresses[%d]", i, j)
++			}
++		}
++	}
++	return nil
+ }
+ 
+ type Logger struct {
+@@ -129,15 +165,21 @@ func (c *Configuration) validate() (bool, error) {
+ 		case ServiceNefOam:
+ 		case ServiceTraffInflu:
+ 		case ServiceNefCallback:
++		case ServiceAkma:
+ 		default:
+ 			err := errors.New(
+ 				"invalid serviceList[" + strconv.Itoa(i) + "]: " +
+ 					s.ServiceName + ", should be " + ServiceNefPfd + ", " +
+-					ServiceNefOam + ", " + ServiceTraffInflu + ", or " + ServiceNefCallback,
++					ServiceNefOam + ", " + ServiceTraffInflu + ", " + ServiceNefCallback + ", or " + ServiceAkma,
+ 			)
+ 			return false, appendInvalid(err)
+ 		}
+ 	}
++	if c.Akma != nil {
++		if err := c.Akma.validate(); err != nil {
++			return false, appendInvalid(err)
++		}
++	}
+ 	result, err := govalidator.ValidateStruct(c)
+ 	return result, appendInvalid(err)
+ }
+@@ -512,6 +554,17 @@ func (c *Config) ServiceList() []Service {
+ 	return nil
+ }
+ 
++// AkmaAuthorizedAfs returns the AFs that may request K_AF through the NEF.
++func (c *Config) AkmaAuthorizedAfs() []AkmaAuthorizedAf {
++	c.RLock()
++	defer c.RUnlock()
++
++	if c.Configuration.Akma == nil {
++		return nil
++	}
++	return c.Configuration.Akma.AuthorizedAfs
++}
++
+ func (c *Config) GetCertPemPath() string {
+ 	c.RLock()
+ 	defer c.RUnlock()
+@@ -573,6 +626,8 @@ func (c *Config) ServiceUri(name string) string {
+ 		return c.SbiUri() + NefPfdMngResUriPrefix
+ 	case ServiceNefOam:
+ 		return c.SbiUri() + NefOamResUriPrefix
++	case ServiceAkma:
++		return c.SbiUri() + AkmaResUriPrefix
+ 	case ServiceNefCallback:
+ 		return c.SbiUri() + NefCallbackResUriPrefix
+ 	default:

@@ -1,0 +1,4 @@
+/free5gc/build/
+/af/build/
+__pycache__/
+*.pyc

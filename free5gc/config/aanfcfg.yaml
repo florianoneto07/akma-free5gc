@@ -1,0 +1,40 @@
+info:
+  version: 1.0.0
+  description: AANF initial local configuration
+
+configuration:
+  # Fixed NF instance ID (UUID v4). With OAuth2 enabled, the NRF of free5GC
+  # signs a certificate cert/aanf_<nfInstanceId>.pem at each new registration;
+  # a fixed ID keeps it to one file.
+  nfInstanceId: b6f417f0-06fa-4c38-b291-33066f5a5fe7
+  sbi: # Service-based interface information
+    scheme: http # the protocol for sbi (http or https); http is h2c, without TLS
+    registerIPv4: 192.168.16.130 # IP used to register to NRF; reachable from the AF host
+    bindingIPv4: 192.168.16.130 # IP used to bind the service
+    port: 8010 # port used to bind the service; not used by any free5GC NF (8000 is their SBI port)
+  serviceNameList: # the SBI services provided by this AANF
+    - naanf-akma # Naanf_AKMA service (TS 29.535)
+  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
+  nrfCertPem: cert/nrf.pem # NRF certificate, used to verify OAuth2 access tokens
+  plmnSupportList: # the PLMNs (Network Identifier) of this AANF
+    - mcc: "208" # Mobile Country Code (3 digits string, digit: 0~9)
+      mnc: "93" # Mobile Network Code (2 or 3 digits string, digit: 0~9)
+  routingIndicators: # published in AanfInfo; quote them, every digit is significant
+    - "0000"
+  akma:
+    kafLifetime: 1h # K_AF lifetime (operator policy, TS 33.535 cl. 5.2)
+    roamingStatusSubscription: false # must stay false: not implemented (TS 33.535 cl. 6.2.1 step 5)
+    authorizedAfs: # local policy, TS 33.535 cl. 6.2.1 step 2
+      - afId: af1.akma.example.FF00000001 # "<FQDN>.<Ua* security protocol id>"
+        sourceAddresses: # addresses from which this AF may request its K_AF
+          - 192.168.16.129
+    authorizedNefs: # K_AF requests relayed by a NEF for external AFs, TS 33.535 cl. 6.3
+      - sourceAddresses: # addresses of the NEF
+          - 192.168.16.130
+        afIds: # external AF_IDs accepted from this NEF
+          - af1.akma.example.FF00000001
+
+logger: # log output setting
+  enable: true # true or false
+  level: info # how detailed to output, value: trace, debug, info, warn, error, fatal, panic
+  reportCaller: false # enable the caller report or not, value: true or false

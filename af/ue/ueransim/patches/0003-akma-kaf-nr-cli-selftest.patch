@@ -1,0 +1,320 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 08ec1fd..e4babf1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -39,6 +39,15 @@ target_compile_options(nr-ue PRIVATE -Wall -Wextra -pedantic)
+ target_link_libraries(nr-ue common-lib)
+ target_link_libraries(nr-ue ue)
+ 
++#################### AKMA SELF-TEST ####################
++
++add_executable(nr-akma-selftest src/akma_selftest.cpp)
++target_link_libraries(nr-akma-selftest pthread)
++target_compile_options(nr-akma-selftest PRIVATE -Wall -Wextra -pedantic)
++
++target_link_libraries(nr-akma-selftest common-lib)
++target_link_libraries(nr-akma-selftest ue)
++
+ ###################### IF BINDER ######################
+ add_library(devbnd SHARED src/binder.cpp)
+ target_compile_options(devbnd PRIVATE -D_GNU_SOURCE -Wall -Wextra)
+diff --git a/src/akma_selftest.cpp b/src/akma_selftest.cpp
+new file mode 100644
+index 0000000..85de76a
+--- /dev/null
++++ b/src/akma_selftest.cpp
+@@ -0,0 +1,97 @@
++//
++// AKMA self-test of the ME: checks the K_AKMA, A-TID, A-KID and K_AF derivations of nr-ue (3GPP TS 33.535 Annex A)
++// against the AKMA test vectors (shared/akma/testdata/vectors.json).
++//
++// Usage: nr-akma-selftest <vectors.json>
++//
++
++#include <cstdio>
++#include <exception>
++#include <string>
++
++#include <ue/nas/keys.hpp>
++#include <yaml-cpp/yaml.h>
++
++using namespace nr::ue;
++
++static std::string Lower(std::string s)
++{
++    for (auto &c : s)
++        if (c >= 'A' && c <= 'F')
++            c = static_cast<char>(c - 'A' + 'a');
++    return s;
++}
++
++int main(int argc, char **argv)
++{
++    if (argc != 2)
++    {
++        std::fprintf(stderr, "usage: %s <vectors.json>\n", argv[0]);
++        return 2;
++    }
++
++    YAML::Node doc;
++    try
++    {
++        doc = YAML::LoadFile(argv[1]); // JSON is read as YAML flow style
++    }
++    catch (const std::exception &e)
++    {
++        std::fprintf(stderr, "%s: %s\n", argv[1], e.what());
++        return 2;
++    }
++
++    int passed = 0, refused = 0, failed = 0;
++    for (const auto &v : doc["vectors"])
++    {
++        auto name = v["name"].as<std::string>();
++        auto imsi = v["supi_kdf_param"].as<std::string>();
++        auto kAusf = OctetString::FromHex(v["k_ausf"].as<std::string>());
++        auto mncStr = v["mnc"].as<std::string>();
++        Plmn hplmn{};
++        hplmn.mcc = std::stoi(v["mcc"].as<std::string>());
++        hplmn.mnc = std::stoi(mncStr);
++        hplmn.isLongMnc = mncStr.size() == 3;
++        auto fqdn = v["fqdn"].as<std::string>();
++        auto uaStarId = OctetString::FromHex(v["ua_star_id"].as<std::string>());
++
++        auto kAkma = keys::CalculateKAkma(kAusf, imsi);
++        auto aKid = keys::ConstructAKid(v["rid"].as<std::string>(), keys::CalculateATid(kAusf, imsi), hplmn);
++
++        bool ok = true;
++        if (Lower(kAkma.toHexString()) != Lower(v["k_akma"].as<std::string>()))
++        {
++            std::printf("FAIL %s: K_AKMA\n", name.c_str());
++            ok = false;
++        }
++        if (aKid != v["a_kid"]["base64"].as<std::string>())
++        {
++            std::printf("FAIL %s: A-KID %s\n", name.c_str(), aKid.c_str());
++            ok = false;
++        }
++        if (!keys::IsValidAfFqdn(fqdn))
++        {
++            // No NFKC in the UE (TS 33.220 B.2.1.2): a non-ASCII FQDN is refused.
++            std::printf("%s %s: K_AF not derived, FQDN not ASCII (no NFKC in the UE)\n", ok ? "REFUSED" : "FAIL", name.c_str());
++            if (ok)
++                refused++;
++            else
++                failed++;
++            continue;
++        }
++        if (Lower(keys::CalculateKAf(kAkma, fqdn, uaStarId).toHexString()) != Lower(v["k_af"].as<std::string>()))
++        {
++            std::printf("FAIL %s: K_AF\n", name.c_str());
++            ok = false;
++        }
++        if (ok)
++        {
++            std::printf("PASS %s\n", name.c_str());
++            passed++;
++        }
++        else
++            failed++;
++    }
++    std::printf("%d passed, %d refused (FQDN not ASCII), %d failed\n", passed, refused, failed);
++    return failed == 0 && passed > 0 ? 0 : 1;
++}
+diff --git a/src/ue/nas/keys.hpp b/src/ue/nas/keys.hpp
+index f260714..ffd8d4c 100644
+--- a/src/ue/nas/keys.hpp
++++ b/src/ue/nas/keys.hpp
+@@ -97,4 +97,16 @@ std::string ConstructAKid(const std::string &routingIndicator, const OctetString
+  */
+ void DeriveAkmaKeys(const UeConfig &ueConfig, NasSecurityContext &nasSecurityContext);
+ 
++/**
++ * Checks that an AF FQDN can enter the K_AF derivation in the UE: an ASCII DNS name. The UE does not apply NFKC
++ * (3GPP TS 33.220 Annex B.2.1.2), so non-ASCII names are refused
++ */
++bool IsValidAfFqdn(const std::string &fqdn);
++
++/**
++ * Calculates K_AF from K_AKMA as specified in 3GPP TS 33.535 Annex A.4: P0 is the AF_ID, the FQDN of the AF followed
++ * by the five octets of the Ua* security protocol identifier (3GPP TS 33.220 Annex H)
++ */
++OctetString CalculateKAf(const OctetString &kAkma, const std::string &afFqdn, const OctetString &uaStarId);
++
+ } // namespace nr::ue::keys
+diff --git a/src/ue/nas/keys.cpp b/src/ue/nas/keys.cpp
+index 89073cb..9cebc49 100644
+--- a/src/ue/nas/keys.cpp
++++ b/src/ue/nas/keys.cpp
+@@ -19,6 +19,7 @@ static const int N_UP_int_alg = 0x06;
+ 
+ static const int FC_K_AKMA = 0x80;
+ static const int FC_A_TID = 0x81;
++static const int FC_K_AF = 0x82;
+ 
+ static std::string EncodeBase64(const OctetString &data)
+ {
+@@ -214,4 +215,37 @@ void DeriveAkmaKeys(const UeConfig &ueConfig, NasSecurityContext &nasSecurityCon
+     keys.aKid = ConstructAKid(routingIndicator, CalculateATid(keys.kAusf, imsi), ueConfig.hplmn);
+ }
+ 
++bool IsValidAfFqdn(const std::string &fqdn)
++{
++    if (fqdn.empty() || fqdn.size() > 253)
++        return false;
++    size_t start = 0;
++    while (true)
++    {
++        size_t end = fqdn.find('.', start);
++        std::string label = fqdn.substr(start, end == std::string::npos ? std::string::npos : end - start);
++        if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-')
++            return false;
++        for (char c : label)
++        {
++            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'))
++                return false;
++        }
++        if (end == std::string::npos)
++            return true;
++        start = end + 1;
++    }
++}
++
++OctetString CalculateKAf(const OctetString &kAkma, const std::string &afFqdn, const OctetString &uaStarId)
++{
++    if (!IsValidAfFqdn(afFqdn))
++        throw std::runtime_error("AF FQDN is not an ASCII DNS name");
++    if (uaStarId.length() != 5)
++        throw std::runtime_error("Ua* security protocol identifier must have 5 octets");
++    OctetString s[1];
++    s[0] = OctetString::Concat(crypto::EncodeKdfString(afFqdn), uaStarId);
++    return crypto::CalculateKdfKey(kAkma, FC_K_AF, s, 1);
++}
++
+ } // namespace nr::ue::keys
+\ No newline at end of file
+diff --git a/src/lib/app/cli_cmd.hpp b/src/lib/app/cli_cmd.hpp
+index fa29239..adeb362 100644
+--- a/src/lib/app/cli_cmd.hpp
++++ b/src/lib/app/cli_cmd.hpp
+@@ -56,8 +56,13 @@ struct UeCliCommand
+         DE_REGISTER,
+         RLS_STATE,
+         COVERAGE,
++        AKMA_KAF,
+     } present;
+ 
++    // AKMA_KAF
++    std::string afFqdn{};
++    std::string uaStarId{};
++
+     // DE_REGISTER
+     EDeregCause deregCause{};
+ 
+diff --git a/src/lib/app/cli_cmd.cpp b/src/lib/app/cli_cmd.cpp
+index ca6325e..563ba14 100644
+--- a/src/lib/app/cli_cmd.cpp
++++ b/src/lib/app/cli_cmd.cpp
+@@ -167,6 +167,9 @@ static OrderedMap<std::string, CmdEntry> g_ueCmdEntries = {
+     {"ps-release-all", {"Trigger PDU session release procedures for all active sessions", "", DefaultDesc, false}},
+     {"deregister",
+      {"Perform a de-registration by the UE", "<normal|disable-5g|switch-off|remove-sim>", DefaultDesc, true}},
++    {"akma-kaf",
++     {"Derive the AKMA Application Key (K_AF) for an AF and show it with the A-KID",
++      "<af-fqdn> [<ua*-security-protocol-id>]", DefaultDesc, true}},
+ };
+ 
+ static std::unique_ptr<GnbCliCommand> GnbCliParseImpl(const std::string &subCmd, const opt::OptionsResult &options,
+@@ -331,6 +334,18 @@ static std::unique_ptr<UeCliCommand> UeCliParseImpl(const std::string &subCmd, c
+     {
+         return std::make_unique<UeCliCommand>(UeCliCommand::COVERAGE);
+     }
++    else if (subCmd == "akma-kaf")
++    {
++        auto cmd = std::make_unique<UeCliCommand>(UeCliCommand::AKMA_KAF);
++        if (options.positionalCount() == 0)
++            CMD_ERR("AF FQDN is expected")
++        if (options.positionalCount() > 2)
++            CMD_ERR("Only the AF FQDN and the Ua* security protocol identifier are expected")
++        cmd->afFqdn = options.getPositional(0);
++        // Private-range identifier of the simplified Ua* protocol (TS 33.220 H.2 NOTE 2)
++        cmd->uaStarId = options.positionalCount() == 2 ? options.getPositional(1) : "FF00000001";
++        return cmd;
++    }
+ 
+     return nullptr;
+ }
+diff --git a/src/ue/app/cmd_handler.cpp b/src/ue/app/cmd_handler.cpp
+index d2ed0c6..9b47f92 100644
+--- a/src/ue/app/cmd_handler.cpp
++++ b/src/ue/app/cmd_handler.cpp
+@@ -8,7 +8,10 @@
+ 
+ #include "cmd_handler.hpp"
+ 
++#include <cctype>
++
+ #include <ue/app/task.hpp>
++#include <ue/nas/keys.hpp>
+ #include <ue/nas/task.hpp>
+ #include <ue/rls/task.hpp>
+ #include <ue/rrc/task.hpp>
+@@ -34,6 +37,14 @@ static std::string SignalDescription(int dbm)
+ namespace nr::ue
+ {
+ 
++static std::string AsciiCase(std::string s, bool upper)
++{
++    for (auto &c : s)
++        c = static_cast<char>(upper ? std::toupper(static_cast<unsigned char>(c))
++                                    : std::tolower(static_cast<unsigned char>(c)));
++    return s;
++}
++
+ void UeCmdHandler::sendResult(const InetAddress &address, const std::string &output)
+ {
+     m_base->cliCallbackTask->push(std::make_unique<app::NwCliSendResponse>(address, output, false));
+@@ -164,6 +175,43 @@ void UeCmdHandler::handleCmdImpl(NmUeCliCommand &msg)
+         sendResult(msg.address, ToJson(m_base->nasTask->timers).dumpYaml());
+         break;
+     }
++    case app::UeCliCommand::AKMA_KAF: {
++        // TS 33.535 cl. 6.2.1 step 1: the ME derives K_AF for the AF and hands the A-KID and K_AF to the application.
++        // K_AKMA never leaves the ME (TS 33.535 cl. 4.4.3).
++        if (!m_base->config->akma)
++        {
++            sendError(msg.address, "AKMA is not enabled in the UE configuration");
++            break;
++        }
++        auto &nsCtx = m_base->nasTask->usim->m_currentNsCtx;
++        if (!nsCtx || nsCtx->keys.aKid.empty())
++        {
++            sendError(msg.address, "No AKMA key material: no successful primary authentication");
++            break;
++        }
++        if (!keys::IsValidAfFqdn(msg.cmd->afFqdn))
++        {
++            sendError(msg.address, "AF FQDN must be an ASCII DNS name (no NFKC in the UE)");
++            break;
++        }
++        std::string uaStarId = AsciiCase(msg.cmd->uaStarId, true);
++        if (uaStarId.size() != 10 || uaStarId.find_first_not_of("0123456789ABCDEF") != std::string::npos)
++        {
++            sendError(msg.address, "Ua* security protocol identifier must be 10 hexadecimal digits");
++            break;
++        }
++        auto kAf = keys::CalculateKAf(nsCtx->keys.kAkma, msg.cmd->afFqdn, OctetString::FromHex(uaStarId));
++        std::string afId = msg.cmd->afFqdn + "." + uaStarId;
++        m_base->logBase->makeUniqueLogger(m_base->config->getLoggerPrefix() + "app")
++            ->info("AKMA K_AF derived for AF_ID[%s], A-KID[%s]", afId.c_str(), nsCtx->keys.aKid.c_str());
++        Json json = Json::Obj({
++            {"a-kid", nsCtx->keys.aKid},
++            {"af-id", afId},
++            {"k-af", AsciiCase(kAf.toHexString(), false)},
++        });
++        sendResult(msg.address, json.dumpYaml());
++        break;
++    }
+     case app::UeCliCommand::DE_REGISTER: {
+         m_base->nasTask->mm->deregistrationRequired(msg.cmd->deregCause);
+ 

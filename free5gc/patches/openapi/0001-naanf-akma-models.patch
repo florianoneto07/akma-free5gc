@@ -1,0 +1,146 @@
+diff -ruN a/models/model_akma_af_key_data.go b/models/model_akma_af_key_data.go
+--- a/models/model_akma_af_key_data.go
++++ b/models/model_akma_af_key_data.go
+@@ -0,0 +1,31 @@
++/*
++ * 3gpp-akma
++ *
++ * API for AKMA.
++ *
++ * Source file: 3GPP TS 29.522 V19.7.0; 5G System; Network Exposure Function Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.522/
++ *
++ * API version: 1.1.0
++ */
++
++package models
++
++import (
++	"time"
++)
++
++// AkmaAfKeyData represents AKMA Application Key information data (TS 29.522
++// clause 5.14.5.3.3), reused by Naanf_AKMA (TS 29.535).
++type AkmaAfKeyData struct {
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SuppFeat string `json:"suppFeat,omitempty" yaml:"suppFeat" bson:"suppFeat,omitempty"`
++	// GPSI of the UE, formatted as defined for type Gpsi in TS 29.571.
++	Gpsi string `json:"gpsi,omitempty" yaml:"gpsi" bson:"gpsi,omitempty"`
++	// Expiration time of K_AF (DateTime of TS 29.122).
++	Expiry *time.Time `json:"expiry" yaml:"expiry" bson:"expiry,omitempty"`
++	// K_AF.
++	Kaf string `json:"kaf" yaml:"kaf" bson:"kaf,omitempty"`
++	// SUPI of the UE, formatted as defined for type Supi in TS 29.571.
++	Supi string `json:"supi,omitempty" yaml:"supi" bson:"supi,omitempty"`
++}
+diff -ruN a/models/model_akma_af_key_request.go b/models/model_akma_af_key_request.go
+--- a/models/model_akma_af_key_request.go
++++ b/models/model_akma_af_key_request.go
+@@ -0,0 +1,28 @@
++/*
++ * 3gpp-akma
++ *
++ * API for AKMA.
++ *
++ * Source file: 3GPP TS 29.522 V19.7.0; 5G System; Network Exposure Function Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.522/
++ *
++ * API version: 1.1.0
++ */
++
++package models
++
++// AkmaAfKeyRequest represents the parameters to request the retrieval of AKMA
++// Application Key information (TS 29.522 clause 5.14.5.3.2), reused by
++// Naanf_AKMA (TS 29.535).
++type AkmaAfKeyRequest struct {
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SuppFeat string `json:"suppFeat,omitempty" yaml:"suppFeat" bson:"suppFeat,omitempty"`
++	// Notification URI for AKMA service disablement (RoamingRestriction feature).
++	NotifUri string `json:"notifUri,omitempty" yaml:"notifUri" bson:"notifUri,omitempty"`
++	// AF identifier, type AfId: "<FQDN>.<Ua* security protocol id>".
++	AfId string `json:"afId" yaml:"afId" bson:"afId,omitempty"`
++	// A-KID, type AKId.
++	AKId string `json:"aKId" yaml:"aKId" bson:"aKId,omitempty"`
++	// Indicates whether an anonymous user access is requested. Default value is false if omitted.
++	AnonInd bool `json:"anonInd,omitempty" yaml:"anonInd" bson:"anonInd,omitempty"`
++}
+diff -ruN a/models/model_akma_key_info.go b/models/model_akma_key_info.go
+--- a/models/model_akma_key_info.go
++++ b/models/model_akma_key_info.go
+@@ -0,0 +1,28 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package models
++
++// AkmaKeyInfo represents AKMA related key material (TS 29.535 clause 5.1.6.2.2).
++// Exactly one of Supi and Gpsi is present; without the AKMA_GPSI_Support
++// feature only Supi is allowed.
++type AkmaKeyInfo struct {
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SuppFeat string `json:"suppFeat,omitempty" yaml:"suppFeat" bson:"suppFeat,omitempty"`
++	// SUPI of the UE, formatted as defined for type Supi in TS 29.571.
++	Supi string `json:"supi,omitempty" yaml:"supi" bson:"supi,omitempty"`
++	// GPSI of the UE, formatted as defined for type Gpsi in TS 29.571.
++	Gpsi string `json:"gpsi,omitempty" yaml:"gpsi" bson:"gpsi,omitempty"`
++	// A-KID, type AKId of TS 29.522.
++	AKId string `json:"aKId" yaml:"aKId" bson:"aKId,omitempty"`
++	// K_AKMA.
++	KAkma string `json:"kAkma" yaml:"kAkma" bson:"kAkma,omitempty"`
++}
+diff -ruN a/models/model_ctx_remove.go b/models/model_ctx_remove.go
+--- a/models/model_ctx_remove.go
++++ b/models/model_ctx_remove.go
+@@ -0,0 +1,20 @@
++/*
++ * Naanf_AKMA
++ *
++ * API for Naanf_AKMA.
++ *
++ * Source file: 3GPP TS 29.535 V19.5.0; 5G System; AKMA Anchor Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.535/
++ *
++ * API version: 1.2.0
++ */
++
++package models
++
++// CtxRemove indicates the AKMA context to be removed (TS 29.535 clause
++// 5.1.6.2.3). In this release only Supi identifies the context, and it shall
++// be included.
++type CtxRemove struct {
++	// SUPI of the UE, formatted as defined for type Supi in TS 29.571.
++	Supi string `json:"supi,omitempty" yaml:"supi" bson:"supi,omitempty"`
++}
+diff -ruN a/models/model_service_disable_notif.go b/models/model_service_disable_notif.go
+--- a/models/model_service_disable_notif.go
++++ b/models/model_service_disable_notif.go
+@@ -0,0 +1,19 @@
++/*
++ * 3gpp-akma
++ *
++ * API for AKMA.
++ *
++ * Source file: 3GPP TS 29.522 V19.7.0; 5G System; Network Exposure Function Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.522/
++ *
++ * API version: 1.1.0
++ */
++
++package models
++
++// ServiceDisableNotif represents the AKMA Service Disable Notification
++// (TS 29.522 clause 5.14.5.3.4), reused by Naanf_AKMA (TS 29.535).
++type ServiceDisableNotif struct {
++	// The A-KID previously transmitted to the AF, type AKId.
++	AKId string `json:"aKId" yaml:"aKId" bson:"aKId,omitempty"`
++}

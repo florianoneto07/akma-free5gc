@@ -1,0 +1,255 @@
+diff --git a/pkg/suci/suci.go b/pkg/suci/suci.go
+index ce36159..abd6821 100644
+--- a/pkg/suci/suci.go
++++ b/pkg/suci/suci.go
+@@ -99,6 +99,17 @@ func parseSuci(input string) *Suci {
+ 	}
+ }
+ 
++// RoutingIndicator returns the Routing Indicator carried in a SUCI, as a
++// string in which every digit is kept (TS 23.003 cl. 2.2B), and false when s
++// is not a SUCI.
++func RoutingIndicator(s string) (string, bool) {
++	parsed := parseSuci(s)
++	if parsed == nil {
++		return "", false
++	}
++	return parsed.RoutingIndicator, true
++}
++
+ type SuciProfile struct {
+ 	ProtectionScheme string `yaml:"ProtectionScheme,omitempty"`
+ 	PrivateKey       string `yaml:"PrivateKey,omitempty"`
+diff --git a/pkg/suci/suci_test.go b/pkg/suci/suci_test.go
+index 5068504..9ea1cd0 100644
+--- a/pkg/suci/suci_test.go
++++ b/pkg/suci/suci_test.go
+@@ -104,3 +104,22 @@ func TestToSupi(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// TS 23.003 cl. 2.2B: every digit of the Routing Indicator is significant.
++func TestRoutingIndicator(t *testing.T) {
++	cases := map[string]string{
++		"suci-0-208-93-0-0-0-0000000001":    "0",
++		"suci-0-208-93-012-0-0-0000000001":  "012",
++		"suci-0-208-93-0000-0-0-0000000001": "0000",
++		"suci-0-208-093-12-0-0-0000000001":  "12",
++	}
++	for in, want := range cases {
++		got, ok := RoutingIndicator(in)
++		if !ok || got != want {
++			t.Errorf("RoutingIndicator(%q) = %q, %v; want %q", in, got, ok, want)
++		}
++	}
++	if _, ok := RoutingIndicator("imsi-208930000000001"); ok {
++		t.Error("a SUPI was taken as a SUCI")
++	}
++}
+diff --git a/internal/sbi/processor/generate_auth_data.go b/internal/sbi/processor/generate_auth_data.go
+index 29d0098..850fd2d 100644
+--- a/internal/sbi/processor/generate_auth_data.go
++++ b/internal/sbi/processor/generate_auth_data.go
+@@ -518,5 +518,6 @@ func (p *Processor) GenerateAuthDataProcedure(
+ 
+ 	response.AuthenticationVector = &av
+ 	response.Supi = supi
++	setAkmaIndication(response, &authSubs.AuthenticationSubscription, supiOrSuci, supi)
+ 	c.JSON(http.StatusOK, response)
+ }
+diff --git a/internal/sbi/processor/akma.go b/internal/sbi/processor/akma.go
+new file mode 100644
+index 0000000..7214788
+--- /dev/null
++++ b/internal/sbi/processor/akma.go
+@@ -0,0 +1,44 @@
++package processor
++
++import (
++	"regexp"
++
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/udm/internal/logger"
++	"github.com/free5gc/udm/pkg/suci"
++)
++
++// routingIdPattern is the pattern of routingId (TS29505_Subscription_Data.yaml).
++var routingIdPattern = regexp.MustCompile(`^[0-9]{1,4}$`)
++
++// setAkmaIndication fills akmaInd and routingId of the
++// Nudm_UEAuthentication_Get response when the subscriber has an AKMA
++// subscription (TS 33.501 cl. 6.1.3.1 step 2 and cl. 6.1.3.2.0 step 2;
++// TS 29.503 table 6.3.6.2.3-1).
++//
++// The Routing Indicator is the routingId stored with the authentication
++// subscription, which TS 29.505 table 5.4.2.2-1 makes mandatory when
++// akmaAllowed is true; it is available whether the request carries a SUCI or
++// a SUPI. When the request carries a SUCI, its Routing Indicator is compared
++// with the stored one and a difference is logged.
++func setAkmaIndication(rsp *models.UdmUeauAuthenticationInfoResult,
++	subs *models.AuthenticationSubscription, supiOrSuci, supi string,
++) {
++	if !subs.AkmaAllowed {
++		logger.AkmaLog.Debugf("No AKMA subscription for %s", supi)
++		return
++	}
++	rid := subs.RoutingId
++	if !routingIdPattern.MatchString(rid) {
++		logger.AkmaLog.Errorf("AKMA allowed for %s, but the stored routingId %q is not a Routing Indicator: "+
++			"AKMA indication not sent", supi, rid)
++		return
++	}
++	if suciRid, ok := suci.RoutingIndicator(supiOrSuci); ok && suciRid != rid {
++		logger.AkmaLog.Warnf("Routing Indicator of the SUCI (%s) differs from the stored routingId (%s) for %s",
++			suciRid, rid, supi)
++	}
++	rsp.AkmaInd = true
++	rsp.RoutingId = rid
++	logger.AkmaLog.Infof("AKMA indication sent to the AUSF for %s, Routing Indicator %s", supi, rid)
++}
+diff --git a/internal/sbi/processor/akma_test.go b/internal/sbi/processor/akma_test.go
+new file mode 100644
+index 0000000..9cc99f2
+--- /dev/null
++++ b/internal/sbi/processor/akma_test.go
+@@ -0,0 +1,121 @@
++package processor
++
++import (
++	"encoding/json"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/h2non/gock"
++	"github.com/stretchr/testify/require"
++	"go.uber.org/mock/gomock"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	udm_context "github.com/free5gc/udm/internal/context"
++	"github.com/free5gc/udm/internal/sbi/consumer"
++	mockapp "github.com/free5gc/udm/pkg/mockapp"
++)
++
++func TestSetAkmaIndication(t *testing.T) {
++	const supi = "imsi-208930000000001"
++	const suci0000 = "suci-0-208-93-0000-0-0-0000000001"
++	cases := []struct {
++		name       string
++		subs       models.AuthenticationSubscription
++		supiOrSuci string
++		wantInd    bool
++		wantRid    string
++	}{
++		{"no AKMA subscription", models.AuthenticationSubscription{RoutingId: "0000"}, suci0000, false, ""},
++		{"AKMA with SUCI", models.AuthenticationSubscription{AkmaAllowed: true, RoutingId: "0000"}, suci0000, true, "0000"},
++		{"AKMA with SUPI", models.AuthenticationSubscription{AkmaAllowed: true, RoutingId: "0000"}, supi, true, "0000"},
++		{"leading zero kept", models.AuthenticationSubscription{AkmaAllowed: true, RoutingId: "012"}, supi, true, "012"},
++		{"default RID", models.AuthenticationSubscription{AkmaAllowed: true, RoutingId: "0"}, supi, true, "0"},
++		{"SUCI RID differs: stored one used", models.AuthenticationSubscription{AkmaAllowed: true, RoutingId: "12"}, suci0000, true, "12"},
++		{"routingId missing", models.AuthenticationSubscription{AkmaAllowed: true}, suci0000, false, ""},
++		{"routingId too long", models.AuthenticationSubscription{AkmaAllowed: true, RoutingId: "00000"}, supi, false, ""},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			var rsp models.UdmUeauAuthenticationInfoResult
++			setAkmaIndication(&rsp, &c.subs, c.supiOrSuci, supi)
++			require.Equal(t, c.wantInd, rsp.AkmaInd)
++			require.Equal(t, c.wantRid, rsp.RoutingId)
++		})
++	}
++}
++
++// generateAuthDataBody runs GenerateAuthDataProcedure against a mocked UDR
++// that returns subs and gives back the raw response body.
++func generateAuthDataBody(t *testing.T, subs models.AuthenticationSubscription, supiOrSuci string) []byte {
++	t.Helper()
++	defer gock.Off()
++	openapi.InterceptH2CClient()
++	defer openapi.RestoreH2CClient()
++
++	gock.New("http://127.0.0.4:8000/nudr-dr/v2").
++		Get("/subscription-data/imsi-208930000000001/authentication-data/authentication-subscription").
++		Reply(200).
++		AddHeader("Content-Type", "application/json").
++		JSON(subs)
++	gock.New("http://127.0.0.4:8000").
++		Patch("/nudr-dr/v2/subscription-data/imsi-208930000000001/authentication-data/authentication-subscription").
++		Reply(204).
++		JSON(map[string]string{})
++
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++	mockApp := mockapp.NewMockApp(ctrl)
++	testConsumer, err := consumer.NewConsumer(mockApp)
++	require.NoError(t, err)
++	testProcessor, err := NewProcessor(mockApp)
++	require.NoError(t, err)
++	udm_context.GetSelf().NrfUri = "http://127.0.0.10:8000"
++	ue := new(udm_context.UdmUeContext)
++	ue.Init()
++	ue.Supi = "imsi-208930000000001"
++	ue.UdrUri = "http://127.0.0.4:8000"
++	udm_context.GetSelf().UdmUePool.Store("imsi-208930000000001", ue)
++	mockApp.EXPECT().Consumer().Return(testConsumer).AnyTimes()
++	mockApp.EXPECT().Context().Return(
++		&udm_context.UDMContext{OAuth2Required: false, NrfUri: "http://127.0.0.10:8000", NfId: "1"},
++	).AnyTimes()
++
++	rec := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(rec)
++	testProcessor.GenerateAuthDataProcedure(c, models.AuthenticationInfoRequest{ServingNetworkName: "internet"}, supiOrSuci)
++	require.Equal(t, 200, rec.Code)
++	return rec.Body.Bytes()
++}
++
++func akmaTestSubscription(akma bool) models.AuthenticationSubscription {
++	return models.AuthenticationSubscription{
++		AuthenticationMethod:          models.AuthMethod__5_G_AKA,
++		EncPermanentKey:               "8baf473f2f8fd09487cccbd7097c6862",
++		ProtectionParameterId:         "8baf473f2f8fd09487cccbd7097c6862",
++		SequenceNumber:                &models.SequenceNumber{Sqn: "000000000023"},
++		AuthenticationManagementField: "8000",
++		AlgorithmId:                   "128-EEA0",
++		EncOpcKey:                     "8e27b6af0e692e750f32667a3b14605d",
++		AkmaAllowed:                   akma,
++		RoutingId:                     "0000",
++	}
++}
++
++func TestGenerateAuthDataAkma(t *testing.T) {
++	body := generateAuthDataBody(t, akmaTestSubscription(true), "imsi-208930000000001")
++	var raw map[string]any
++	require.NoError(t, json.Unmarshal(body, &raw))
++	require.Equal(t, true, raw["akmaInd"])
++	require.Equal(t, "0000", raw["routingId"])
++}
++
++// Without akmaAllowed, akmaInd and routingId are absent.
++func TestGenerateAuthDataWithoutAkma(t *testing.T) {
++	body := generateAuthDataBody(t, akmaTestSubscription(false), "imsi-208930000000001")
++	var raw map[string]any
++	require.NoError(t, json.Unmarshal(body, &raw))
++	require.NotContains(t, raw, "akmaInd")
++	require.NotContains(t, raw, "routingId")
++}
+diff --git a/internal/logger/logger.go b/internal/logger/logger.go
+index 7d6b18a..0e216fe 100644
+--- a/internal/logger/logger.go
++++ b/internal/logger/logger.go
+@@ -26,6 +26,7 @@ var (
+ 	SuciLog     *logrus.Entry
+ 	CallbackLog *logrus.Entry
+ 	ProcLog     *logrus.Entry
++	AkmaLog     *logrus.Entry
+ )
+ 
+ func init() {
+@@ -53,4 +54,5 @@ func init() {
+ 	UtilLog = NfLog.WithField(logger_util.FieldCategory, "Util")
+ 	SuciLog = NfLog.WithField(logger_util.FieldCategory, "Suci")
+ 	CallbackLog = NfLog.WithField(logger_util.FieldCategory, "Callback")
++	AkmaLog = NfLog.WithField(logger_util.FieldCategory, "AKMA")
+ }

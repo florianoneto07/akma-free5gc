@@ -1,0 +1,50 @@
+diff --git a/run.sh b/run.sh
+index 9f70d7f..3f68854 100755
+--- a/run.sh
++++ b/run.sh
+@@ -7,6 +7,7 @@ PCAP_MODE=0
+ N3IWF_ENABLE=0
+ TNGF_ENABLE=0
+ BSF_ENABLE=0
++AANF_ENABLE=0
+ 
+ PID_LIST=()
+ echo $$ > run.pid
+@@ -47,6 +48,9 @@ if [ $# -ne 0 ]; then
+             -bsf)
+                 BSF_ENABLE=1
+                 ;;
++            -aanf)
++                AANF_ENABLE=1
++                ;;
+         esac
+         shift
+     done
+@@ -154,6 +158,14 @@ else
+     echo "BSF disabled - skipping BSF service"
+ fi
+ 
++# Add AANF (AKMA Anchor Function) to the list only if enabled
++if [ $AANF_ENABLE -ne 0 ]; then
++    NF_LIST="$NF_LIST aanf"
++    echo "AANF enabled - will start AANF service"
++else
++    echo "AANF disabled - skipping AANF service"
++fi
++
+ export GIN_MODE=release
+ 
+ for NF in ${NF_LIST}; do
+diff --git a/force_kill.sh b/force_kill.sh
+index 7273a5f..4e95c2e 100755
+--- a/force_kill.sh
++++ b/force_kill.sh
+@@ -21,7 +21,7 @@ if [ $# -ne 0 ]; then
+     done
+ fi
+ 
+-NF_LIST="nrf amf smf udr pcf udm nssf ausf bsf n3iwf upf chf nef tngf"
++NF_LIST="nrf amf smf udr pcf udm nssf ausf bsf n3iwf upf chf nef tngf aanf"
+ 
+ for NF in ${NF_LIST}; do
+     sudo killall -9 ${NF}

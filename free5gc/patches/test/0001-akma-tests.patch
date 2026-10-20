@@ -1,0 +1,489 @@
+diff --git a/go.mod b/go.mod
+index 9aeb6a3..6c28c94 100644
+--- a/go.mod
++++ b/go.mod
+@@ -66,6 +66,8 @@ require (
+ 	github.com/fclairamb/go-log v0.4.1 // indirect
+ 	github.com/felixge/httpsnoop v1.0.4 // indirect
+ 	github.com/fiorix/go-diameter v3.0.2+incompatible // indirect
++	github.com/florianoneto07/akma-free5gc/free5gc/aanf v0.0.0
++	github.com/florianoneto07/akma-free5gc/shared/akma v0.0.0
+ 	github.com/free5gc/pfcp v1.1.2 // indirect
+ 	github.com/free5gc/tlv v1.1.1 // indirect
+ 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
+@@ -169,3 +171,9 @@ replace (
+ 	github.com/free5gc/upf => ../NFs/upf
+ 	github.com/free5gc/webconsole => ../webconsole
+ )
++
++replace github.com/florianoneto07/akma-free5gc/shared/akma => ../../akma-free5gc/shared/akma
++
++replace github.com/florianoneto07/akma-free5gc/free5gc/aanf => ../../akma-free5gc/free5gc/aanf
++
++replace github.com/free5gc/openapi => ../../akma-free5gc/free5gc/build/openapi-test
+diff --git a/go.sum b/go.sum
+index ee08001..07982f1 100644
+--- a/go.sum
++++ b/go.sum
+@@ -172,8 +172,6 @@ github.com/free5gc/nas v1.2.3 h1:vMA9NGORw0zr26vQWWSTy8X9HrA+wGxFvwc2g9KqUTw=
+ github.com/free5gc/nas v1.2.3/go.mod h1:A8ODi6MW0fRJiLEH4GcUPbg3dd9xm3zi+fkBWqTjQ40=
+ github.com/free5gc/ngap v1.1.3 h1:uT+IE5PkWOYjPdxCyOAwLDOXUiADcOQCs05CudyC36s=
+ github.com/free5gc/ngap v1.1.3/go.mod h1:yGMO2GYV5DbbmudwD7Oo6dXQgz2ON29GhqtXDeXdyvA=
+-github.com/free5gc/openapi v1.2.5-0.20260527003827-02dc71b4d94f h1:AYnRO0Gj/kTmGw5tCI33R3XReV9T0sEEp7jFvnL/qok=
+-github.com/free5gc/openapi v1.2.5-0.20260527003827-02dc71b4d94f/go.mod h1:V9CKQUqWp6kXL3SDtaIs4ZWeLipk5TSRXCnt+ntNceg=
+ github.com/free5gc/pfcp v1.1.2 h1:onqDTlZok41OiagZxzw9+2c5bxMSOwqHOYxbORRYUTw=
+ github.com/free5gc/pfcp v1.1.2/go.mod h1:Odjw78gt0DYEbwUQD4w/vU+GvfrRZLgqyaL+AvwD4ww=
+ github.com/free5gc/sctp v1.1.2 h1:nNEr4uywIFmVBZauaNVJRkIDXr4nrpMmM0TPIck5QPA=
+diff --git a/ranUe.go b/ranUe.go
+index c08d90d..9f138c8 100644
+--- a/ranUe.go
++++ b/ranUe.go
+@@ -36,6 +36,9 @@ type RanUeContext struct {
+ 	Kamf               []uint8
+ 	AnType             models.AccessType
+ 	AuthenticationSubs models.AuthenticationSubscription
++	// Kausf is the K_AUSF of the last primary authentication, for AKMA
++	// (TS 33.535 cl. 6.1).
++	Kausf []uint8
+ }
+ 
+ func CalculateIpv4HeaderChecksum(hdr *ipv4.Header) uint32 {
+@@ -278,6 +281,7 @@ func (ue *RanUeContext) DeriveResEAPMessageAndSetKey(
+ 	}
+ 	Kaut := MK[16:48]
+ 	Kausf := MK[144:176]
++	ue.Kausf = append([]uint8(nil), Kausf...)
+ 	P0 = []byte(snName)
+ 	Kseaf, err := ueauth.GetKDFValue(Kausf, ueauth.FC_FOR_KSEAF_DERIVATION, P0, ueauth.KDFLen(P0))
+ 	if err != nil {
+@@ -338,6 +342,7 @@ func (ue *RanUeContext) DerivateKamf(key []byte, snName string, SQN, AK []byte)
+ 	if err != nil {
+ 		fatal.Fatalf("GetKDFValue error: %+v", err)
+ 	}
++	ue.Kausf = Kausf
+ 	P0 = []byte(snName)
+ 	Kseaf, err := ueauth.GetKDFValue(Kausf, ueauth.FC_FOR_KSEAF_DERIVATION, P0, ueauth.KDFLen(P0))
+ 	if err != nil {
+diff --git a/nfs_setup.go b/nfs_setup.go
+index e8d5dc3..4d346dc 100644
+--- a/nfs_setup.go
++++ b/nfs_setup.go
+@@ -33,6 +33,9 @@ import (
+ 	udr_service "github.com/free5gc/udr/pkg/service"
+ 
+ 	smf_utils "github.com/free5gc/smf/pkg/utils"
++
++	aanf_factory "github.com/florianoneto07/akma-free5gc/free5gc/aanf/pkg/factory"
++	aanf_service "github.com/florianoneto07/akma-free5gc/free5gc/aanf/pkg/service"
+ )
+ 
+ type TestId string
+@@ -55,6 +58,7 @@ type StartNFsConfig struct {
+ 	Chf  bool `yaml:"chf,omitempty" default:"false"`
+ 	Bsf  bool `yaml:"bsf,omitempty" default:"false"`
+ 	Nef  bool `yaml:"nef,omitempty" default:"false"`
++	Aanf bool `yaml:"aanf,omitempty" default:"false"`
+ 
+ 	OAuth  bool   `yaml:"oauth,omitempty" default:"false"`
+ 	TestId TestId `yaml:"testId,omitempty"`
+@@ -71,6 +75,9 @@ func CreateNFs(cfg StartNFsConfig) []app.NFstruct {
+ 	if cfg.Nrf {
+ 		nfs = append(nfs, NewNrfStruct(NfCtx, cfg.OAuth))
+ 	}
++	if cfg.Aanf {
++		nfs = append(nfs, NewAanfStruct(NfCtx))
++	}
+ 	if cfg.Amf {
+ 		nfs = append(nfs, NewAmfStruct(NfCtx, cfg.TestId))
+ 	}
+@@ -242,6 +249,62 @@ func NewAusfStruct(ctx context.Context) app.NFstruct {
+ 	}
+ }
+ 
++// AanfSbiIPv4 is the address of the AAnF of the test bench.
++const AanfSbiIPv4 = "127.0.0.40"
++
++// AanfTestAfId is the AF_ID that the AAnF of the test bench authorizes from
++// 127.0.0.1.
++const AanfTestAfId = "af1.akma.example.FF00000001"
++
++func NewAanfStruct(ctx context.Context) app.NFstruct {
++	cfg := aanfConfig()
++	if _, err := cfg.Validate(); err != nil {
++		fmt.Printf("AANF Config failed: %v\n", err)
++	}
++	aanf_ctx, aanf_cancel := context.WithCancel(ctx)
++	aanfApp, errApp := aanf_service.NewApp(aanf_ctx, cfg, "")
++	if errApp != nil {
++		fmt.Printf("AANF NewApp failed: %v\n", errApp)
++	}
++
++	return app.NFstruct{
++		Nf:     aanfApp,
++		Ctx:    &aanf_ctx,
++		Cancel: &aanf_cancel,
++	}
++}
++
++func aanfConfig() *aanf_factory.Config {
++	return &aanf_factory.Config{
++		Info: &aanf_factory.Info{
++			Version:     "1.0.0",
++			Description: "AANF initial test configuration",
++		},
++		Configuration: &aanf_factory.Configuration{
++			Sbi: &aanf_factory.Sbi{
++				Scheme:       "http",
++				RegisterIPv4: AanfSbiIPv4,
++				BindingIPv4:  AanfSbiIPv4,
++				Port:         8000,
++			},
++			ServiceNameList: []string{"naanf-akma"},
++			NrfUri:          "http://127.0.0.10:8000",
++			NrfCertPem:      "../cert/nrf.pem",
++			PlmnSupportList: []models.PlmnId{{Mcc: "208", Mnc: "93"}},
++			Akma: &aanf_factory.Akma{
++				KafLifetime: "1h",
++				AuthorizedAfs: []aanf_factory.AuthorizedAf{
++					{AfId: AanfTestAfId, SourceAddresses: []string{"127.0.0.1"}},
++				},
++			},
++		},
++		Logger: &aanf_factory.Logger{
++			Enable: true,
++			Level:  "info",
++		},
++	}
++}
++
+ func NewChfStruct(ctx context.Context) app.NFstruct {
+ 	if err := chfConfig(); err != nil {
+ 		fmt.Printf("CHF Config failed: %v\n", err)
+@@ -1413,6 +1476,9 @@ func ausfConfig() error {
+ 				Mnc: "45",
+ 			}},
+ 			GroupId: "ausfGroup001",
++			Akma: &ausf_factory.Akma{
++				Enable: true,
++			},
+ 		},
+ 		Logger: &ausf_factory.Logger{
+ 			Enable:       true,
+diff --git a/ngsetup_test.go b/ngsetup_test.go
+index 08b60d5..54a0525 100644
+--- a/ngsetup_test.go
++++ b/ngsetup_test.go
+@@ -95,7 +95,7 @@ func init() {
+ 
+ 			Nrf:  true,
+ 			Amf:  true,
+-			Smf:  true,
++			Smf:  !akmaOnly(initNfCfg.TestId),
+ 			Udr:  true,
+ 			Pcf:  true,
+ 			Udm:  true,
+@@ -104,6 +104,7 @@ func init() {
+ 			Chf:  true,
+ 			Bsf:  true,
+ 			Nef:  true,
++			Aanf: true,
+ 		}
+ 		NFstructs = test.CreateNFs(startNfCfg)
+ 		NfStart()
+@@ -114,6 +115,13 @@ func init() {
+ 
+ }
+ 
++// akmaOnly tells whether only the AKMA tests run. They stop after the
++// registration of the UE and need no SMF, whose PFCP address is created by
++// test.sh: they run with "go test -run TestAkma", without root privileges.
++func akmaOnly(id test.TestId) bool {
++	return strings.HasPrefix(string(id), "TestAkma")
++}
++
+ func initLogPath() {
+ 	// default key log path
+ 	if err := os.MkdirAll("./log/", 0775); err != nil {
+diff --git a/akma_test.go b/akma_test.go
+new file mode 100644
+index 0000000..bcf1b15
+--- /dev/null
++++ b/akma_test.go
+@@ -0,0 +1,277 @@
++package test_test
++
++import (
++	"context"
++	"encoding/base64"
++	"errors"
++	"net/http"
++	"testing"
++	"time"
++
++	"test"
++	"test/consumerTestdata/UDM/TestGenAuthData"
++	"test/nasTestpacket"
++
++	"github.com/stretchr/testify/require"
++
++	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/akid"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/codec"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/derive"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/kdf"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/supi"
++
++	"github.com/free5gc/nas"
++	"github.com/free5gc/nas/nasMessage"
++	"github.com/free5gc/nas/nasType"
++	"github.com/free5gc/nas/security"
++	"github.com/free5gc/ngap"
++	"github.com/free5gc/ngap/ngapType"
++	"github.com/free5gc/openapi"
++	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/sctp"
++)
++
++// akmaSuci returns the SUCI (null scheme) of IMSI 20893<msin> with the
++// Routing Indicator rid, as a 5GS mobile identity (TS 24.501 cl. 9.11.3.4).
++func akmaSuci(rid [2]uint8, msin [5]uint8) nasType.MobileIdentity5GS {
++	return nasType.MobileIdentity5GS{
++		Len: 13,
++		Buffer: []uint8{0x01, 0x02, 0xf8, 0x39, rid[0], rid[1], 0x00, 0x00,
++			msin[0], msin[1], msin[2], msin[3], msin[4]},
++	}
++}
++
++// akmaRegister runs an initial registration of ue up to Registration
++// Complete, with 5G AKA or EAP-AKA' according to its subscription.
++func akmaRegister(t *testing.T, conn *sctp.SCTPConn, ue *test.RanUeContext, id nasType.MobileIdentity5GS) {
++	t.Helper()
++	recvMsg := make([]byte, 2048)
++	read := func() *ngapType.NGAPPDU {
++		n, err := conn.Read(recvMsg)
++		require.NoError(t, err)
++		pdu, err := ngap.Decoder(recvMsg[:n])
++		require.NoError(t, err)
++		return pdu
++	}
++	write := func(msg []byte, err error) {
++		require.NoError(t, err)
++		_, err = conn.Write(msg)
++		require.NoError(t, err)
++	}
++
++	secCap := ue.GetUESecurityCapability()
++	registrationRequest := nasTestpacket.GetRegistrationRequest(
++		nasMessage.RegistrationType5GSInitialRegistration, id, nil, secCap, nil, nil, nil)
++	write(test.GetInitialUEMessage(ue.RanUeNgapId, registrationRequest, ""))
++
++	// Authentication Request. The AMF UE NGAP ID is taken from it: the
++	// AKMA tests run in one process, where the AMF numbers UEs from 1.
++	ngapPdu := read()
++	require.NotNil(t, ngapPdu.InitiatingMessage)
++	ue.AmfUeNgapId = amfUeNgapId(t, ngapPdu.InitiatingMessage.Value.DownlinkNASTransport)
++	nasPdu := test.GetNasPdu(ue, ngapPdu.InitiatingMessage.Value.DownlinkNASTransport)
++	require.NotNil(t, nasPdu)
++	require.Equal(t, nas.MsgTypeAuthenticationRequest, nasPdu.GmmHeader.GetMessageType())
++	var pdu []byte
++	if ue.AuthenticationSubs.AuthenticationMethod == models.AuthMethod_EAP_AKA_PRIME {
++		eap := nasPdu.AuthenticationRequest.GetEAPMessage()
++		res := ue.DeriveResEAPMessageAndSetKey(ue.AuthenticationSubs, eap, "5G:mnc093.mcc208.3gppnetwork.org")
++		pdu = nasTestpacket.GetAuthenticationResponse(nil, base64.StdEncoding.EncodeToString(res))
++	} else {
++		rand := nasPdu.AuthenticationRequest.GetRANDValue()
++		resStar := ue.DeriveRESstarAndSetKey(ue.AuthenticationSubs, rand[:], "5G:mnc093.mcc208.3gppnetwork.org")
++		pdu = nasTestpacket.GetAuthenticationResponse(resStar, "")
++	}
++	write(test.GetUplinkNASTransport(ue.AmfUeNgapId, ue.RanUeNgapId, pdu))
++
++	// Security Mode Command
++	ngapPdu = read()
++	require.NotNil(t, ngapPdu.InitiatingMessage)
++	nasPdu = test.GetNasPdu(ue, ngapPdu.InitiatingMessage.Value.DownlinkNASTransport)
++	require.NotNil(t, nasPdu)
++	require.Equal(t, nas.MsgTypeSecurityModeCommand, nasPdu.GmmHeader.GetMessageType())
++	withCap := nasTestpacket.GetRegistrationRequest(nasMessage.RegistrationType5GSInitialRegistration,
++		id, nil, secCap, ue.Get5GMMCapability(), nil, nil)
++	pdu, err := test.EncodeNasPduWithSecurity(ue, nasTestpacket.GetSecurityModeComplete(withCap),
++		nas.SecurityHeaderTypeIntegrityProtectedAndCipheredWithNew5gNasSecurityContext, true, true)
++	require.NoError(t, err)
++	write(test.GetUplinkNASTransport(ue.AmfUeNgapId, ue.RanUeNgapId, pdu))
++
++	// Initial Context Setup
++	ngapPdu = read()
++	require.NotNil(t, ngapPdu.InitiatingMessage)
++	require.Equal(t, ngapType.ProcedureCodeInitialContextSetup, ngapPdu.InitiatingMessage.ProcedureCode.Value)
++	write(test.GetInitialContextSetupResponse(ue.AmfUeNgapId, ue.RanUeNgapId))
++
++	// Registration Complete
++	pdu, err = test.EncodeNasPduWithSecurity(ue, nasTestpacket.GetRegistrationComplete(nil),
++		nas.SecurityHeaderTypeIntegrityProtectedAndCiphered, true, false)
++	require.NoError(t, err)
++	write(test.GetUplinkNASTransport(ue.AmfUeNgapId, ue.RanUeNgapId, pdu))
++}
++
++func amfUeNgapId(t *testing.T, msg *ngapType.DownlinkNASTransport) int64 {
++	t.Helper()
++	require.NotNil(t, msg)
++	for _, ie := range msg.ProtocolIEs.List {
++		if ie.Id.Value == ngapType.ProtocolIEIDAMFUENGAPID {
++			return ie.Value.AMFUENGAPID.Value
++		}
++	}
++	t.Fatal("AMF UE NGAP ID missing in DownlinkNASTransport")
++	return 0
++}
++
++// akmaExpected derives, from the K_AUSF of the test UE, the A-KID and the
++// K_AF that the AAnF must hold (TS 33.535 cl. 6.1, A.2-A.4).
++func akmaExpected(t *testing.T, ue *test.RanUeContext, rid akid.RID) (string, kdf.Key) {
++	t.Helper()
++	require.Len(t, ue.Kausf, kdf.KeyLen, "K_AUSF of the test UE")
++	var kAusf kdf.Key
++	copy(kAusf[:], ue.Kausf)
++	p, err := supi.FromSBI(ue.Supi)
++	require.NoError(t, err)
++	hn, err := akid.NewHomeNetwork("208", "93")
++	require.NoError(t, err)
++	id, err := derive.AKID(kAusf, p, rid, hn)
++	require.NoError(t, err)
++	aKId, err := id.Format(akid.DefaultOptions())
++	require.NoError(t, err)
++	kAkma, err := derive.KAkma(kAusf, p)
++	require.NoError(t, err)
++	af, err := afid.Parse(test.AanfTestAfId)
++	require.NoError(t, err)
++	kaf, err := derive.KAf(kAkma, af)
++	require.NoError(t, err)
++	return aKId, kaf
++}
++
++func aanfClient() *Naanf_AKMA.APIClient {
++	cfg := Naanf_AKMA.NewConfiguration()
++	cfg.SetBasePath("http://" + test.AanfSbiIPv4 + ":8000")
++	return Naanf_AKMA.NewAPIClient(cfg)
++}
++
++// retrieveKaf asks the AAnF for K_AF as the AF of the test bench, retrying
++// while the AUSF registration, which runs apart from the authentication
++// (TS 33.535 cl. 6.1), has not arrived. It returns the HTTP status of the last try.
++func retrieveKaf(aKId string, wait time.Duration) (*models.AkmaAfKeyData, int) {
++	req := &Naanf_AKMA.GetAKMAAPPKeyMaterialRequest{}
++	req.SetAkmaAfKeyRequest(models.AkmaAfKeyRequest{AfId: test.AanfTestAfId, AKId: aKId})
++	deadline := time.Now().Add(wait)
++	for {
++		rsp, err := aanfClient().RetrieveTheAKMAApplicationKeyMaterialCollectionApi.
++			GetAKMAAPPKeyMaterial(context.Background(), req)
++		if err == nil {
++			return &rsp.AkmaAfKeyData, http.StatusOK
++		}
++		status := 0
++		var apiErr openapi.GenericOpenAPIError
++		if errors.As(err, &apiErr) {
++			status = apiErr.ErrorStatus
++		}
++		if time.Now().After(deadline) {
++			return nil, status
++		}
++		time.Sleep(200 * time.Millisecond)
++	}
++}
++
++func removeAkmaContext(ueSupi string) {
++	req := &Naanf_AKMA.RemoveContextRequest{}
++	req.SetCtxRemove(models.CtxRemove{Supi: ueSupi})
++	_, _ = aanfClient().RemoveTheAKMAApplicationKeyMaterialDeletionApi.RemoveContext(context.Background(), req)
++}
++
++// runAkmaRegistration registers a UE with the given subscription and SUCI
++// and returns its context.
++func runAkmaRegistration(t *testing.T, imsi string, subs models.AuthenticationSubscription,
++	id nasType.MobileIdentity5GS,
++) *test.RanUeContext {
++	t.Helper()
++	conn, err := test.ConnectToAmf(amfN2Ipv4Addr, ranN2Ipv4Addr, 38412, 9487)
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = conn.Close() })
++
++	recvMsg := make([]byte, 2048)
++	sendMsg, err := test.GetNGSetupRequest([]byte("\x00\x01\x02"), 24, "free5gc")
++	require.NoError(t, err)
++	_, err = conn.Write(sendMsg)
++	require.NoError(t, err)
++	n, err := conn.Read(recvMsg)
++	require.NoError(t, err)
++	ngapPdu, err := ngap.Decoder(recvMsg[:n])
++	require.NoError(t, err)
++	require.Equal(t, ngapType.NGAPPDUPresentSuccessfulOutcome, ngapPdu.Present)
++
++	ue := test.NewRanUeContext(imsi, 1, security.AlgCiphering128NEA0, security.AlgIntegrity128NIA2,
++		models.AccessType__3_GPP_ACCESS)
++	ue.AmfUeNgapId = 1
++	ue.AuthenticationSubs = subs
++	servingPlmnId := "20893"
++	test.InsertUeToMongoDB(t, ue, servingPlmnId)
++	t.Cleanup(func() {
++		test.DelUeFromMongoDB(t, ue, servingPlmnId)
++		removeAkmaContext(ue.Supi)
++	})
++
++	akmaRegister(t, conn, ue, id)
++	return ue
++}
++
++func akmaSubscription(eap bool, rid string) models.AuthenticationSubscription {
++	var subs models.AuthenticationSubscription
++	if eap {
++		subs = test.GetEAPAKAPrimeAuthSubscription(TestGenAuthData.MilenageTestSet19.K,
++			TestGenAuthData.MilenageTestSet19.OPC, TestGenAuthData.MilenageTestSet19.OP)
++	} else {
++		subs = test.GetAuthSubscription(TestGenAuthData.MilenageTestSet19.K,
++			TestGenAuthData.MilenageTestSet19.OPC, TestGenAuthData.MilenageTestSet19.OP)
++	}
++	if rid != "" {
++		subs.AkmaAllowed = true
++		subs.RoutingId = rid
++	}
++	return subs
++}
++
++// TestAkma5GAKA: the K_AF returned by the AAnF equals the K_AF
++// derived by the test UE from its own K_AUSF. RID "0000" in the SUCI and in
++// the subscription.
++func TestAkma5GAKA(t *testing.T) {
++	ue := runAkmaRegistration(t, "imsi-208930000007490", akmaSubscription(false, "0000"),
++		akmaSuci([2]uint8{0x00, 0x00}, [5]uint8{0x00, 0x00, 0x00, 0x47, 0x09}))
++
++	aKId, kaf := akmaExpected(t, ue, "0000")
++	require.Regexp(t, `^rid0000\.atid[A-Za-z0-9+/]{43}=@5gc\.mnc093\.mcc208\.3gppnetwork\.org$`, aKId)
++	data, status := retrieveKaf(aKId, 5*time.Second)
++	require.Equal(t, http.StatusOK, status)
++	require.Equal(t, codec.HexKey(kaf), data.Kaf)
++	require.Equal(t, ue.Supi, data.Supi)
++}
++
++// TestAkmaEAPAKAPrime: RID "012", leading zero kept end to end.
++func TestAkmaEAPAKAPrime(t *testing.T) {
++	ue := runAkmaRegistration(t, "imsi-208930000007491", akmaSubscription(true, "012"),
++		akmaSuci([2]uint8{0x10, 0xf2}, [5]uint8{0x00, 0x00, 0x00, 0x47, 0x19}))
++
++	aKId, kaf := akmaExpected(t, ue, "012")
++	require.Regexp(t, `^rid012\.atid`, aKId)
++	data, status := retrieveKaf(aKId, 5*time.Second)
++	require.Equal(t, http.StatusOK, status)
++	require.Equal(t, codec.HexKey(kaf), data.Kaf)
++	require.Equal(t, ue.Supi, data.Supi)
++}
++
++// TestAkmaWithoutSubscription: without akmaAllowed the AUSF registers
++// nothing, so the A-KID the UE would derive is unknown to the AAnF.
++func TestAkmaWithoutSubscription(t *testing.T) {
++	ue := runAkmaRegistration(t, "imsi-208930000007492", akmaSubscription(false, ""),
++		akmaSuci([2]uint8{0xf0, 0xff}, [5]uint8{0x00, 0x00, 0x00, 0x47, 0x29}))
++
++	aKId, _ := akmaExpected(t, ue, "0")
++	_, status := retrieveKaf(aKId, 1500*time.Millisecond)
++	require.Equal(t, http.StatusForbidden, status)
++}

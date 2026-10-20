@@ -1,0 +1,12 @@
+akma-free5gc
+Copyright 2026 Floriano Neto
+
+This product includes patches to free5GC (https://github.com/free5gc/free5gc),
+Copyright 2019 Communication Service/Software Laboratory, National Chiao Tung
+University, licensed under the Apache License, Version 2.0. The AAnF in
+free5gc/aanf follows the layout of the free5GC network functions.
+
+The patches in af/ue/ueransim/patches modify UERANSIM
+(https://github.com/aligungr/UERANSIM), licensed under the GNU General Public
+License, version 3. They are distributed under the same license; see
+af/ue/ueransim/patches/COPYING.

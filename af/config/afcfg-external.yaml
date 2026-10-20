@@ -1,0 +1,27 @@
+# AKMA AF outside the operator network: it requests K_AF through the NEF
+# (TS 33.535 cl. 6.3) instead of the AAnF.
+configuration:
+  # Same FQDN and Ua* id as the AF of afcfg.yaml: same AF_ID, same K_AF.
+  fqdn: af1.akma.example
+  uaStarId: FF00000001
+  listen: 192.168.16.129:8083
+  path: /ua/v1/session
+  realmPrefix: 3GPP-bootstrapping-akma
+  qop: [auth]
+  nonceLifetime: 300s
+  kafExpiry: refetch
+  # AKMA API of the NEF (TS 29.522 cl. 5.14). The NEF authorizes this AF_ID
+  # from this machine's address (akma.authorizedAfs of nefcfg.yaml).
+  nefUri: http://192.168.16.130:8000
+  # NRF where the AF registers to obtain the 3gpp-akma access token. The NRF
+  # listens on a loopback address of the free5GC machine: from this machine
+  # it is reached through an SSH tunnel,
+  #   ssh -N -L 127.0.0.10:8000:127.0.0.10:8000 <user>@<free5GC host>
+  nrfUri: http://127.0.0.10:8000
+  # true: anonymous user access, K_AF without the SUPI (TS 33.535 cl. 6.2.2).
+  anonymous: false
+
+logger:
+  enable: true
+  level: info # trace, debug, info, warn, error, fatal, panic
+  reportCaller: false

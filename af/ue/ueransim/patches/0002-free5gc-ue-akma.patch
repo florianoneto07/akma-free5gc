@@ -1,0 +1,14 @@
+diff --git a/config/free5gc-ue.yaml b/config/free5gc-ue.yaml
+index 6172db4..9c83902 100644
+--- a/config/free5gc-ue.yaml
++++ b/config/free5gc-ue.yaml
+@@ -13,6 +13,9 @@ homeNetworkPublicKeyId: 1
+ # Routing Indicator
+ routingIndicator: '0000'
+ 
++# AKMA (3GPP TS 33.535): derive K_AKMA and the A-KID after each successful primary authentication
++akma: true
++
+ # Permanent subscription key
+ key: '8baf473f2f8fd09487cccbd7097c6862'
+ # Operator code (OP or OPC) of the UE

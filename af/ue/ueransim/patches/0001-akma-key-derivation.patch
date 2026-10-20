@@ -1,0 +1,211 @@
+diff --git a/src/ue/types.hpp b/src/ue/types.hpp
+index ce354a9..3b392c0 100644
+--- a/src/ue/types.hpp
++++ b/src/ue/types.hpp
+@@ -111,6 +111,7 @@ struct UeConfig
+     NetworkSlice defaultConfiguredNssai{};
+     NetworkSlice configuredNssai{};
+     std::optional<std::string> tunName{};
++    bool akma{};
+ 
+     struct
+     {
+@@ -402,6 +403,10 @@ struct UeKeys
+     OctetString kNasInt{};
+     OctetString kNasEnc{};
+ 
++    /* AKMA (3GPP TS 33.535), empty until derived */
++    OctetString kAkma{};
++    std::string aKid{};
++
+     [[nodiscard]] UeKeys deepCopy() const
+     {
+         UeKeys keys;
+@@ -410,6 +415,8 @@ struct UeKeys
+         keys.kAmf = kAmf.subCopy(0);
+         keys.kNasInt = kNasInt.subCopy(0);
+         keys.kNasEnc = kNasEnc.subCopy(0);
++        keys.kAkma = kAkma.subCopy(0);
++        keys.aKid = aKid;
+         return keys;
+     }
+ };
+diff --git a/src/ue.cpp b/src/ue.cpp
+index 33c5de7..23e43be 100644
+--- a/src/ue.cpp
++++ b/src/ue.cpp
+@@ -162,6 +162,8 @@ static nr::ue::UeConfig *ReadConfigYaml()
+         result->imeiSv = yaml::GetString(config, "imeiSv", 16, 16);
+     if (yaml::HasField(config, "tunName"))
+         result->tunName = yaml::GetString(config, "tunName", 1, 12);
++    if (yaml::HasField(config, "akma"))
++        result->akma = yaml::GetBool(config, "akma");
+ 
+     yaml::AssertHasField(config, "integrity");
+     yaml::AssertHasField(config, "ciphering");
+@@ -360,6 +362,7 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
+     c->homeNetworkPublicKeyId = g_refConfig->homeNetworkPublicKeyId;
+     c->routingIndicator = g_refConfig->routingIndicator;
+     c->tunName = g_refConfig->tunName;
++    c->akma = g_refConfig->akma;
+     c->hplmn = g_refConfig->hplmn;
+     c->configuredNssai = g_refConfig->configuredNssai;
+     c->defaultConfiguredNssai = g_refConfig->defaultConfiguredNssai;
+diff --git a/src/ue/nas/keys.hpp b/src/ue/nas/keys.hpp
+index 2845b6a..f260714 100644
+--- a/src/ue/nas/keys.hpp
++++ b/src/ue/nas/keys.hpp
+@@ -76,4 +76,25 @@ OctetString CalculateResStar(const OctetString &key, const std::string &snn, con
+  */
+ OctetString CalculateAuts(const OctetString &sqn, const OctetString &ak, const OctetString &macS);
+ 
++/**
++ * Calculates K_AKMA from K_AUSF as specified in 3GPP TS 33.535 Annex A.2. The SUPI is the IMSI (TS 33.501 Annex A.7.0)
++ */
++OctetString CalculateKAkma(const OctetString &kAusf, const std::string &imsi);
++
++/**
++ * Calculates A-TID from K_AUSF as specified in 3GPP TS 33.535 Annex A.3. The SUPI is the IMSI (TS 33.501 Annex A.7.0)
++ */
++OctetString CalculateATid(const OctetString &kAusf, const std::string &imsi);
++
++/**
++ * Constructs the A-KID "rid<RID>.atid<A-TID>@5gc.mnc<MNC>.mcc<MCC>.3gppnetwork.org" as specified in 3GPP TS 33.535
++ * clause 6.1 and TS 29.522 table 5.14.5.4.2-1, with the A-TID in base64 (RFC 4648 clause 4)
++ */
++std::string ConstructAKid(const std::string &routingIndicator, const OctetString &aTid, const Plmn &hplmn);
++
++/**
++ * Derives K_AKMA and the A-KID from K_AUSF as specified in 3GPP TS 33.535 clause 6.1. The SUPI must be an IMSI
++ */
++void DeriveAkmaKeys(const UeConfig &ueConfig, NasSecurityContext &nasSecurityContext);
++
+ } // namespace nr::ue::keys
+diff --git a/src/ue/nas/keys.cpp b/src/ue/nas/keys.cpp
+index 917325b..89073cb 100644
+--- a/src/ue/nas/keys.cpp
++++ b/src/ue/nas/keys.cpp
+@@ -17,6 +17,29 @@ static const int N_RRC_int_alg = 0x04;
+ static const int N_UP_enc_alg = 0x05;
+ static const int N_UP_int_alg = 0x06;
+ 
++static const int FC_K_AKMA = 0x80;
++static const int FC_A_TID = 0x81;
++
++static std::string EncodeBase64(const OctetString &data)
++{
++    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    std::string out;
++    int len = data.length();
++    for (int i = 0; i < len; i += 3)
++    {
++        int n = data.getI(i) << 16;
++        if (i + 1 < len)
++            n |= data.getI(i + 1) << 8;
++        if (i + 2 < len)
++            n |= data.getI(i + 2);
++        out += alphabet[(n >> 18) & 0x3F];
++        out += alphabet[(n >> 12) & 0x3F];
++        out += i + 1 < len ? alphabet[(n >> 6) & 0x3F] : '=';
++        out += i + 2 < len ? alphabet[n & 0x3F] : '=';
++    }
++    return out;
++}
++
+ namespace nr::ue::keys
+ {
+ 
+@@ -154,4 +177,41 @@ OctetString CalculateAuts(const OctetString &sqn, const OctetString &ak, const O
+     return auts;
+ }
+ 
++OctetString CalculateKAkma(const OctetString &kAusf, const std::string &imsi)
++{
++    OctetString s[2];
++    s[0] = crypto::EncodeKdfString("AKMA");
++    s[1] = crypto::EncodeKdfString(imsi);
++    return crypto::CalculateKdfKey(kAusf, FC_K_AKMA, s, 2);
++}
++
++OctetString CalculateATid(const OctetString &kAusf, const std::string &imsi)
++{
++    OctetString s[2];
++    s[0] = crypto::EncodeKdfString("A-TID");
++    s[1] = crypto::EncodeKdfString(imsi);
++    return crypto::CalculateKdfKey(kAusf, FC_A_TID, s, 2);
++}
++
++std::string ConstructAKid(const std::string &routingIndicator, const OctetString &aTid, const Plmn &hplmn)
++{
++    char realm[40] = {0};
++    int r = sprintf(realm, "5gc.mnc%03d.mcc%03d.3gppnetwork.org", hplmn.mnc, hplmn.mcc);
++    if (r != 33)
++        throw std::runtime_error("A-KID realm construction failure");
++    return "rid" + routingIndicator + ".atid" + EncodeBase64(aTid) + "@" + realm;
++}
++
++void DeriveAkmaKeys(const UeConfig &ueConfig, NasSecurityContext &nasSecurityContext)
++{
++    auto &keys = nasSecurityContext.keys;
++    const std::string &imsi = ueConfig.supi->value;
++
++    // The RID of the SUCI (TS 33.535 clause 6.1); the UE sends "0000" when none is configured.
++    std::string routingIndicator = ueConfig.routingIndicator.value_or("0000");
++
++    keys.kAkma = CalculateKAkma(keys.kAusf, imsi);
++    keys.aKid = ConstructAKid(routingIndicator, CalculateATid(keys.kAusf, imsi), ueConfig.hplmn);
++}
++
+ } // namespace nr::ue::keys
+\ No newline at end of file
+diff --git a/src/ue/nas/mm/mm.hpp b/src/ue/nas/mm/mm.hpp
+index a1de095..48bb351 100644
+--- a/src/ue/nas/mm/mm.hpp
++++ b/src/ue/nas/mm/mm.hpp
+@@ -138,6 +138,7 @@ class NasMm
+   private: /* Security */
+     void receiveSecurityModeCommand(const nas::SecurityModeCommand &msg);
+     nas::IEUeSecurityCapability createSecurityCapabilityIe();
++    void deriveAkmaKeys();
+ 
+   private: /* De-registration */
+     EProcRc sendDeregistration(EDeregCause deregCause);
+diff --git a/src/ue/nas/mm/security.cpp b/src/ue/nas/mm/security.cpp
+index a313416..fab54d2 100644
+--- a/src/ue/nas/mm/security.cpp
++++ b/src/ue/nas/mm/security.cpp
+@@ -223,7 +223,10 @@ void NasMm::receiveSecurityModeCommand(const nas::SecurityModeCommand &msg)
+ 
+     // Set the new NAS Security Context as current one. (If it is not already the current one)
+     if (whichCtx == 1)
++    {
+         m_usim->m_currentNsCtx = std::make_unique<NasSecurityContext>(nsCtx->deepCopy());
++        deriveAkmaKeys();
++    }
+ 
+     // ============================ Handle EAP-Success message if any. ============================
+ 
+@@ -296,4 +299,22 @@ nas::IEUeSecurityCapability NasMm::createSecurityCapabilityIe()
+     return res;
+ }
+ 
++void NasMm::deriveAkmaKeys()
++{
++    // TS 33.535 clause 6.1: the UE generates K_AKMA and the A-KID from K_AUSF before initiating communication with an
++    // AKMA AF. They are derived when the security context of a successful primary authentication is taken into use.
++    if (!m_base->config->akma)
++        return;
++
++    if (!m_base->config->supi.has_value() || m_base->config->supi->type != "imsi")
++    {
++        m_logger->warn("AKMA key material not derived, the SUPI is not an IMSI");
++        return;
++    }
++
++    auto &nsCtx = *m_usim->m_currentNsCtx;
++    keys::DeriveAkmaKeys(*m_base->config, nsCtx);
++    m_logger->info("AKMA key material derived, A-KID[%s]", nsCtx.keys.aKid.c_str());
++}
++
+ } // namespace nr::ue
+\ No newline at end of file

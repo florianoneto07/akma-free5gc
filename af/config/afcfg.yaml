@@ -1,0 +1,26 @@
+# AKMA AF inside the operator network: it requests K_AF from the AAnF
+# (TS 33.535 cl. 6.2.1) and serves the simplified Ua* protocol to the UE.
+configuration:
+  # The only name accepted in the Host header field; the second part of the
+  # realm and the FQDN of the AF_ID (TS 33.535 A.4).
+  fqdn: af1.akma.example
+  # Ua* security protocol identifier, private range (TS 33.220 H.2 NOTE 2).
+  uaStarId: FF00000001
+  listen: 192.168.16.129:8080
+  path: /ua/v1/session
+  # First part of the realm (TS 33.535 B.1.2.2 step 3; TS 24.109 K.2 b)2)).
+  realmPrefix: 3GPP-bootstrapping-akma
+  # qop offered in the challenge: auth, and optionally auth-int.
+  qop: [auth]
+  nonceLifetime: 300s
+  # When a K_AF expires: refetch (request it again from the AAnF) or reject
+  # (answer 403 KAF_EXPIRED) (TS 33.535 cl. 6.4.2).
+  kafExpiry: refetch
+  # AAnF apiRoot, locally configured (TS 33.535 cl. 6.7). The AAnF authorizes
+  # this AF_ID from this machine's address (akma.authorizedAfs of aanfcfg.yaml).
+  aanfUri: http://192.168.16.130:8010
+
+logger:
+  enable: true
+  level: info # trace, debug, info, warn, error, fatal, panic
+  reportCaller: false

@@ -1,0 +1,4 @@
+github.com/free5gc/util v1.3.2 h1:3BjZq050WbaLJY0w1Bn51YZlCirs2ARoCUxD3LDSdbo=
+github.com/free5gc/util v1.3.2/go.mod h1:wXObe2iF465VRdkE1Z5YkiSuHXlCT8HJ+yc7p9t5hMs=
+golang.org/x/text v0.31.0 h1:aC8ghyu4JhP8VojJ2lEHBnochRno1sgL6nEi9WGFGMM=
+golang.org/x/text v0.31.0/go.mod h1:tKRAlv61yKIjGGHX/4tP1LTbc13YSec1pxVEWXzfoeM=

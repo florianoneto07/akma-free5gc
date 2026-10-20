@@ -1,0 +1,269 @@
+{
+  "description": "AKMA test vectors produced by an independent Python oracle (reference/kdf/gen_vectors.py). NOT 3GPP test vectors: TS 33.535 V19.0.0 publishes none.",
+  "implementation_choices": {
+    "a_kid_default_encoding": "base64 (RFC 4648 section 4), by analogy with the GBA B-TID (TS 33.220 cl. 4.5.2)",
+    "a_kid_label": "atid, as the text of TS 29.522 table 5.14.5.4.2-1; its example uses akid",
+    "key_encoding_sbi": "lowercase hex, 64 characters, as Kausf in TS 29.503",
+    "af_id_ua_star_case": "uppercase hex on write"
+  },
+  "vectors": [
+    {
+      "name": "worked-example",
+      "note": "Worked example of akma_kdf.py: illustrative K_AUSF, SUPI and AF",
+      "k_ausf": "5c7c9be7bf6a1a1a2c0b0f6d4c9c2f819c1a3b4d5e6f708192a3b4c5d6e7f809",
+      "supi": "imsi-208930000000003",
+      "supi_kdf_param": "208930000000003",
+      "mcc": "208",
+      "mnc": "93",
+      "rid": "0",
+      "fqdn": "af.akma.free5gc.org",
+      "ua_star_id": "FF00000001",
+      "s_k_akma": "80414b4d410004323038393330303030303030303033000f",
+      "k_akma": "d6aa856e127fb8de3eb1a1d0cebf52a7df6b69b4a6c68c21c18c1c27d466dbba",
+      "s_a_tid": "81412d5449440005323038393330303030303030303033000f",
+      "a_tid": "1914b806ff737fe54dd5cd9d3e19cc184a8d2e22cc445ee3fbd9fc3eca329152",
+      "realm": "5gc.mnc093.mcc208.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid0.atidGRS4Bv9zf+VN1c2dPhnMGEqNLiLMRF7j+9n8PsoykVI=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "base64url": "rid0.atidGRS4Bv9zf-VN1c2dPhnMGEqNLiLMRF7j-9n8PsoykVI=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "hex": "rid0.atid1914b806ff737fe54dd5cd9d3e19cc184a8d2e22cc445ee3fbd9fc3eca329152@5gc.mnc093.mcc208.3gppnetwork.org"
+      },
+      "af_id_transport": "af.akma.free5gc.org.FF00000001",
+      "af_id_kdf_param": "61662e616b6d612e667265653567632e6f7267ff00000001",
+      "s_k_af": "8261662e616b6d612e667265653567632e6f7267ff000000010018",
+      "k_af": "91df18f308a46e13f032722b1c9448886c59cbae352f1e17e5a1e9d635965daa",
+      "k_af_base64": "kd8Y8wikbhPwMnIrHJRIiGxZy641Lx4X5aHp1jWWXao="
+    },
+    {
+      "name": "testbed-ue",
+      "note": "Testbed UE subscriber with RID 0000 (UERANSIM configuration)",
+      "k_ausf": "141ef548f86e3a2a1ad949331caa9e6bb12401afa321bde4f9f23b84870dd654",
+      "supi": "imsi-208930000000001",
+      "supi_kdf_param": "208930000000001",
+      "mcc": "208",
+      "mnc": "93",
+      "rid": "0000",
+      "fqdn": "af1.akma.example",
+      "ua_star_id": "FF00000001",
+      "s_k_akma": "80414b4d410004323038393330303030303030303031000f",
+      "k_akma": "84ea5c330a41f071642fe603a4b9254bb7ef42e86aaa11a15f459ba0b705074a",
+      "s_a_tid": "81412d5449440005323038393330303030303030303031000f",
+      "a_tid": "8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0",
+      "realm": "5gc.mnc093.mcc208.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "base64url": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "hex": "rid0000.atid8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0@5gc.mnc093.mcc208.3gppnetwork.org"
+      },
+      "af_id_transport": "af1.akma.example.FF00000001",
+      "af_id_kdf_param": "6166312e616b6d612e6578616d706c65ff00000001",
+      "s_k_af": "826166312e616b6d612e6578616d706c65ff000000010015",
+      "k_af": "00c16845c2e4e1256755b84bb06d94e2e659d8ba53c59e874fc149bffd5ea04b",
+      "k_af_base64": "AMFoRcLk4SVnVbhLsG2U4uZZ2LpTxZ6HT8FJv/1eoEs="
+    },
+    {
+      "name": "rid-012",
+      "note": "RID with a significant leading zero; MCC 345, MNC 12 (TS 23.003 cl. 28.2 example)",
+      "k_ausf": "482f27e7fb7bbfb702b53063ea91f971d21fc9f3f0dc93b64ed0423bc9ef67ee",
+      "supi": "imsi-345120000000001",
+      "supi_kdf_param": "345120000000001",
+      "mcc": "345",
+      "mnc": "12",
+      "rid": "012",
+      "fqdn": "af2.akma.example",
+      "ua_star_id": "FF00000001",
+      "s_k_akma": "80414b4d410004333435313230303030303030303031000f",
+      "k_akma": "b637830ed46030a35fc0fe3170d0543767817a66f7f1a4459f79595eec5a6a21",
+      "s_a_tid": "81412d5449440005333435313230303030303030303031000f",
+      "a_tid": "0a8672301b9951d4ff1a3b62c783f3f9e118a6f3320bd18869b431570f6113f2",
+      "realm": "5gc.mnc012.mcc345.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid012.atidCoZyMBuZUdT/Gjtix4Pz+eEYpvMyC9GIabQxVw9hE/I=@5gc.mnc012.mcc345.3gppnetwork.org",
+        "base64url": "rid012.atidCoZyMBuZUdT_Gjtix4Pz-eEYpvMyC9GIabQxVw9hE_I=@5gc.mnc012.mcc345.3gppnetwork.org",
+        "hex": "rid012.atid0a8672301b9951d4ff1a3b62c783f3f9e118a6f3320bd18869b431570f6113f2@5gc.mnc012.mcc345.3gppnetwork.org"
+      },
+      "af_id_transport": "af2.akma.example.FF00000001",
+      "af_id_kdf_param": "6166322e616b6d612e6578616d706c65ff00000001",
+      "s_k_af": "826166322e616b6d612e6578616d706c65ff000000010015",
+      "k_af": "f89c9ab16217c618f0b9c2823850af3010f86f6c26279891fc5d2ee7f44528af",
+      "k_af_base64": "+JyasWIXxhjwucKCOFCvMBD4b2wmJ5iR/F0u5/RFKK8="
+    },
+    {
+      "name": "mnc-3-digits",
+      "note": "Three-digit MNC and single-digit RID",
+      "k_ausf": "2e38b2a20add85d9972fb27e39f6ea3a3fd331be6c4a5bc73bdc8faa0c757960",
+      "supi": "imsi-310410000000001",
+      "supi_kdf_param": "310410000000001",
+      "mcc": "310",
+      "mnc": "410",
+      "rid": "7",
+      "fqdn": "af1.akma.example",
+      "ua_star_id": "FF00000001",
+      "s_k_akma": "80414b4d410004333130343130303030303030303031000f",
+      "k_akma": "b4110c02a67ae7d24682ea5a3f4e0e01c881436b444ac19b3c75f9d50f373505",
+      "s_a_tid": "81412d5449440005333130343130303030303030303031000f",
+      "a_tid": "8cfe63d1b04d7d3f68ee3ea59b9f1b96f8519b2466ce998a2c2f702d965bdc07",
+      "realm": "5gc.mnc410.mcc310.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid7.atidjP5j0bBNfT9o7j6lm58blvhRmyRmzpmKLC9wLZZb3Ac=@5gc.mnc410.mcc310.3gppnetwork.org",
+        "base64url": "rid7.atidjP5j0bBNfT9o7j6lm58blvhRmyRmzpmKLC9wLZZb3Ac=@5gc.mnc410.mcc310.3gppnetwork.org",
+        "hex": "rid7.atid8cfe63d1b04d7d3f68ee3ea59b9f1b96f8519b2466ce998a2c2f702d965bdc07@5gc.mnc410.mcc310.3gppnetwork.org"
+      },
+      "af_id_transport": "af1.akma.example.FF00000001",
+      "af_id_kdf_param": "6166312e616b6d612e6578616d706c65ff00000001",
+      "s_k_af": "826166312e616b6d612e6578616d706c65ff000000010015",
+      "k_af": "1923134d187a3e710036e550d5de24b8dedafca53603fb26c25392e949910e28",
+      "k_af_base64": "GSMTTRh6PnEANuVQ1d4kuN7a/KU2A/smwlOS6UmRDig="
+    },
+    {
+      "name": "ua-tls13",
+      "note": "Same UE as testbed-ue; Ua* id of TLS 1.3 PSK (TS 33.220 H.3)",
+      "k_ausf": "141ef548f86e3a2a1ad949331caa9e6bb12401afa321bde4f9f23b84870dd654",
+      "supi": "imsi-208930000000001",
+      "supi_kdf_param": "208930000000001",
+      "mcc": "208",
+      "mnc": "93",
+      "rid": "0000",
+      "fqdn": "af1.akma.example",
+      "ua_star_id": "0100000007",
+      "s_k_akma": "80414b4d410004323038393330303030303030303031000f",
+      "k_akma": "84ea5c330a41f071642fe603a4b9254bb7ef42e86aaa11a15f459ba0b705074a",
+      "s_a_tid": "81412d5449440005323038393330303030303030303031000f",
+      "a_tid": "8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0",
+      "realm": "5gc.mnc093.mcc208.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "base64url": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "hex": "rid0000.atid8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0@5gc.mnc093.mcc208.3gppnetwork.org"
+      },
+      "af_id_transport": "af1.akma.example.0100000007",
+      "af_id_kdf_param": "6166312e616b6d612e6578616d706c650100000007",
+      "s_k_af": "826166312e616b6d612e6578616d706c6501000000070015",
+      "k_af": "cb46344ca65ecae05bea4bad09a44bfcb8fbc41f9835e4242c86a5b6bce6bf16",
+      "k_af_base64": "y0Y0TKZeyuBb6kutCaRL/Lj7xB+YNeQkLIaltrzmvxY="
+    },
+    {
+      "name": "nfkc-composed",
+      "note": "FQDN with precomposed U+00E9",
+      "k_ausf": "141ef548f86e3a2a1ad949331caa9e6bb12401afa321bde4f9f23b84870dd654",
+      "supi": "imsi-208930000000001",
+      "supi_kdf_param": "208930000000001",
+      "mcc": "208",
+      "mnc": "93",
+      "rid": "0000",
+      "fqdn": "café.akma.example",
+      "ua_star_id": "FF00000001",
+      "s_k_akma": "80414b4d410004323038393330303030303030303031000f",
+      "k_akma": "84ea5c330a41f071642fe603a4b9254bb7ef42e86aaa11a15f459ba0b705074a",
+      "s_a_tid": "81412d5449440005323038393330303030303030303031000f",
+      "a_tid": "8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0",
+      "realm": "5gc.mnc093.mcc208.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "base64url": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "hex": "rid0000.atid8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0@5gc.mnc093.mcc208.3gppnetwork.org"
+      },
+      "af_id_transport": "café.akma.example.FF00000001",
+      "af_id_kdf_param": "636166c3a92e616b6d612e6578616d706c65ff00000001",
+      "s_k_af": "82636166c3a92e616b6d612e6578616d706c65ff000000010017",
+      "k_af": "c87d0b054d96059a8f94823f607e5cd97b9c7b307f48efdcbe4ca8156fc827bb",
+      "k_af_base64": "yH0LBU2WBZqPlII/YH5c2XucezB/SO/cvkyoFW/IJ7s="
+    },
+    {
+      "name": "nfkc-decomposed",
+      "note": "FQDN with e + U+0301; NFKC makes it equal to nfkc-composed",
+      "k_ausf": "141ef548f86e3a2a1ad949331caa9e6bb12401afa321bde4f9f23b84870dd654",
+      "supi": "imsi-208930000000001",
+      "supi_kdf_param": "208930000000001",
+      "mcc": "208",
+      "mnc": "93",
+      "rid": "0000",
+      "fqdn": "café.akma.example",
+      "ua_star_id": "FF00000001",
+      "s_k_akma": "80414b4d410004323038393330303030303030303031000f",
+      "k_akma": "84ea5c330a41f071642fe603a4b9254bb7ef42e86aaa11a15f459ba0b705074a",
+      "s_a_tid": "81412d5449440005323038393330303030303030303031000f",
+      "a_tid": "8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0",
+      "realm": "5gc.mnc093.mcc208.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "base64url": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "hex": "rid0000.atid8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0@5gc.mnc093.mcc208.3gppnetwork.org"
+      },
+      "af_id_transport": "café.akma.example.FF00000001",
+      "af_id_kdf_param": "636166c3a92e616b6d612e6578616d706c65ff00000001",
+      "s_k_af": "82636166c3a92e616b6d612e6578616d706c65ff000000010017",
+      "k_af": "c87d0b054d96059a8f94823f607e5cd97b9c7b307f48efdcbe4ca8156fc827bb",
+      "k_af_base64": "yH0LBU2WBZqPlII/YH5c2XucezB/SO/cvkyoFW/IJ7s="
+    },
+    {
+      "name": "nfkc-fullwidth",
+      "note": "Fullwidth FQDN characters; NFKC makes it equal to testbed-ue",
+      "k_ausf": "141ef548f86e3a2a1ad949331caa9e6bb12401afa321bde4f9f23b84870dd654",
+      "supi": "imsi-208930000000001",
+      "supi_kdf_param": "208930000000001",
+      "mcc": "208",
+      "mnc": "93",
+      "rid": "0000",
+      "fqdn": "ａｆ１.akma.example",
+      "ua_star_id": "FF00000001",
+      "s_k_akma": "80414b4d410004323038393330303030303030303031000f",
+      "k_akma": "84ea5c330a41f071642fe603a4b9254bb7ef42e86aaa11a15f459ba0b705074a",
+      "s_a_tid": "81412d5449440005323038393330303030303030303031000f",
+      "a_tid": "8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0",
+      "realm": "5gc.mnc093.mcc208.3gppnetwork.org",
+      "a_kid": {
+        "base64": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "base64url": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+        "hex": "rid0000.atid8b3d4537c0e4306cb1c2d7d3558b0a52c5a7cce25d04e2e540489094ada01cd0@5gc.mnc093.mcc208.3gppnetwork.org"
+      },
+      "af_id_transport": "ａｆ１.akma.example.FF00000001",
+      "af_id_kdf_param": "6166312e616b6d612e6578616d706c65ff00000001",
+      "s_k_af": "826166312e616b6d612e6578616d706c65ff000000010015",
+      "k_af": "00c16845c2e4e1256755b84bb06d94e2e659d8ba53c59e874fc149bffd5ea04b",
+      "k_af_base64": "AMFoRcLk4SVnVbhLsG2U4uZZ2LpTxZ6HT8FJv/1eoEs="
+    }
+  ],
+  "equalities": [
+    {
+      "field": "k_af",
+      "a": "nfkc-composed",
+      "b": "nfkc-decomposed",
+      "equal": true
+    },
+    {
+      "field": "k_af",
+      "a": "testbed-ue",
+      "b": "nfkc-fullwidth",
+      "equal": true
+    },
+    {
+      "field": "k_akma",
+      "a": "testbed-ue",
+      "b": "ua-tls13",
+      "equal": true
+    },
+    {
+      "field": "k_af",
+      "a": "testbed-ue",
+      "b": "ua-tls13",
+      "equal": false
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "supi-with-imsi-prefix",
+      "vector": "testbed-ue",
+      "wrong_input": "imsi-208930000000001",
+      "k_akma": "d0df631500fdf577401d47cb40bead338aa75cb488713aa1230f69f48433dd32",
+      "note": "SBI SUPI used as P1; differs from the correct k_akma"
+    },
+    {
+      "name": "af-id-transport-as-p0",
+      "vector": "testbed-ue",
+      "wrong_input": "af1.akma.example.FF00000001",
+      "k_af": "47cc3fc0ad14d217d057482894521f30239353f84748b7e78b0e5e8bd29a79ef",
+      "note": "AfId transport string used as P0; differs from the correct k_af"
+    }
+  ]
+}

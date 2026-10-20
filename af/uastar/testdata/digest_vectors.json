@@ -1,0 +1,53 @@
+{
+  "description": "HTTP Digest (RFC 7616, SHA-256) vectors for the simplified Ua* protocol. The password of the testbed-ue vectors is k_af_base64 of the shared vector named in shared_vector; it is not repeated here.",
+  "vectors": [
+    {
+      "name": "rfc7616-3.9.1-sha256",
+      "username": "Mufasa",
+      "password": "Circle of Life",
+      "realm": "http-auth@example.org",
+      "method": "GET",
+      "uri": "/dir/index.html",
+      "nonce": "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v",
+      "nc": "00000001",
+      "cnonce": "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
+      "qop": "auth",
+      "request_body": "",
+      "response_body": "",
+      "response": "753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1",
+      "rspauth": "86d3b25618d41854ca5039a5d7e53ff6355d5134a9b1fb088a78ac3c462195a0"
+    },
+    {
+      "name": "testbed-ue-auth",
+      "shared_vector": "testbed-ue",
+      "username": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+      "realm": "3GPP-bootstrapping-akma@af1.akma.example",
+      "method": "GET",
+      "uri": "/ua/v1/session",
+      "nonce": "q2N0YXN0aWMtbm9uY2UtZm9yLXRlc3RzLW9ubHktMDAwMA==",
+      "nc": "00000001",
+      "cnonce": "c3RhdGljLWNub25jZS0wMQ==",
+      "qop": "auth",
+      "request_body": "",
+      "response_body": "",
+      "response": "f14ac7a778b00abdf019cf447468f877a06ff996299c3d2001739a840521f097",
+      "rspauth": "2f837d962e2b6fa04ba88df55188d8ab633f266f35ea19d78bb1396dc8c92bbe"
+    },
+    {
+      "name": "testbed-ue-auth-int",
+      "shared_vector": "testbed-ue",
+      "username": "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org",
+      "realm": "3GPP-bootstrapping-akma@af1.akma.example",
+      "method": "GET",
+      "uri": "/ua/v1/session",
+      "nonce": "q2N0YXN0aWMtbm9uY2UtZm9yLXRlc3RzLW9ubHktMDAwMA==",
+      "nc": "00000001",
+      "cnonce": "c3RhdGljLWNub25jZS0wMQ==",
+      "qop": "auth-int",
+      "request_body": "",
+      "response_body": "{\"aKid\":\"rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org\"}",
+      "response": "fd10d89fcd768824e3918c4fa623f4a1988b875375e14e2ff90ba17ca9b3e63c",
+      "rspauth": "476ec2dd34a662c47788f285d151d064b963110f1123c37f3d0479c4526939b8"
+    }
+  ]
+}

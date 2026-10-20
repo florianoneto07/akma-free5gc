@@ -1,0 +1,711 @@
+diff --git a/go.mod b/go.mod
+index 6263eca..b3f7ae1 100644
+--- a/go.mod
++++ b/go.mod
+@@ -13,11 +13,17 @@ require (
+ 	github.com/pkg/errors v0.9.1
+ 	github.com/prometheus/client_golang v1.21.0
+ 	github.com/sirupsen/logrus v1.9.3
++	github.com/stretchr/testify v1.10.0
+ 	github.com/urfave/cli/v2 v2.27.7
+ 	go.uber.org/mock v0.4.0
+ 	gopkg.in/yaml.v2 v2.4.0
+ )
+ 
++require (
++	github.com/davecgh/go-spew v1.1.1 // indirect
++	github.com/pmezard/go-difflib v1.0.0 // indirect
++)
++
+ require (
+ 	github.com/beorn7/perks v1.0.1 // indirect
+ 	github.com/bytedance/sonic v1.11.6 // indirect
+@@ -27,6 +33,7 @@ require (
+ 	github.com/cloudwego/iasm v0.2.0 // indirect
+ 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
+ 	github.com/felixge/httpsnoop v1.0.4 // indirect
++	github.com/florianoneto07/akma-free5gc/shared/akma v0.0.0
+ 	github.com/free5gc/aper v1.1.1 // indirect
+ 	github.com/free5gc/nas v1.2.3 // indirect
+ 	github.com/free5gc/ngap v1.1.3 // indirect
+@@ -66,10 +73,14 @@ require (
+ 	go.opentelemetry.io/otel/trace v1.24.0 // indirect
+ 	golang.org/x/arch v0.8.0 // indirect
+ 	golang.org/x/crypto v0.45.0 // indirect
+-	golang.org/x/net v0.47.0 // indirect
++	golang.org/x/net v0.47.0
+ 	golang.org/x/oauth2 v0.27.0 // indirect
+ 	golang.org/x/sys v0.38.0 // indirect
+ 	golang.org/x/text v0.31.0 // indirect
+ 	google.golang.org/protobuf v1.36.1 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ )
++
++replace github.com/florianoneto07/akma-free5gc/shared/akma => ../../../akma-free5gc/shared/akma
++
++replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi
+diff --git a/go.sum b/go.sum
+index 447bf1a..6405fd2 100644
+--- a/go.sum
++++ b/go.sum
+@@ -27,8 +27,6 @@ github.com/free5gc/nas v1.2.3 h1:vMA9NGORw0zr26vQWWSTy8X9HrA+wGxFvwc2g9KqUTw=
+ github.com/free5gc/nas v1.2.3/go.mod h1:A8ODi6MW0fRJiLEH4GcUPbg3dd9xm3zi+fkBWqTjQ40=
+ github.com/free5gc/ngap v1.1.3 h1:uT+IE5PkWOYjPdxCyOAwLDOXUiADcOQCs05CudyC36s=
+ github.com/free5gc/ngap v1.1.3/go.mod h1:yGMO2GYV5DbbmudwD7Oo6dXQgz2ON29GhqtXDeXdyvA=
+-github.com/free5gc/openapi v1.2.4 h1:uhyaTggUhd9xgMFcs5y2rCqFOfXuv6Zsr+cLUU/x6gs=
+-github.com/free5gc/openapi v1.2.4/go.mod h1:V9CKQUqWp6kXL3SDtaIs4ZWeLipk5TSRXCnt+ntNceg=
+ github.com/free5gc/util v1.3.2 h1:3BjZq050WbaLJY0w1Bn51YZlCirs2ARoCUxD3LDSdbo=
+ github.com/free5gc/util v1.3.2/go.mod h1:wXObe2iF465VRdkE1Z5YkiSuHXlCT8HJ+yc7p9t5hMs=
+ github.com/gabriel-vasile/mimetype v1.4.3 h1:in2uUcidCuFcDKtdcBxlR0rJ1+fsokWf+uqxgUFjbI0=
+diff --git a/internal/logger/logger.go b/internal/logger/logger.go
+index 76327e9..c2b4b43 100644
+--- a/internal/logger/logger.go
++++ b/internal/logger/logger.go
+@@ -20,6 +20,7 @@ var (
+ 	Auth5gAkaLog *logrus.Entry
+ 	AuthELog     *logrus.Entry
+ 	UtilLog      *logrus.Entry
++	AkmaLog      *logrus.Entry
+ )
+ 
+ func init() {
+@@ -41,4 +42,5 @@ func init() {
+ 	Auth5gAkaLog = NfLog.WithField(logger_util.FieldCategory, "5gAka")
+ 	AuthELog = NfLog.WithField(logger_util.FieldCategory, "Eap")
+ 	UtilLog = NfLog.WithField(logger_util.FieldCategory, "Util")
++	AkmaLog = NfLog.WithField(logger_util.FieldCategory, "AKMA")
+ }
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index f04f184..c8dc564 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -74,6 +74,17 @@ type Configuration struct {
+ 	PlmnSupportList      []models.PlmnId `yaml:"plmnSupportList,omitempty" valid:"required"`
+ 	GroupId              string          `yaml:"groupId,omitempty" valid:"type(string),minstringlength(1)"`
+ 	EapAkaSupiImsiPrefix bool            `yaml:"eapAkaSupiImsiPrefix,omitempty" valid:"type(bool),optional"`
++	Akma                 *Akma           `yaml:"akma,omitempty" valid:"optional"`
++}
++
++// Akma configures the AKMA support of the AUSF (TS 33.535 cl. 6.1).
++type Akma struct {
++	// Enable makes the AUSF derive K_AKMA and the A-KID and register them at
++	// the AAnF when the UDM sends the AKMA indication.
++	Enable bool `yaml:"enable" valid:"type(bool)"`
++	// AanfUri is the apiRoot of the AAnF. Empty: the AAnF is discovered at
++	// the NRF with the Routing Indicator of the UE (TS 33.535 cl. 6.7).
++	AanfUri string `yaml:"aanfUri,omitempty" valid:"optional,url"`
+ }
+ 
+ type Logger struct {
+diff --git a/internal/context/context.go b/internal/context/context.go
+index ad9a08d..aa9c2f5 100644
+--- a/internal/context/context.go
++++ b/internal/context/context.go
+@@ -28,6 +28,9 @@ type AUSFContext struct {
+ 	snRegex              *regexp.Regexp
+ 	EapAkaSupiImsiPrefix bool
+ 	OAuth2Required       bool
++	// AKMA (TS 33.535 cl. 6.1, 6.7)
++	AkmaEnable  bool
++	AkmaAanfUri string
+ }
+ 
+ type AusfUeContext struct {
+@@ -47,6 +50,12 @@ type AusfUeContext struct {
+ 	Rand     string
+ 	EapID    uint8
+ 	Resynced bool
++
++	// for AKMA (TS 33.535 cl. 6.1): the AKMA indication and the Routing
++	// Indicator received from the UDM, and the SUCI or SUPI of the request.
++	AkmaInd    bool
++	RoutingId  string
++	SupiOrSuci string
+ }
+ 
+ type SuciSupiMap struct {
+diff --git a/internal/context/ausf_context_init.go b/internal/context/ausf_context_init.go
+index f58065e..adb7352 100644
+--- a/internal/context/ausf_context_init.go
++++ b/internal/context/ausf_context_init.go
+@@ -59,6 +59,10 @@ func InitAusfContext(context *AUSFContext) {
+ 	fmt.Println("ausf context = ", context)
+ 
+ 	context.EapAkaSupiImsiPrefix = configuration.EapAkaSupiImsiPrefix
++	if configuration.Akma != nil {
++		context.AkmaEnable = configuration.Akma.Enable
++		context.AkmaAanfUri = configuration.Akma.AanfUri
++	}
+ }
+ 
+ func AddNfServices(
+diff --git a/internal/sbi/processor/ue_authentication.go b/internal/sbi/processor/ue_authentication.go
+index e519dbc..cded673 100644
+--- a/internal/sbi/processor/ue_authentication.go
++++ b/internal/sbi/processor/ue_authentication.go
+@@ -158,6 +158,10 @@ func (p *Processor) EapAuthComfirmRequestProcedure(
+ 					return
+ 				}
+ 				ausfCurrentContext.AuthStatus = models.AusfUeAuthenticationAuthResult_SUCCESS
++				// EAP-AKA' step 10 (TS 33.501 cl. 6.1.3.1): authentication
++				// successfully completed; AKMA keys if indicated (TS 33.535
++				// cl. 6.1 step 3).
++				p.startAkma(ausfCurrentContext)
+ 			} else {
+ 				eapOK = false
+ 				eapErrStr = "Wrong RES value, EAP-AKA' auth failed"
+@@ -360,7 +364,14 @@ func (p *Processor) UeAuthPostRequestProcedure(c *gin.Context, updateAuthenticat
+ 	ausfUeContext.ServingNetworkName = snName
+ 	ausfUeContext.AuthStatus = models.AusfUeAuthenticationAuthResult_ONGOING
+ 	ausfUeContext.UdmUeauUrl = udmUrl
++	ausfUeContext.AkmaInd = authInfoResult.AkmaInd
++	ausfUeContext.RoutingId = authInfoResult.RoutingId
++	ausfUeContext.SupiOrSuci = supiOrSuci
+ 	ausf_context.AddAusfUeContextToPool(ausfUeContext)
++	if authInfoResult.AkmaInd {
++		logger.AkmaLog.Infof("AKMA indication received from the UDM for %s, Routing Indicator %s",
++			ueid, authInfoResult.RoutingId)
++	}
+ 
+ 	logger.UeAuthLog.Infof("Add SuciSupiPair (%s, %s) to map.\n", supiOrSuci, ueid)
+ 	ausf_context.AddSuciSupiPairToMap(supiOrSuci, ueid)
+@@ -600,6 +611,12 @@ func (p *Processor) Auth5gAkaComfirmRequestProcedure(c *gin.Context, updateConfi
+ 		return
+ 	}
+ 
++	if success {
++		// 5G AKA step 11 (TS 33.501 cl. 6.1.3.2.0): authentication
++		// successfully completed; AKMA keys if indicated (TS 33.535 cl. 6.1
++		// step 3).
++		p.startAkma(ausfCurrentContext)
++	}
+ 	c.JSON(http.StatusOK, confirmDataRsp)
+ }
+ 
+diff --git a/internal/sbi/processor/akma.go b/internal/sbi/processor/akma.go
+new file mode 100644
+index 0000000..d7539ef
+--- /dev/null
++++ b/internal/sbi/processor/akma.go
+@@ -0,0 +1,127 @@
++package processor
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/florianoneto07/akma-free5gc/shared/akma/akid"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/codec"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/derive"
++	"github.com/florianoneto07/akma-free5gc/shared/akma/supi"
++
++	ausf_context "github.com/free5gc/ausf/internal/context"
++	"github.com/free5gc/ausf/internal/logger"
++	"github.com/free5gc/openapi/models"
++)
++
++// akmaRegisterTimeout bounds the AnchorKey_Register of one UE, discovery
++// included.
++const akmaRegisterTimeout = 10 * time.Second
++
++// akmaRequest is what the AKMA procedure needs, copied from the UE context
++// when the primary authentication completes.
++type akmaRequest struct {
++	supi       string // SBI form, "imsi-..."
++	supiOrSuci string
++	kausf      string // hexadecimal
++	routingId  string
++}
++
++// startAkma starts the AKMA key generation and registration of TS 33.535
++// cl. 6.1 steps 3-5 when the UDM sent the AKMA indication. It runs apart
++// from the authentication: the response to the AMF is neither delayed nor
++// changed by the AAnF (TS 33.535 cl. 6.1: AKMA follows the authentication).
++func (p *Processor) startAkma(ue *ausf_context.AusfUeContext) {
++	if !ue.AkmaInd {
++		return
++	}
++	self := ausf_context.GetSelf()
++	if !self.AkmaEnable {
++		logger.AkmaLog.Infof("AKMA indication for %s ignored: akma.enable is false", ue.Supi)
++		return
++	}
++	req := akmaRequest{supi: ue.Supi, supiOrSuci: ue.SupiOrSuci, kausf: ue.Kausf, routingId: ue.RoutingId}
++	plmns := append([]models.PlmnId(nil), self.PlmnList...)
++	go p.registerAkma(req, plmns)
++}
++
++func (p *Processor) registerAkma(req akmaRequest, plmns []models.PlmnId) {
++	info, err := buildAkmaKeyInfo(req, plmns)
++	if err != nil {
++		logger.AkmaLog.Errorf("AKMA key material for %s not generated: %v", req.supi, err)
++		return
++	}
++	logger.AkmaLog.Infof("K_AKMA and A-KID derived for %s: A-KID %s", req.supi, info.AKId)
++	ctx, cancel := context.WithTimeout(context.Background(), akmaRegisterTimeout)
++	defer cancel()
++	if err := p.Consumer().RegisterAKMAKey(ctx, req.routingId, info); err != nil {
++		logger.AkmaLog.Errorf("Naanf_AKMA_AnchorKey_Register for %s failed: %v", req.supi, err)
++		return
++	}
++	logger.AkmaLog.Infof("AKMA key material of %s registered at the AAnF", req.supi)
++}
++
++// buildAkmaKeyInfo derives K_AKMA (TS 33.535 A.2) and the A-KID (cl. 6.1,
++// A.3) from K_AUSF. The SUPI of the KDF is the IMSI without "imsi-"
++// (TS 33.501 A.7.0); the "supi" attribute keeps the SBI form (TS 29.571).
++func buildAkmaKeyInfo(req akmaRequest, plmns []models.PlmnId) (models.AkmaKeyInfo, error) {
++	param, err := supi.FromSBI(req.supi)
++	if err != nil {
++		return models.AkmaKeyInfo{}, err
++	}
++	kAusf, err := codec.ParseHexKey(req.kausf)
++	if err != nil {
++		return models.AkmaKeyInfo{}, fmt.Errorf("K_AUSF: %w", err)
++	}
++	// "The AUSF shall use the RID received from the UDM" (TS 33.535 cl. 6.1).
++	rid, err := akid.ParseRID(req.routingId)
++	if err != nil {
++		return models.AkmaKeyInfo{}, fmt.Errorf("routingId from the UDM: %w", err)
++	}
++	hn, err := homeNetwork(req.supiOrSuci, string(param), plmns)
++	if err != nil {
++		return models.AkmaKeyInfo{}, err
++	}
++	kAkma, err := derive.KAkma(kAusf, param)
++	if err != nil {
++		return models.AkmaKeyInfo{}, err
++	}
++	id, err := derive.AKID(kAusf, param, rid, hn)
++	if err != nil {
++		return models.AkmaKeyInfo{}, err
++	}
++	aKId, err := id.Format(akid.DefaultOptions())
++	if err != nil {
++		return models.AkmaKeyInfo{}, err
++	}
++	return models.AkmaKeyInfo{Supi: req.supi, AKId: aKId, KAkma: codec.HexKey(kAkma)}, nil
++}
++
++// homeNetwork returns the home network of the UE for the realm of the A-KID
++// (TS 33.535 cl. 6.1; TS 23.003 cl. 28.2). The MNC length cannot be read
++// from the IMSI (TS 23.003 cl. 2.2): it comes from the SUCI of the request
++// ("suci-0-<MCC>-<MNC>-..."), or, when the request carried a SUPI, from the
++// single PLMN of plmnSupportList whose MCC and MNC prefix the IMSI.
++func homeNetwork(supiOrSuci, imsi string, plmns []models.PlmnId) (akid.HomeNetwork, error) {
++	if rest, ok := strings.CutPrefix(supiOrSuci, "suci-0-"); ok {
++		parts := strings.SplitN(rest, "-", 3)
++		if len(parts) == 3 {
++			return akid.NewHomeNetwork(parts[0], parts[1])
++		}
++		return akid.HomeNetwork{}, errors.New("malformed SUCI")
++	}
++	var found []models.PlmnId
++	for _, plmn := range plmns {
++		if strings.HasPrefix(imsi, plmn.Mcc+plmn.Mnc) {
++			found = append(found, plmn)
++		}
++	}
++	if len(found) != 1 {
++		return akid.HomeNetwork{}, fmt.Errorf("home network of the IMSI not determined by plmnSupportList (%d matches)",
++			len(found))
++	}
++	return akid.NewHomeNetwork(found[0].Mcc, found[0].Mnc)
++}
+diff --git a/internal/sbi/processor/akma_test.go b/internal/sbi/processor/akma_test.go
+new file mode 100644
+index 0000000..561c7d2
+--- /dev/null
++++ b/internal/sbi/processor/akma_test.go
+@@ -0,0 +1,261 @@
++package processor
++
++import (
++	"encoding/json"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/net/http2"
++	"golang.org/x/net/http2/h2c"
++
++	ausf_context "github.com/free5gc/ausf/internal/context"
++	"github.com/free5gc/ausf/internal/sbi/consumer"
++	"github.com/free5gc/ausf/pkg/factory"
++	"github.com/free5gc/openapi/models"
++)
++
++// Vector "testbed-ue" of the KDF oracle
++// (shared/akma/testdata/vectors.json in akma-free5gc).
++const (
++	vecKausf = "141ef548f86e3a2a1ad949331caa9e6bb12401afa321bde4f9f23b84870dd654"
++	vecSupi  = "imsi-208930000000001"
++	vecSuci  = "suci-0-208-93-0000-0-0-0000000001"
++	vecKakma = "84ea5c330a41f071642fe603a4b9254bb7ef42e86aaa11a15f459ba0b705074a"
++	vecAKID  = "rid0000.atidiz1FN8DkMGyxwtfTVYsKUsWnzOJdBOLlQEiQlK2gHNA=@5gc.mnc093.mcc208.3gppnetwork.org"
++)
++
++var testPlmns = []models.PlmnId{{Mcc: "208", Mnc: "93"}, {Mcc: "123", Mnc: "45"}}
++
++func TestBuildAkmaKeyInfoMatchesOracle(t *testing.T) {
++	for _, supiOrSuci := range []string{vecSuci, vecSupi} {
++		t.Run(supiOrSuci, func(t *testing.T) {
++			info, err := buildAkmaKeyInfo(akmaRequest{
++				supi: vecSupi, supiOrSuci: supiOrSuci, kausf: vecKausf, routingId: "0000",
++			}, testPlmns)
++			require.NoError(t, err)
++			// "supi" keeps the SBI form; the KDF uses the IMSI digits.
++			require.Equal(t, vecSupi, info.Supi)
++			require.Equal(t, vecAKID, info.AKId)
++			require.Equal(t, vecKakma, info.KAkma)
++			require.Empty(t, info.Gpsi)
++		})
++	}
++}
++
++func TestBuildAkmaKeyInfoErrors(t *testing.T) {
++	cases := map[string]struct {
++		req   akmaRequest
++		plmns []models.PlmnId
++	}{
++		"NAI (IMSI only)": {akmaRequest{supi: "nai-user@example.com", supiOrSuci: vecSuci, kausf: vecKausf, routingId: "0000"}, testPlmns},
++		"K_AUSF not hex":  {akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: "zz", routingId: "0000"}, testPlmns},
++		"no routingId":    {akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf}, testPlmns},
++		"RID of 5 digits": {akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf, routingId: "00000"}, testPlmns},
++		"SUPI, no PLMN":   {akmaRequest{supi: vecSupi, supiOrSuci: vecSupi, kausf: vecKausf, routingId: "0000"}, nil},
++		"SUPI, two PLMNs": {akmaRequest{supi: vecSupi, supiOrSuci: vecSupi, kausf: vecKausf, routingId: "0000"},
++			[]models.PlmnId{{Mcc: "208", Mnc: "93"}, {Mcc: "208", Mnc: "930"}}},
++	}
++	for name, c := range cases {
++		t.Run(name, func(t *testing.T) {
++			_, err := buildAkmaKeyInfo(c.req, c.plmns)
++			require.Error(t, err)
++		})
++	}
++}
++
++// The MNC of the realm comes from the SUCI, with its length, not from the IMSI.
++func TestHomeNetworkFromSuci(t *testing.T) {
++	hn, err := homeNetwork("suci-0-001-001-0-0-0-0000000001", "001001000000001", nil)
++	require.NoError(t, err)
++	require.Equal(t, "5gc.mnc001.mcc001.3gppnetwork.org", hn.Domain())
++	hn, err = homeNetwork("suci-0-310-410-0-0-0-0000000001", "310410000000001", nil)
++	require.NoError(t, err)
++	require.Equal(t, "5gc.mnc410.mcc310.3gppnetwork.org", hn.Domain())
++}
++
++// fakeApp is the AUSF application seen by the processor.
++type fakeApp struct {
++	consumer *consumer.Consumer
++}
++
++func (a *fakeApp) SetLogEnable(bool)                  {}
++func (a *fakeApp) SetLogLevel(string)                 {}
++func (a *fakeApp) SetReportCaller(bool)               {}
++func (a *fakeApp) Start()                             {}
++func (a *fakeApp) Terminate()                         {}
++func (a *fakeApp) Context() *ausf_context.AUSFContext { return ausf_context.GetSelf() }
++func (a *fakeApp) Config() *factory.Config            { return &factory.Config{} }
++func (a *fakeApp) Consumer() *consumer.Consumer       { return a.consumer }
++
++type recorder struct {
++	mu       sync.Mutex
++	queries  []string
++	requests []models.AkmaKeyInfo
++	paths    []string
++}
++
++func h2cServer(t *testing.T, h http.Handler) *httptest.Server {
++	t.Helper()
++	ts := httptest.NewServer(h2c.NewHandler(h, &http2.Server{}))
++	t.Cleanup(ts.Close)
++	return ts
++}
++
++// fakeAanf answers register-anchorkey with 200 and the AkmaKeyInfo received.
++func fakeAanf(t *testing.T, rec *recorder) *httptest.Server {
++	return h2cServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		var info models.AkmaKeyInfo
++		_ = json.Unmarshal(body, &info)
++		rec.mu.Lock()
++		rec.paths = append(rec.paths, r.Method+" "+r.URL.Path)
++		rec.requests = append(rec.requests, info)
++		rec.mu.Unlock()
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write(body)
++	}))
++}
++
++// fakeNrf answers the discovery of AANF with the profile of aanf.
++func fakeNrf(t *testing.T, rec *recorder, aanf *httptest.Server) *httptest.Server {
++	host, portStr, err := net.SplitHostPort(aanf.Listener.Addr().String())
++	require.NoError(t, err)
++	port, _ := strconv.Atoi(portStr)
++	result := models.SearchResult{NfInstances: []models.NrfNfDiscoveryNfProfile{{
++		NfInstanceId: "b6f417f0-06fa-4c38-b291-33066f5a5fe7",
++		NfType:       models.NrfNfManagementNfType_AANF,
++		NfStatus:     models.NrfNfManagementNfStatus_REGISTERED,
++		NfServices: []models.NrfNfDiscoveryNfService{{
++			ServiceInstanceId: "b6f417f0-06fa-4c38-b291-33066f5a5fe7",
++			ServiceName:       models.ServiceName_NAANF_AKMA,
++			Versions:          []models.NfServiceVersion{{ApiVersionInUri: "v1", ApiFullVersion: "1.2.0"}},
++			Scheme:            models.UriScheme_HTTP,
++			NfServiceStatus:   models.NfServiceStatus_REGISTERED,
++			IpEndPoints:       []models.IpEndPoint{{Ipv4Address: host, Port: int32(port)}},
++		}},
++	}}}
++	return h2cServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		rec.mu.Lock()
++		rec.queries = append(rec.queries, r.URL.RawQuery)
++		rec.mu.Unlock()
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(result)
++	}))
++}
++
++func newTestProcessor(t *testing.T) *Processor {
++	t.Helper()
++	app := &fakeApp{}
++	c, err := consumer.NewConsumer(app)
++	require.NoError(t, err)
++	app.consumer = c
++	p, err := NewProcessor(app)
++	require.NoError(t, err)
++	return p
++}
++
++func setAusfAkma(t *testing.T, enable bool, nrfUri, aanfUri string) {
++	self := ausf_context.GetSelf()
++	enable0, aanf0, nrf0, oauth0, plmns0 := self.AkmaEnable, self.AkmaAanfUri, self.NrfUri, self.OAuth2Required,
++		self.PlmnList
++	t.Cleanup(func() {
++		self.AkmaEnable, self.AkmaAanfUri, self.NrfUri, self.OAuth2Required, self.PlmnList = enable0, aanf0, nrf0,
++			oauth0, plmns0
++	})
++	self.AkmaEnable, self.AkmaAanfUri, self.NrfUri = enable, aanfUri, nrfUri
++	self.OAuth2Required = false
++	self.PlmnList = testPlmns
++}
++
++// TS 33.535 cl. 6.7: the AUSF discovers the AAnF at the NRF with the Routing
++// Indicator received from the UDM, then registers the key material.
++func TestRegisterAkmaDiscoversAanf(t *testing.T) {
++	rec := &recorder{}
++	aanf := fakeAanf(t, rec)
++	nrf := fakeNrf(t, rec, aanf)
++	setAusfAkma(t, true, nrf.URL, "")
++
++	p := newTestProcessor(t)
++	p.registerAkma(akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf, routingId: "0000"}, testPlmns)
++
++	require.Len(t, rec.queries, 1)
++	q := rec.queries[0]
++	require.Contains(t, q, "target-nf-type=AANF")
++	require.Contains(t, q, "requester-nf-type=AUSF")
++	require.Contains(t, q, "routing-indicator=0000")
++	require.Contains(t, q, "service-names=naanf-akma")
++	require.Equal(t, []string{"POST /naanf-akma/v1/register-anchorkey"}, rec.paths)
++	require.Equal(t, models.AkmaKeyInfo{Supi: vecSupi, AKId: vecAKID, KAkma: vecKakma}, rec.requests[0])
++}
++
++// With akma.aanfUri configured, the NRF is not asked.
++func TestRegisterAkmaConfiguredUri(t *testing.T) {
++	rec := &recorder{}
++	aanf := fakeAanf(t, rec)
++	setAusfAkma(t, true, "http://127.0.0.1:1", aanf.URL)
++
++	p := newTestProcessor(t)
++	p.registerAkma(akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf, routingId: "0000"}, testPlmns)
++
++	require.Empty(t, rec.queries)
++	require.Len(t, rec.requests, 1)
++}
++
++// startAkma does nothing without the AKMA indication or with AKMA disabled.
++func TestStartAkmaConditions(t *testing.T) {
++	rec := &recorder{}
++	aanf := fakeAanf(t, rec)
++	ue := &ausf_context.AusfUeContext{
++		Supi: vecSupi, SupiOrSuci: vecSuci, Kausf: vecKausf, RoutingId: "0000",
++	}
++	p := newTestProcessor(t)
++
++	setAusfAkma(t, true, "", aanf.URL)
++	ue.AkmaInd = false
++	p.startAkma(ue)
++
++	setAusfAkma(t, false, "", aanf.URL)
++	ue.AkmaInd = true
++	p.startAkma(ue)
++
++	time.Sleep(200 * time.Millisecond)
++	rec.mu.Lock()
++	defer rec.mu.Unlock()
++	require.Empty(t, rec.requests)
++}
++
++// startAkma returns at once; the registration runs apart (TS 33.535 cl. 6.1).
++func TestStartAkmaDoesNotBlock(t *testing.T) {
++	received := make(chan struct{}, 1)
++	block := make(chan struct{})
++	done := make(chan struct{})
++	slow := h2cServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		received <- struct{}{}
++		<-block
++		w.WriteHeader(http.StatusServiceUnavailable)
++		close(done)
++	}))
++	setAusfAkma(t, true, "", slow.URL)
++
++	p := newTestProcessor(t)
++	ue := &ausf_context.AusfUeContext{
++		Supi: vecSupi, SupiOrSuci: vecSuci, Kausf: vecKausf, RoutingId: "0000", AkmaInd: true,
++	}
++	start := time.Now()
++	p.startAkma(ue)
++	require.Less(t, time.Since(start), 100*time.Millisecond)
++
++	// Let the background registration end before the configuration is
++	// restored.
++	<-received
++	close(block)
++	<-done
++	time.Sleep(100 * time.Millisecond)
++}
+diff --git a/internal/sbi/consumer/consumer.go b/internal/sbi/consumer/consumer.go
+index 401e3f1..2a82f3c 100644
+--- a/internal/sbi/consumer/consumer.go
++++ b/internal/sbi/consumer/consumer.go
+@@ -2,6 +2,7 @@ package consumer
+ 
+ import (
+ 	"github.com/free5gc/ausf/pkg/app"
++	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
+ 	Nnrf_NFDiscovery "github.com/free5gc/openapi/nrf/NFDiscovery"
+ 	Nnrf_NFManagement "github.com/free5gc/openapi/nrf/NFManagement"
+ 	Nudm_UEAuthentication "github.com/free5gc/openapi/udm/UEAuthentication"
+@@ -16,6 +17,7 @@ type Consumer struct {
+ 
+ 	*nnrfService
+ 	*nudmService
++	*naanfService
+ }
+ 
+ func NewConsumer(ausf ConsumerAusf) (*Consumer, error) {
+@@ -34,5 +36,10 @@ func NewConsumer(ausf ConsumerAusf) (*Consumer, error) {
+ 		ueauClients: make(map[string]*Nudm_UEAuthentication.APIClient),
+ 	}
+ 
++	c.naanfService = &naanfService{
++		consumer: c,
++		clients:  make(map[string]*Naanf_AKMA.APIClient),
++	}
++
+ 	return c, nil
+ }
+diff --git a/internal/sbi/consumer/aanf_service.go b/internal/sbi/consumer/aanf_service.go
+new file mode 100644
+index 0000000..93ca0a7
+--- /dev/null
++++ b/internal/sbi/consumer/aanf_service.go
+@@ -0,0 +1,90 @@
++package consumer
++
++import (
++	"context"
++	"sync"
++
++	"github.com/pkg/errors"
++
++	ausf_context "github.com/free5gc/ausf/internal/context"
++	"github.com/free5gc/ausf/internal/logger"
++	"github.com/free5gc/openapi"
++	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
++	"github.com/free5gc/openapi/models"
++	Nnrf_NFDiscovery "github.com/free5gc/openapi/nrf/NFDiscovery"
++)
++
++type naanfService struct {
++	consumer *Consumer
++
++	mu      sync.RWMutex
++	clients map[string]*Naanf_AKMA.APIClient
++}
++
++func (s *naanfService) getClient(uri string) *Naanf_AKMA.APIClient {
++	s.mu.RLock()
++	client, ok := s.clients[uri]
++	s.mu.RUnlock()
++	if ok {
++		return client
++	}
++	cfg := Naanf_AKMA.NewConfiguration()
++	cfg.SetBasePath(uri)
++	client = Naanf_AKMA.NewAPIClient(cfg)
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.clients[uri] = client
++	return client
++}
++
++// RegisterAKMAKey sends Naanf_AKMA_AnchorKey_Register to the AAnF that
++// serves the Routing Indicator rid (TS 29.535 cl. 4.2.2.2.2).
++func (s *naanfService) RegisterAKMAKey(ctx context.Context, rid string, info models.AkmaKeyInfo) error {
++	uri, err := s.aanfUri(rid)
++	if err != nil {
++		return err
++	}
++	tokenCtx, _, err := ausf_context.GetSelf().GetTokenCtx(models.ServiceName_NAANF_AKMA,
++		models.NrfNfManagementNfType_AANF)
++	if err != nil {
++		return errors.Wrap(err, "access token for naanf-akma")
++	}
++	if tok := tokenCtx.Value(openapi.ContextOAuth2); tok != nil {
++		ctx = context.WithValue(ctx, openapi.ContextOAuth2, tok)
++	}
++
++	req := &Naanf_AKMA.RegisterAKMAKeyRequest{}
++	req.SetAkmaKeyInfo(info)
++	_, err = s.getClient(uri).RegisterTheAKMARelatedKeyMaterialApi.RegisterAKMAKey(ctx, req)
++	return err
++}
++
++// aanfUri returns the configured AAnF apiRoot or, when none is configured,
++// discovers an AAnF at the NRF with the Routing Indicator (TS 33.535 cl. 6.7;
++// TS 29.510 table 6.2.3.2.3.1-1).
++func (s *naanfService) aanfUri(rid string) (string, error) {
++	self := ausf_context.GetSelf()
++	if self.AkmaAanfUri != "" {
++		logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (configured)", rid, self.AkmaAanfUri)
++		return self.AkmaAanfUri, nil
++	}
++	target := models.NrfNfManagementNfType_AANF
++	requester := models.NrfNfManagementNfType_AUSF
++	param := Nnrf_NFDiscovery.SearchNFInstancesRequest{
++		TargetNfType:     &target,
++		RequesterNfType:  &requester,
++		ServiceNames:     []models.ServiceName{models.ServiceName_NAANF_AKMA},
++		RoutingIndicator: &rid,
++	}
++	res, err := s.consumer.SendSearchNFInstances(self.NrfUri, target, requester, param)
++	if err != nil {
++		return "", errors.Wrap(err, "AAnF discovery")
++	}
++	_, uri, err := openapi.GetServiceNfProfileAndUri(res.NfInstances, models.ServiceName_NAANF_AKMA)
++	if err != nil {
++		return "", errors.Wrap(err, "AAnF discovery")
++	}
++	logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (discovered at the NRF)", rid, uri)
++	return uri, nil
++}

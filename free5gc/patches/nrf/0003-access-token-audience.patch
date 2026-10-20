@@ -1,0 +1,68 @@
+diff --git a/internal/sbi/processor/access_token.go b/internal/sbi/processor/access_token.go
+index 8905196..bf83e56 100644
+--- a/internal/sbi/processor/access_token.go
++++ b/internal/sbi/processor/access_token.go
+@@ -67,11 +67,11 @@ func (p *Processor) AccessTokenProcedure(request models.NrfAccessTokenAccessToke
+ 	// Create AccessToken
+ 	nrfCtx := nrf_context.GetSelf()
+ 	accessTokenClaims := models.AccessTokenClaims{
+-		Iss:              nrfCtx.Nrf_NfInstanceID,    // NF instance id of the NRF
+-		Sub:              request.NfInstanceId,       // nfInstanceId of service consumer
+-		Aud:              request.TargetNfInstanceId, // nfInstanceId of service producer
+-		Scope:            request.Scope,              // TODO: the name of the NF services for which the
+-		Exp:              nowNum + expiration,        // access_token is authorized for use
++		Iss:              nrfCtx.Nrf_NfInstanceID, // NF instance id of the NRF
++		Sub:              request.NfInstanceId,    // nfInstanceId of service consumer
++		Aud:              accessTokenAudience(request),
++		Scope:            request.Scope,       // TODO: the name of the NF services for which the
++		Exp:              nowNum + expiration, // access_token is authorized for use
+ 		RegisteredClaims: jwt.RegisteredClaims{},
+ 	}
+ 	accessTokenClaims.IssuedAt = &jwt.NumericDate{Time: now}
+@@ -290,3 +290,14 @@ func (p *Processor) AccessTokenScopeCheck(req models.NrfAccessTokenAccessTokenRe
+ 	}
+ 	return nil
+ }
++
++// accessTokenAudience returns the audience claim of an access token: the NF
++// instance ID of the NF service producer when the consumer requested a
++// specific instance, and otherwise the NF type of the NF service producers
++// (TS 29.510 table 6.3.5.2.4-1, "aud", mandatory; TS 33.501 cl. 13.4.1.1.2).
++func accessTokenAudience(req models.NrfAccessTokenAccessTokenReq) interface{} {
++	if req.TargetNfInstanceId != "" {
++		return req.TargetNfInstanceId
++	}
++	return strings.ToUpper(string(req.TargetNfType))
++}
+diff --git a/internal/sbi/processor/access_token_aud_test.go b/internal/sbi/processor/access_token_aud_test.go
+new file mode 100644
+index 0000000..48d74aa
+--- /dev/null
++++ b/internal/sbi/processor/access_token_aud_test.go
+@@ -0,0 +1,26 @@
++package processor
++
++import (
++	"testing"
++
++	"github.com/free5gc/openapi/models"
++)
++
++// TS 29.510 table 6.3.5.2.4-1: "aud" is mandatory; NF instance ID of the
++// producer when known, otherwise its NF type.
++func TestAccessTokenAudience(t *testing.T) {
++	byType := models.NrfAccessTokenAccessTokenReq{TargetNfType: "AANF"}
++	if got := accessTokenAudience(byType); got != "AANF" {
++		t.Errorf("by type: %v", got)
++	}
++	lower := models.NrfAccessTokenAccessTokenReq{TargetNfType: "aanf"}
++	if got := accessTokenAudience(lower); got != "AANF" {
++		t.Errorf("lower case type: %v", got)
++	}
++	byID := models.NrfAccessTokenAccessTokenReq{
++		TargetNfType: "AANF", TargetNfInstanceId: "b6f417f0-06fa-4c38-b291-33066f5a5fe7",
++	}
++	if got := accessTokenAudience(byID); got != "b6f417f0-06fa-4c38-b291-33066f5a5fe7" {
++		t.Errorf("by instance: %v", got)
++	}
++}
