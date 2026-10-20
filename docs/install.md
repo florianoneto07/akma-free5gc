@@ -82,6 +82,7 @@ With other addresses, change them in the commands and in these places:
 |---|---|
 | `free5gc/config/aanfcfg.yaml` (section 3.2) | `sbi.registerIPv4`, `sbi.bindingIPv4`; `sourceAddresses` of `akma.authorizedAfs` (the AF host) and of `akma.authorizedNefs` (the free5GC host) |
 | `~/free5gc/config/nefcfg.yaml`, after the configuration patch (section 9.1) | `sbi.registerIPv4`, `sbi.bindingIPv4`; `sourceAddresses` of `akma.authorizedAfs` |
+| `~/free5gc/config/ausfcfg.yaml`, only for a fixed AAnF address (section 4.2) | `akma.aanfUri`, which the configuration patch leaves commented out |
 | `af/config/afcfg.yaml` (section 6.2) | `listen`, `aanfUri` |
 | `af/config/afcfg-external.yaml` (section 9.2) | `listen`, `nefUri` |
 | `seed` | `--aanf`, default `http://192.168.16.130:8010` |
@@ -300,7 +301,7 @@ Turn AKMA on in the configuration. The configuration patch adds `akma.enable: tr
 ~/akma-free5gc/free5gc/scripts/patch-nf.sh config apply
 ```
 
-Without `akma.aanfUri`, the AUSF finds the AAnF at the NRF by Routing Indicator, which needs the NRF fix of section 3.3. To use a fixed address, uncomment `aanfUri` in `ausfcfg.yaml`.
+Without `akma.aanfUri`, the AUSF finds the AAnF at the NRF by Routing Indicator, which needs the NRF fix of section 3.3. To use a fixed address, uncomment `aanfUri` in `ausfcfg.yaml` and set it to the address of section 3.2, port 8010.
 
 For the AKMA tests of the test bench (section 4.4), also apply:
 
