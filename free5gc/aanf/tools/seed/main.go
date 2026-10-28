@@ -7,12 +7,15 @@
 //	          (TS 33.535 cl. 6.2.1) and prints K_AF and its expiry;
 //	remove    sends Naanf_AKMA_ContextRemove (TS 33.535 cl. 6.6);
 //	discover  queries the NRF for AAnF instances (Nnrf_NFDiscovery) and
-//	          prints their profiles.
+//	          prints their profiles;
+//	trigger-auth
+//	          does what the AAnF does to refresh K_AKMA (TS 33.535
+//	          cl. 6.4.4): sends Nudm_UECM_AuthTrigger to the UDM.
 //
-// With --nrf, register and remove first obtain an OAuth2 access token: the
-// tool registers at the NRF as a temporary NF of type AF (the NRF of free5GC
-// only grants tokens to registered NFs) and deregisters on exit. discover
-// does the same to obtain a token for nnrf-disc.
+// With --nrf, register, remove and trigger-auth first obtain an OAuth2 access
+// token: the tool registers at the NRF as a temporary NF of type AF (the NRF
+// of free5GC only grants tokens to registered NFs) and deregisters on exit.
+// discover does the same to obtain a token for nnrf-disc.
 package main
 
 import (
@@ -20,11 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
+	"golang.org/x/oauth2"
 
 	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
 	"github.com/florianoneto07/akma-free5gc/shared/akma/akid"
@@ -37,7 +43,12 @@ import (
 	Nnrf_NFDiscovery "github.com/free5gc/openapi/nrf/NFDiscovery"
 	Nnrf_NFManagement "github.com/free5gc/openapi/nrf/NFManagement"
 	"github.com/free5gc/openapi/oauth"
+	Nudm_UEContextManagement "github.com/free5gc/openapi/udm/UEContextManagement"
 )
+
+// seedUserAgent names the tool in its requests to the UDM, as the temporary
+// AF it registers at the NRF (TS 29.500 table 5.2.2.2-1).
+const seedUserAgent = "AF-seed"
 
 // defaultNfInstanceID is the NF instance ID of the temporary AF profile. It is
 // fixed so that the certificate the NRF signs for it (cert/af_<id>.pem) is
@@ -100,6 +111,18 @@ func main() {
 					&cli.StringFlag{Name: "supi", Required: true},
 				}, nrfFlags...),
 				Action: remove,
+			},
+			{
+				Name:  "trigger-auth",
+				Usage: "ask the UDM for a primary authentication of a SUPI (AAnF role, Nudm_UECM_AuthTrigger)",
+				Flags: append([]cli.Flag{
+					&cli.StringFlag{Name: "udm", Value: "http://127.0.0.3:8000", Usage: "UDM apiRoot"},
+					&cli.StringFlag{Name: "supi", Required: true, Usage: "SUPI, SBI form (imsi-...)"},
+					// Negative tests: the request is sent as given.
+					&cli.StringFlag{Name: "method", Usage: "send with this HTTP method (test)"},
+					&cli.StringFlag{Name: "body", Usage: "send this JSON body instead of {\"supi\": ...} (test)"},
+				}, nrfFlags...),
+				Action: triggerAuth,
 			},
 		},
 	}
@@ -301,6 +324,87 @@ func remove(c *cli.Context) error {
 	}
 	fmt.Println("removed")
 	return nil
+}
+
+func triggerAuth(c *cli.Context) error {
+	ctx, cleanup, err := tokenContextFor(c, models.NrfNfManagementNfType_UDM, models.ServiceName_NUDM_UECM)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if c.IsSet("method") || c.IsSet("body") {
+		return rawTriggerAuth(ctx, c)
+	}
+	cfg := Nudm_UEContextManagement.NewConfiguration()
+	cfg.SetBasePath(c.String("udm"))
+	cfg.SetUserAgent(seedUserAgent)
+	req := &Nudm_UEContextManagement.AuthTriggerRequest{}
+	req.SetUeId(c.String("supi"))
+	req.SetAuthTriggerInfo(models.AuthTriggerInfo{Supi: c.String("supi")})
+	_, err = Nudm_UEContextManagement.NewAPIClient(cfg).TriggerThePrimaryReAuthenticationApi.AuthTrigger(ctx, req)
+	if err != nil {
+		var apiErr openapi.GenericOpenAPIError
+		if !errors.As(err, &apiErr) {
+			return err
+		}
+		msg := fmt.Sprintf("UDM answered %d", apiErr.ErrorStatus)
+		if v, ok := apiErr.Model().(Nudm_UEContextManagement.AuthTriggerError); ok && v.ProblemDetails.Cause != "" {
+			msg += " (" + v.ProblemDetails.Cause + "; " + v.ProblemDetails.Detail + ")"
+		}
+		return errors.New(msg)
+	}
+	fmt.Println("accepted (204)")
+	return nil
+}
+
+// rawTriggerAuth sends trigger-auth with --method and --body as given, over
+// HTTP/1.1, and prints the status and the body of the answer.
+func rawTriggerAuth(ctx context.Context, c *cli.Context) error {
+	method := http.MethodPost
+	if c.IsSet("method") {
+		method = strings.ToUpper(c.String("method"))
+	}
+	body := fmt.Sprintf(`{"supi":%q}`, c.String("supi"))
+	if c.IsSet("body") {
+		body = c.String("body")
+	}
+	uri := c.String("udm") + "/nudm-uecm/v1/" + c.String("supi") + "/registrations/trigger-auth"
+	req, err := http.NewRequestWithContext(context.Background(), method, uri, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", seedUserAgent)
+	if tok, err := bearer(ctx); err != nil {
+		return err
+	} else if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	rsp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer rsp.Body.Close()
+	out, _ := io.ReadAll(rsp.Body)
+	fmt.Printf("%d %s\n", rsp.StatusCode, strings.TrimSpace(string(out)))
+	if allow := rsp.Header.Get("Allow"); allow != "" {
+		fmt.Println("allow:", allow)
+	}
+	return nil
+}
+
+// bearer returns the access token that tokenContextFor put in ctx, or "".
+func bearer(ctx context.Context) (string, error) {
+	ts, ok := ctx.Value(openapi.ContextOAuth2).(oauth2.TokenSource)
+	if !ok {
+		return "", nil
+	}
+	tok, err := ts.Token()
+	if err != nil {
+		return "", err
+	}
+	return tok.AccessToken, nil
 }
 
 // describe renders an error answer of the AAnF as "status cause".

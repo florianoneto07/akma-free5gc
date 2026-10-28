@@ -20,6 +20,7 @@ import (
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/logger"
 	"github.com/florianoneto07/akma-free5gc/af/uastar"
 	"github.com/florianoneto07/akma-free5gc/af/ue/uaclient"
+	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
 	"github.com/florianoneto07/akma-free5gc/shared/akma/codec"
 	"github.com/florianoneto07/akma-free5gc/shared/akma/kdf"
 )
@@ -40,13 +41,15 @@ type fakeAanf struct {
 	now      func() time.Time
 	calls    int
 	aKids    []string
+	afIDs    []string
 }
 
-func (f *fakeAanf) ApplicationKey(_ context.Context, aKid string) (aanf.Key, error) {
+func (f *fakeAanf) ApplicationKey(_ context.Context, id afid.AfID, aKid string) (aanf.Key, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.aKids = append(f.aKids, aKid)
+	f.afIDs = append(f.afIDs, id.Transport())
 	if f.err != nil {
 		return aanf.Key{}, f.err
 	}

@@ -55,6 +55,7 @@ func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*Aa
 	if aanf.consumer, err = consumer.NewConsumer(aanf); err != nil {
 		return nil, err
 	}
+	aanf.processor.Refresher = aanf.consumer
 
 	aanf.ctx, aanf.cancel = context.WithCancel(ctx)
 

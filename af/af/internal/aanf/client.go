@@ -36,27 +36,28 @@ type Key struct {
 	Supi   string // never sent to the UE
 }
 
-// Client requests K_AF for one AF_ID.
+// Client requests K_AF from the AAnF.
 type Client struct {
 	api       *Naanf_AKMA.APIClient
-	afID      afid.AfID
 	anonymous bool
 }
 
-// New returns a client of the AAnF at apiRoot, for the AF identified by id.
-// With anonymous, the requests carry anonInd: the AAnF answers without the
-// SUPI (Naanf_AKMA_ApplicationKey_AnonUser_Get, TS 33.535 cl. 6.2.2).
-func New(apiRoot string, id afid.AfID, anonymous bool) *Client {
+// New returns a client of the AAnF at apiRoot. With anonymous, the requests
+// carry anonInd: the AAnF answers without the SUPI
+// (Naanf_AKMA_ApplicationKey_AnonUser_Get, TS 33.535 cl. 6.2.2).
+func New(apiRoot string, anonymous bool) *Client {
 	cfg := Naanf_AKMA.NewConfiguration()
 	cfg.SetBasePath(apiRoot)
-	return &Client{api: Naanf_AKMA.NewAPIClient(cfg), afID: id, anonymous: anonymous}
+	return &Client{api: Naanf_AKMA.NewAPIClient(cfg), anonymous: anonymous}
 }
 
-// ApplicationKey requests the K_AF of aKid. The afId is sent in transport
-// form and the aKId exactly as received from the UE.
-func (c *Client) ApplicationKey(ctx context.Context, aKid string) (Key, error) {
+// ApplicationKey requests the K_AF of aKid for the AF_ID id: one AF has an
+// AF_ID per Ua* security protocol, and so per profile and TLS cipher suite
+// (TS 33.220 H.3). The afId is sent in transport form and the aKId exactly
+// as received from the UE.
+func (c *Client) ApplicationKey(ctx context.Context, id afid.AfID, aKid string) (Key, error) {
 	req := &Naanf_AKMA.GetAKMAAPPKeyMaterialRequest{}
-	req.SetAkmaAfKeyRequest(models.AkmaAfKeyRequest{AfId: c.afID.Transport(), AKId: aKid, AnonInd: c.anonymous})
+	req.SetAkmaAfKeyRequest(models.AkmaAfKeyRequest{AfId: id.Transport(), AKId: aKid, AnonInd: c.anonymous})
 	rsp, err := c.api.RetrieveTheAKMAApplicationKeyMaterialCollectionApi.GetAKMAAPPKeyMaterial(ctx, req)
 	if err != nil {
 		return Key{}, classify(err)

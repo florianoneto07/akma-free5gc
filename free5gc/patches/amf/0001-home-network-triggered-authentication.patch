@@ -1,0 +1,821 @@
+diff --git a/go.mod b/go.mod
+index f564926..3f2d585 100644
+--- a/go.mod
++++ b/go.mod
+@@ -81,3 +81,5 @@ require (
+ 	google.golang.org/protobuf v1.36.1 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ )
++
++replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi-test
+diff --git a/go.sum b/go.sum
+index 6f10ef2..85d21e4 100644
+--- a/go.sum
++++ b/go.sum
+@@ -27,8 +27,6 @@ github.com/free5gc/nas v1.2.3 h1:vMA9NGORw0zr26vQWWSTy8X9HrA+wGxFvwc2g9KqUTw=
+ github.com/free5gc/nas v1.2.3/go.mod h1:A8ODi6MW0fRJiLEH4GcUPbg3dd9xm3zi+fkBWqTjQ40=
+ github.com/free5gc/ngap v1.1.3 h1:uT+IE5PkWOYjPdxCyOAwLDOXUiADcOQCs05CudyC36s=
+ github.com/free5gc/ngap v1.1.3/go.mod h1:yGMO2GYV5DbbmudwD7Oo6dXQgz2ON29GhqtXDeXdyvA=
+-github.com/free5gc/openapi v1.2.5-0.20260527003827-02dc71b4d94f h1:AYnRO0Gj/kTmGw5tCI33R3XReV9T0sEEp7jFvnL/qok=
+-github.com/free5gc/openapi v1.2.5-0.20260527003827-02dc71b4d94f/go.mod h1:V9CKQUqWp6kXL3SDtaIs4ZWeLipk5TSRXCnt+ntNceg=
+ github.com/free5gc/sctp v1.1.2 h1:nNEr4uywIFmVBZauaNVJRkIDXr4nrpMmM0TPIck5QPA=
+ github.com/free5gc/sctp v1.1.2/go.mod h1:wOvct9P1T6DGk1fxkleF7zeTHsU8ZKxKzewu2ciZh/4=
+ github.com/free5gc/util v1.3.2 h1:3BjZq050WbaLJY0w1Bn51YZlCirs2ARoCUxD3LDSdbo=
+diff --git a/internal/context/amf_ue.go b/internal/context/amf_ue.go
+index a51d62d..ed1a052 100644
+--- a/internal/context/amf_ue.go
++++ b/internal/context/amf_ue.go
+@@ -116,6 +116,16 @@ type AmfUe struct {
+ 	ABBA                              []uint8
+ 	Kseaf                             string
+ 	Kamf                              string
++	/* Home network triggered primary authentication (TS 33.501 cl. 6.1.5) */
++	// HnAuthPending is the authentication pending flag (cl. 6.1.5.2 step 3):
++	// the UDM asked for a primary authentication while the UE was not
++	// reachable.
++	HnAuthPending      bool
++	HnAuthPendingSince time.Time
++	// HnAuthRunning is set while a primary authentication asked by the UDM,
++	// and the NAS SMC that takes its new KAMF into use, run outside a
++	// registration.
++	HnAuthRunning bool
+ 	/* context about PCF */
+ 	PcfId                        string
+ 	PcfUri                       string
+diff --git a/internal/gmm/handler.go b/internal/gmm/handler.go
+index 2c5d13e..9e39390 100644
+--- a/internal/gmm/handler.go
++++ b/internal/gmm/handler.go
+@@ -1665,7 +1665,9 @@ func AuthenticationProcedure(ue *context.AmfUe, accessType models.AccessType) (b
+ 	// Check whether UE has SUCI and SUPI
+ 	if IdentityVerification(ue) {
+ 		ue.GmmLog.Debugln("UE has SUCI / SUPI")
+-		if ue.SecurityContextIsValid() {
++		// A primary authentication asked by the UDM runs although the
++		// security context is valid (TS 33.501 cl. 6.1.5.2 step 4).
++		if ue.SecurityContextIsValid() && !ue.HnAuthRunning {
+ 			ue.GmmLog.Debugln("UE has a valid security context - skip the authentication procedure")
+ 			return true, nil
+ 		}
+@@ -1684,7 +1686,7 @@ func AuthenticationProcedure(ue *context.AmfUe, accessType models.AccessType) (b
+ 		amfSelf.NrfUri, models.NrfNfManagementNfType_AUSF, models.NrfNfManagementNfType_AMF, &param)
+ 	if err != nil {
+ 		ue.GmmLog.Error("AMF can not select an AUSF by NRF")
+-		gmm_message.SendRegistrationReject(ue.RanUe[accessType], nasMessage.Cause5GMMCongestion, "")
++		sendAuthRegistrationReject(ue, accessType, nasMessage.Cause5GMMCongestion)
+ 		return false, err
+ 	}
+ 
+@@ -1701,7 +1703,7 @@ func AuthenticationProcedure(ue *context.AmfUe, accessType models.AccessType) (b
+ 	if ausfUri == "" {
+ 		err = fmt.Errorf("AMF can not select an AUSF by NRF")
+ 		ue.GmmLog.Error(err)
+-		gmm_message.SendRegistrationReject(ue.RanUe[accessType], nasMessage.Cause5GMMCongestion, "")
++		sendAuthRegistrationReject(ue, accessType, nasMessage.Cause5GMMCongestion)
+ 		return false, err
+ 	}
+ 	ue.AusfUri = ausfUri
+@@ -1709,7 +1711,7 @@ func AuthenticationProcedure(ue *context.AmfUe, accessType models.AccessType) (b
+ 	response, problemDetails, err := consumer.GetConsumer().SendUEAuthenticationAuthenticateRequest(ue, nil)
+ 	if err != nil {
+ 		ue.GmmLog.Errorf("Nausf_UEAU Authenticate Request Error: %+v", err)
+-		gmm_message.SendRegistrationReject(ue.RanUe[accessType], nasMessage.Cause5GMMCongestion, "")
++		sendAuthRegistrationReject(ue, accessType, nasMessage.Cause5GMMCongestion)
+ 		err = fmt.Errorf("Authentication procedure failed")
+ 		ue.GmmLog.Error(err)
+ 		return false, err
+@@ -1722,7 +1724,7 @@ func AuthenticationProcedure(ue *context.AmfUe, accessType models.AccessType) (b
+ 		default:
+ 			cause = nasMessage.Cause5GMMCongestion
+ 		}
+-		gmm_message.SendRegistrationReject(ue.RanUe[accessType], cause, "")
++		sendAuthRegistrationReject(ue, accessType, cause)
+ 		err = fmt.Errorf("Authentication procedure failed")
+ 		ue.GmmLog.Warn(err)
+ 		return false, err
+@@ -2315,6 +2317,21 @@ func HandleSecurityModeComplete(ue *context.AmfUe, anType models.AccessType, pro
+ 		}
+ 	}
+ 
++	if ue.HnAuthRunning {
++		// Outside a registration or a service request there is no initial NAS
++		// message: the Security Mode Command did not ask for it (RINMR = 0).
++		if securityModeComplete.NASMessageContainer != nil {
++			ue.GmmLog.Warnln("NAS message container in the Security Mode Complete of a re-authentication: ignored")
++		}
++		// TS 33.501 cl. 6.1.5.2 step 4 and cl. 6.9.4.2: the new KAMF is in use.
++		logger.AkmaLog.Infof("Re-authentication of %s requested by the UDM: completed, new KAMF in use (ngKSI %d)",
++			ue.Supi, ue.NgKsi.Ksi)
++		return GmmFSM.SendEvent(ue.State[anType], ReauthSuccessEvent, fsm.ArgsType{
++			ArgAmfUe:      ue,
++			ArgAccessType: anType,
++		}, logger.GmmLog)
++	}
++
+ 	// TODO: AMF shall set the NAS COUNTs to zero if horizontal derivation of KAMF is performed
+ 	if securityModeComplete.NASMessageContainer != nil {
+ 		contents := securityModeComplete.NASMessageContainer.GetNASMessageContainerContents()
+diff --git a/internal/gmm/hn_auth.go b/internal/gmm/hn_auth.go
+new file mode 100644
+index 0000000..1060d89
+--- /dev/null
++++ b/internal/gmm/hn_auth.go
+@@ -0,0 +1,115 @@
++package gmm
++
++import (
++	"net/http"
++	"sync"
++	"time"
++
++	"github.com/free5gc/amf/internal/context"
++	gmm_message "github.com/free5gc/amf/internal/gmm/message"
++	"github.com/free5gc/amf/internal/logger"
++	"github.com/free5gc/nas/nasMessage"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/util/fsm"
++)
++
++// hnAuthMu serializes the re-authentication notifications.
++var hnAuthMu sync.Mutex
++
++// ReauthNotification handles Nudm_UECM_Re-AuthenticationNotification for ue,
++// which is registered for 3GPP access (TS 33.501 cl. 6.1.5.2 steps 3 and 4;
++// TS 29.503 cl. 5.3.2.15.2). It returns the status and the cause of the
++// answer to the UDM (TS 29.503 table 6.2.5.6-3):
++//   - 204: the UE is connected and the primary authentication started;
++//   - 202: the UE is not reachable; the authentication pending flag is set,
++//     and the authentication runs when the UE registers or sends a Service
++//     Request;
++//   - 409: a registration or a handover is in progress;
++//   - 403: an authentication or a deregistration is in progress;
++//   - 404: the UE is not registered.
++func ReauthNotification(ue *context.AmfUe) (int, string) {
++	hnAuthMu.Lock()
++	defer hnAuthMu.Unlock()
++
++	anType := models.AccessType__3_GPP_ACCESS
++	state := ue.State[anType]
++	switch {
++	case state == nil || state.Is(context.Deregistered):
++		return http.StatusNotFound, "CONTEXT_NOT_FOUND"
++	case ue.HnAuthRunning || state.Is(context.DeregistrationInitiated):
++		return http.StatusForbidden, "REAUTHENTICATION_NOT_ALLOWED"
++	case !state.Is(context.Registered):
++		// Authentication, SecurityMode and ContextSetup are steps of a
++		// registration.
++		return http.StatusConflict, "TEMPORARY_REJECT_REGISTRATION_ONGOING"
++	}
++	switch ue.OnGoing(anType).Procedure {
++	case context.OnGoingProcedureN2Handover:
++		return http.StatusConflict, "TEMPORARY_REJECT_HANDOVER_ONGOING"
++	case context.OnGoingProcedureRegistration:
++		return http.StatusConflict, "TEMPORARY_REJECT_REGISTRATION_ONGOING"
++	}
++	if ue.CmIdle(anType) {
++		if !ue.HnAuthPending {
++			ue.HnAuthPending = true
++			ue.HnAuthPendingSince = time.Now()
++		}
++		logger.AkmaLog.Infof("Re-authentication of %s requested by the UDM: pending (UE not connected)", ue.Supi)
++		return http.StatusAccepted, ""
++	}
++	if !startHnAuth(state, ue, anType) {
++		return http.StatusInternalServerError, "SYSTEM_FAILURE"
++	}
++	logger.AkmaLog.Infof("Re-authentication of %s requested by the UDM: started (ngKSI %d)", ue.Supi, ue.NgKsi.Ksi)
++	return http.StatusNoContent, ""
++}
++
++// startHnAuth starts the primary authentication of a registered and connected
++// UE (TS 33.501 cl. 6.1.5.2 step 4), with a new ngKSI for the partial native
++// security context it creates (cl. 6.1.3.2 step 6). It returns false when the
++// authentication could not start; the UE then stays in Registered.
++func startHnAuth(state *fsm.State, ue *context.AmfUe, anType models.AccessType) bool {
++	current := ue.NgKsi
++	ue.HnAuthPending = false
++	ue.HnAuthRunning = true
++	ue.NgKsi.Tsc = models.ScType_NATIVE
++	ue.NgKsi.Ksi = (ue.NgKsi.Ksi + 1) % nasMessage.NasKeySetIdentifierNoKeyIsAvailable
++	if err := GmmFSM.SendEvent(state, StartAuthEvent, fsm.ArgsType{
++		ArgAmfUe:      ue,
++		ArgAccessType: anType,
++	}, logger.GmmLog); err != nil {
++		logger.GmmLog.Errorln(err)
++		ue.HnAuthRunning = false
++	}
++	if !state.Is(context.Authentication) {
++		// The current security context stays in use.
++		ue.NgKsi = current
++		return false
++	}
++	return true
++}
++
++// startPendingHnAuth runs the primary authentication that the UDM asked for
++// while the UE was not reachable, now that it registered or sent a Service
++// Request (TS 33.501 cl. 6.1.5.2 step 3).
++func startPendingHnAuth(state *fsm.State, ue *context.AmfUe, anType models.AccessType) {
++	if !ue.HnAuthPending || anType != models.AccessType__3_GPP_ACCESS || ue.CmIdle(anType) ||
++		!state.Is(context.Registered) {
++		return
++	}
++	since := ue.HnAuthPendingSince
++	if startHnAuth(state, ue, anType) {
++		logger.AkmaLog.Infof("Re-authentication of %s requested by the UDM %s ago: started (ngKSI %d)",
++			ue.Supi, time.Since(since).Round(time.Second), ue.NgKsi.Ksi)
++	}
++}
++
++// sendAuthRegistrationReject rejects the registration whose authentication
++// failed before the UE was involved. A primary authentication asked by the
++// UDM is not part of a registration: the UE is not rejected.
++func sendAuthRegistrationReject(ue *context.AmfUe, anType models.AccessType, cause uint8) {
++	if ue.HnAuthRunning {
++		return
++	}
++	gmm_message.SendRegistrationReject(ue.RanUe[anType], cause, "")
++}
+diff --git a/internal/gmm/hn_auth_test.go b/internal/gmm/hn_auth_test.go
+new file mode 100644
+index 0000000..577e0b5
+--- /dev/null
++++ b/internal/gmm/hn_auth_test.go
+@@ -0,0 +1,295 @@
++package gmm
++
++import (
++	"net"
++	"net/http"
++	"testing"
++	"time"
++
++	"github.com/h2non/gock"
++	"github.com/stretchr/testify/require"
++
++	"github.com/free5gc/amf/internal/context"
++	gmm_message "github.com/free5gc/amf/internal/gmm/message"
++	"github.com/free5gc/amf/internal/sbi/consumer"
++	"github.com/free5gc/amf/pkg/factory"
++	"github.com/free5gc/nas"
++	"github.com/free5gc/nas/nasMessage"
++	"github.com/free5gc/nas/nasType"
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/util/fsm"
++)
++
++const (
++	hnAuthNrf  = "http://127.0.0.10:8000"
++	hnAuthAusf = "http://127.0.0.9:8000"
++)
++
++// hnAuthUe returns a UE in state for 3GPP access, with a valid security
++// context (ngKSI 0) and, when connected, a RAN UE whose downlink NGAP
++// messages arrive on the returned channel.
++func hnAuthUe(t *testing.T, supi string, state fsm.StateType, connected bool) (*context.AmfUe, <-chan []byte) {
++	t.Helper()
++	if factory.AmfConfig == nil {
++		factory.AmfConfig = &factory.Config{Configuration: &factory.Configuration{}}
++	}
++	self := context.GetSelf()
++	self.ServedGuamiList = []models.Guami{{PlmnId: &models.PlmnIdNid{Mcc: "208", Mnc: "93"}, AmfId: "cafe00"}}
++	ue := self.NewAmfUe(supi)
++	t.Cleanup(func() { self.UePool.Delete(supi) })
++	ue.Supi = supi
++	ue.Suci = "suci-0-208-93-0000-0-0-" + supi[len(supi)-10:]
++	ue.State[models.AccessType__3_GPP_ACCESS].Set(state)
++	ue.SecurityContextAvailable = true
++	ue.NgKsi = models.NgKsi{Tsc: models.ScType_NATIVE, Ksi: 0}
++	if !connected {
++		return ue, nil
++	}
++	amfSide, ranSide := net.Pipe()
++	t.Cleanup(func() {
++		amfSide.Close()
++		ranSide.Close()
++	})
++	downlink := make(chan []byte, 8)
++	go func() {
++		for {
++			b := make([]byte, 4096)
++			n, err := ranSide.Read(b)
++			if err != nil {
++				return
++			}
++			downlink <- b[:n]
++		}
++	}()
++	ran := self.NewAmfRan(amfSide)
++	ran.AnType = models.AccessType__3_GPP_ACCESS
++	ranUe, err := ran.NewRanUe(1)
++	require.NoError(t, err)
++	ue.AttachRanUe(ranUe)
++	return ue, downlink
++}
++
++// TS 29.503 table 6.2.5.6-3; TS 33.501 cl. 6.1.5.2 step 3.
++func TestReauthNotificationRefusals(t *testing.T) {
++	cases := []struct {
++		name       string
++		state      fsm.StateType
++		running    bool
++		onGoing    context.OnGoingProcedure
++		wantStatus int
++		wantCause  string
++	}{
++		{"deregistered", context.Deregistered, false, "", http.StatusNotFound, "CONTEXT_NOT_FOUND"},
++		{"deregistration in progress", context.DeregistrationInitiated, false, "", http.StatusForbidden,
++			"REAUTHENTICATION_NOT_ALLOWED"},
++		{"re-authentication in progress", context.Registered, true, "", http.StatusForbidden,
++			"REAUTHENTICATION_NOT_ALLOWED"},
++		{"authentication of a registration", context.Authentication, false, "", http.StatusConflict,
++			"TEMPORARY_REJECT_REGISTRATION_ONGOING"},
++		{"security mode of a registration", context.SecurityMode, false, "", http.StatusConflict,
++			"TEMPORARY_REJECT_REGISTRATION_ONGOING"},
++		{"context setup of a registration", context.ContextSetup, false, "", http.StatusConflict,
++			"TEMPORARY_REJECT_REGISTRATION_ONGOING"},
++		{"registration update in progress", context.Registered, false, context.OnGoingProcedureRegistration,
++			http.StatusConflict, "TEMPORARY_REJECT_REGISTRATION_ONGOING"},
++		{"handover in progress", context.Registered, false, context.OnGoingProcedureN2Handover,
++			http.StatusConflict, "TEMPORARY_REJECT_HANDOVER_ONGOING"},
++	}
++	for i, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			ue, downlink := hnAuthUe(t, "imsi-20893000000020"+string(rune('0'+i)), tc.state, true)
++			ue.HnAuthRunning = tc.running
++			if tc.onGoing != "" {
++				ue.SetOnGoing(models.AccessType__3_GPP_ACCESS, &context.OnGoing{Procedure: tc.onGoing})
++			}
++			status, cause := ReauthNotification(ue)
++			require.Equal(t, tc.wantStatus, status)
++			require.Equal(t, tc.wantCause, cause)
++			require.Equal(t, tc.running, ue.HnAuthRunning)
++			require.False(t, ue.HnAuthPending)
++			require.True(t, ue.State[models.AccessType__3_GPP_ACCESS].Is(tc.state))
++			require.Empty(t, downlink)
++		})
++	}
++}
++
++// A registered UE in CM-IDLE: 202 and the authentication pending flag.
++func TestReauthNotificationIdle(t *testing.T) {
++	ue, _ := hnAuthUe(t, "imsi-208930000000211", context.Registered, false)
++	status, cause := ReauthNotification(ue)
++	require.Equal(t, http.StatusAccepted, status)
++	require.Empty(t, cause)
++	require.True(t, ue.HnAuthPending)
++	require.False(t, ue.HnAuthRunning)
++	since := ue.HnAuthPendingSince
++
++	// A second notification keeps the flag and its time.
++	status, _ = ReauthNotification(ue)
++	require.Equal(t, http.StatusAccepted, status)
++	require.Equal(t, since, ue.HnAuthPendingSince)
++
++	// Not connected yet: nothing starts.
++	startPendingHnAuth(ue.State[models.AccessType__3_GPP_ACCESS], ue, models.AccessType__3_GPP_ACCESS)
++	require.True(t, ue.HnAuthPending)
++	require.True(t, ue.State[models.AccessType__3_GPP_ACCESS].Is(context.Registered))
++}
++
++// mockAusf answers the discovery of the AUSF and its authenticate request.
++func mockAusf() {
++	gock.New(hnAuthNrf).
++		Get("/nnrf-disc/v1/nf-instances").
++		Reply(200).
++		AddHeader("Content-Type", "application/json").
++		JSON(models.SearchResult{NfInstances: []models.NrfNfDiscoveryNfProfile{{
++			NfInstanceId: "a1b2c3d4-0000-4000-8000-000000000009",
++			NfType:       models.NrfNfManagementNfType_AUSF,
++			NfStatus:     models.NrfNfManagementNfStatus_REGISTERED,
++			NfServices: []models.NrfNfDiscoveryNfService{{
++				ServiceInstanceId: "0",
++				ServiceName:       models.ServiceName_NAUSF_AUTH,
++				Scheme:            models.UriScheme_HTTP,
++				NfServiceStatus:   models.NfServiceStatus_REGISTERED,
++				ApiPrefix:         hnAuthAusf,
++			}},
++		}}})
++	gock.New(hnAuthAusf).
++		Post("/nausf-auth/v1/ue-authentications").
++		Reply(201).
++		AddHeader("Content-Type", "application/3gppHal+json").
++		AddHeader("Location", hnAuthAusf+"/nausf-auth/v1/ue-authentications/1").
++		JSON(map[string]interface{}{
++			"authType": "5G_AKA",
++			"5gAuthData": map[string]string{
++				"rand":      "2e9c3e5b5c0e6f6ff41a6b5ac8e8f9b0",
++				"autn":      "c5a7e7c1d3a5800050b4a8e0f1d2c3b4",
++				"hxresStar": "1b5c1f7d7b3a4c2e9a8f6e5d4c3b2a10",
++			},
++			"_links": map[string][]map[string]string{
++				"5g-aka": {{"href": hnAuthAusf + "/nausf-auth/v1/ue-authentications/1/5g-aka-confirmation"}},
++			},
++		})
++}
++
++func hnAuthAmf(t *testing.T) {
++	t.Helper()
++	self := context.GetSelf()
++	self.NrfUri = hnAuthNrf
++	self.OAuth2Required = false
++	_, err := consumer.NewConsumer(nil)
++	require.NoError(t, err)
++}
++
++// A connected UE: 204, the Authentication Request goes out with a new ngKSI
++// (TS 33.501 cl. 6.1.3.2 step 6), and the UE waits in Authentication.
++func TestReauthNotificationStart(t *testing.T) {
++	defer gock.Off()
++	openapi.InterceptH2CClient()
++	defer openapi.RestoreH2CClient()
++	hnAuthAmf(t)
++	mockAusf()
++
++	ue, downlink := hnAuthUe(t, "imsi-208930000000212", context.Registered, true)
++	ue.HnAuthPending = true
++	status, cause := ReauthNotification(ue)
++	require.Equal(t, http.StatusNoContent, status, cause)
++	require.True(t, gock.IsDone(), "pending mocks: %v", gock.Pending())
++	require.True(t, ue.State[models.AccessType__3_GPP_ACCESS].Is(context.Authentication))
++	require.True(t, ue.HnAuthRunning)
++	require.False(t, ue.HnAuthPending)
++	require.Equal(t, int32(1), ue.NgKsi.Ksi)
++	select {
++	case b := <-downlink:
++		require.NotEmpty(t, b)
++	case <-time.After(2 * time.Second):
++		t.Fatal("no Authentication Request sent to the RAN")
++	}
++
++	// Another notification while it runs.
++	status, cause = ReauthNotification(ue)
++	require.Equal(t, http.StatusForbidden, status)
++	require.Equal(t, "REAUTHENTICATION_NOT_ALLOWED", cause)
++}
++
++// The AUSF cannot be discovered: the UE stays in Registered with its current
++// security context, and no Registration Reject is sent.
++func TestReauthNotificationAbort(t *testing.T) {
++	defer gock.Off()
++	openapi.InterceptH2CClient()
++	defer openapi.RestoreH2CClient()
++	hnAuthAmf(t)
++	gock.New(hnAuthNrf).Get("/nnrf-disc/v1/nf-instances").Reply(503)
++
++	ue, downlink := hnAuthUe(t, "imsi-208930000000213", context.Registered, true)
++	status, cause := ReauthNotification(ue)
++	require.Equal(t, http.StatusInternalServerError, status)
++	require.Equal(t, "SYSTEM_FAILURE", cause)
++	require.True(t, ue.State[models.AccessType__3_GPP_ACCESS].Is(context.Registered))
++	require.False(t, ue.HnAuthRunning)
++	require.Equal(t, int32(0), ue.NgKsi.Ksi)
++	select {
++	case b := <-downlink:
++		t.Fatalf("message sent to the RAN: %x", b)
++	case <-time.After(200 * time.Millisecond):
++	}
++}
++
++// The NAS SMC of a re-authentication asks neither for the initial NAS message
++// nor for a horizontal derivation of KAMF.
++func TestSecurityModeCommandOfReauth(t *testing.T) {
++	ue, _ := hnAuthUe(t, "imsi-208930000000214", context.SecurityMode, false)
++	ue.RegistrationType5GS = nasMessage.RegistrationType5GSPeriodicRegistrationUpdating
++	ue.RetransmissionOfInitialNASMsg = true
++	ue.UESecurityCapability.SetLen(2)
++	ue.UESecurityCapability.Buffer = []uint8{0x80, 0x80}
++
++	info := func() (hdp, rinmr uint8) {
++		b, err := gmm_message.BuildSecurityModeCommand(ue, models.AccessType__3_GPP_ACCESS, false, "")
++		require.NoError(t, err)
++		// Security header (2), MAC (4) and sequence number (1).
++		plain := b[7:]
++		m := nas.NewMessage()
++		require.NoError(t, m.PlainNasDecode(&plain))
++		a := m.GmmMessage.SecurityModeCommand.Additional5GSecurityInformation
++		return a.GetHDP(), a.GetRINMR()
++	}
++
++	hdp, rinmr := info()
++	require.Equal(t, uint8(1), hdp)
++	require.Equal(t, uint8(1), rinmr)
++
++	ue.HnAuthRunning = true
++	hdp, rinmr = info()
++	require.Equal(t, uint8(0), hdp)
++	require.Equal(t, uint8(0), rinmr)
++}
++
++// A UE that puts its last Registration Request in the Security Mode Complete
++// of a re-authentication: the AMF ignores it and goes back to Registered,
++// without the ContextSetup of a registration.
++func TestSecurityModeCompleteOfReauth(t *testing.T) {
++	ue, _ := hnAuthUe(t, "imsi-208930000000215", context.SecurityMode, false)
++	ue.HnAuthRunning = true
++	ue.Kamf = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
++
++	registration := nasMessage.NewRegistrationRequest(nas.MsgTypeRegistrationRequest)
++	registration.ExtendedProtocolDiscriminator.SetExtendedProtocolDiscriminator(
++		nasMessage.Epd5GSMobilityManagementMessage)
++	registration.RegistrationRequestMessageIdentity.SetMessageType(nas.MsgTypeRegistrationRequest)
++	registration.NgksiAndRegistrationType5GS.SetRegistrationType5GS(nasMessage.RegistrationType5GSInitialRegistration)
++	m := nas.NewMessage()
++	m.GmmMessage = nas.NewGmmMessage()
++	m.GmmHeader.SetMessageType(nas.MsgTypeRegistrationRequest)
++	m.RegistrationRequest = registration
++	contents, err := m.PlainNasEncode()
++	require.NoError(t, err)
++
++	complete := nasMessage.NewSecurityModeComplete(0)
++	complete.NASMessageContainer = nasType.NewNASMessageContainer(nasMessage.SecurityModeCompleteNASMessageContainerType)
++	complete.NASMessageContainer.SetLen(uint16(len(contents)))
++	complete.NASMessageContainer.SetNASMessageContainerContents(contents)
++
++	require.NoError(t, HandleSecurityModeComplete(ue, models.AccessType__3_GPP_ACCESS, 0, complete))
++	require.True(t, ue.State[models.AccessType__3_GPP_ACCESS].Is(context.Registered))
++	require.False(t, ue.HnAuthRunning)
++}
+diff --git a/internal/gmm/init.go b/internal/gmm/init.go
+index eb86b7e..bda8dc2 100644
+--- a/internal/gmm/init.go
++++ b/internal/gmm/init.go
+@@ -20,6 +20,10 @@ const (
+ 	ContextSetupFailEvent     fsm.EventType = "ContextSetup Fail"
+ 	InitDeregistrationEvent   fsm.EventType = "Initialize Deregistration"
+ 	DeregistrationAcceptEvent fsm.EventType = "Deregistration Accept"
++	// A primary authentication asked by the UDM (TS 33.501 cl. 6.1.5) ends in
++	// Registered: after the NAS SMC, or when it could not start.
++	ReauthSuccessEvent fsm.EventType = "Re-Authentication Success"
++	ReauthAbortEvent   fsm.EventType = "Re-Authentication Abort"
+ )
+ 
+ const (
+@@ -51,6 +55,8 @@ var transitions = fsm.Transitions{
+ 	{Event: ContextSetupFailEvent, From: context.ContextSetup, To: context.Deregistered},
+ 	{Event: InitDeregistrationEvent, From: context.Registered, To: context.DeregistrationInitiated},
+ 	{Event: DeregistrationAcceptEvent, From: context.DeregistrationInitiated, To: context.Deregistered},
++	{Event: ReauthSuccessEvent, From: context.SecurityMode, To: context.Registered},
++	{Event: ReauthAbortEvent, From: context.Authentication, To: context.Registered},
+ }
+ 
+ var callbacks = fsm.Callbacks{
+diff --git a/internal/gmm/message/build.go b/internal/gmm/message/build.go
+index 0ada66b..71b3284 100644
+--- a/internal/gmm/message/build.go
++++ b/internal/gmm/message/build.go
+@@ -388,14 +388,18 @@ func BuildSecurityModeCommand(ue *context.AmfUe, accessType models.AccessType, e
+ 	securityModeCommand.Additional5GSecurityInformation = nasType.
+ 		NewAdditional5GSecurityInformation(nasMessage.SecurityModeCommandAdditional5GSecurityInformationType)
+ 	securityModeCommand.Additional5GSecurityInformation.SetLen(1)
+-	if ue.RetransmissionOfInitialNASMsg {
++	// A primary authentication asked by the UDM runs outside a registration:
++	// there is no initial NAS message to retransmit, and the new KAMF comes
++	// from the authentication, not from a horizontal derivation (TS 33.501
++	// cl. 6.1.5.2).
++	if ue.RetransmissionOfInitialNASMsg && !ue.HnAuthRunning {
+ 		securityModeCommand.Additional5GSecurityInformation.SetRINMR(1)
+ 	} else {
+ 		securityModeCommand.Additional5GSecurityInformation.SetRINMR(0)
+ 	}
+ 
+-	if ue.RegistrationType5GS == nasMessage.RegistrationType5GSPeriodicRegistrationUpdating ||
+-		ue.RegistrationType5GS == nasMessage.RegistrationType5GSMobilityRegistrationUpdating {
++	if !ue.HnAuthRunning && (ue.RegistrationType5GS == nasMessage.RegistrationType5GSPeriodicRegistrationUpdating ||
++		ue.RegistrationType5GS == nasMessage.RegistrationType5GSMobilityRegistrationUpdating) {
+ 		securityModeCommand.Additional5GSecurityInformation.SetHDP(1)
+ 	} else {
+ 		securityModeCommand.Additional5GSecurityInformation.SetHDP(0)
+diff --git a/internal/gmm/sm.go b/internal/gmm/sm.go
+index 5fe33a7..9f29250 100644
+--- a/internal/gmm/sm.go
++++ b/internal/gmm/sm.go
+@@ -24,6 +24,7 @@ func DeRegistered(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
+ 		amfUe := args[ArgAmfUe].(*context.AmfUe)
+ 		accessType := args[ArgAccessType].(models.AccessType)
+ 		amfUe.ClearRegistrationRequestData(accessType)
++		amfUe.HnAuthRunning = false
+ 		amfUe.GmmLog.Debugln("EntryEvent at GMM State[DeRegistered]")
+ 	case GmmMessageEvent:
+ 		amfUe := args[ArgAmfUe].(*context.AmfUe)
+@@ -71,11 +72,14 @@ func Registered(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
+ 		amfUe := args[ArgAmfUe].(*context.AmfUe)
+ 		amfUe.GmmStateEnterTime = time.Now()
+ 		amfUe.ClearRegistrationRequestData(accessType)
++		amfUe.HnAuthRunning = false
+ 		amfUe.GmmLog.Debugln("EntryEvent at GMM State[Registered]")
+ 		// If we have a radio connection, and we enter the registered state, then we increase the gauge
+ 		if amfUe.CmConnect(accessType) {
+ 			business_metrics.IncrUeConnectivityGauge(accessType)
+ 		}
++		// TS 33.501 cl. 6.1.5.2 step 3: the UE registered again
++		startPendingHnAuth(state, amfUe, accessType)
+ 
+ 	case GmmMessageEvent:
+ 		amfUe := args[ArgAmfUe].(*context.AmfUe)
+@@ -108,6 +112,9 @@ func Registered(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
+ 		case nas.MsgTypeServiceRequest:
+ 			if err := HandleServiceRequest(amfUe, accessType, gmmMessage.ServiceRequest); err != nil {
+ 				logger.GmmLog.Errorln(err)
++			} else {
++				// TS 33.501 cl. 6.1.5.2 step 3: the UE became reachable
++				startPendingHnAuth(state, amfUe, accessType)
+ 			}
+ 		case nas.MsgTypeNotificationResponse:
+ 			if err := HandleNotificationResponse(amfUe, gmmMessage.NotificationResponse); err != nil {
+@@ -163,7 +170,13 @@ func Authentication(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
+ 
+ 		pass, err := AuthenticationProcedure(amfUe, accessType)
+ 		if err != nil {
+-			if errSendEvent := GmmFSM.SendEvent(state, AuthErrorEvent, fsm.ArgsType{
++			event := AuthErrorEvent
++			if amfUe.HnAuthRunning {
++				// Nothing was sent to the UE: it stays registered with the
++				// current security context.
++				event = ReauthAbortEvent
++			}
++			if errSendEvent := GmmFSM.SendEvent(state, event, fsm.ArgsType{
+ 				ArgAmfUe:      amfUe,
+ 				ArgAccessType: accessType,
+ 			}, logger.GmmLog); errSendEvent != nil {
+@@ -223,6 +236,9 @@ func Authentication(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
+ 		}
+ 	case AuthSuccessEvent:
+ 		logger.GmmLog.Debugln(event)
++	case ReauthAbortEvent:
++		amfUe = args[ArgAmfUe].(*context.AmfUe)
++		logger.AkmaLog.Warnf("Re-authentication of %s requested by the UDM: not started", amfUe.Supi)
+ 	case AuthErrorEvent:
+ 		amfUe = args[ArgAmfUe].(*context.AmfUe)
+ 		accessType = args[ArgAccessType].(models.AccessType)
+@@ -268,7 +284,10 @@ func SecurityMode(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
+ 		amfUe.UpdateLogFields(accessType)
+ 
+ 		amfUe.GmmLog.Debugln("EntryEvent at GMM State[SecurityMode]")
+-		if amfUe.SecurityContextIsValid() {
++		// After a primary authentication asked by the UDM, the current
++		// security context is still valid; the NAS SMC takes the new KAMF
++		// into use (TS 33.501 cl. 6.1.3.2 and cl. 6.9.4.2).
++		if amfUe.SecurityContextIsValid() && !amfUe.HnAuthRunning {
+ 			amfUe.GmmLog.Debugln("UE has a valid security context - skip security mode control procedure")
+ 			if err := GmmFSM.SendEvent(state, SecurityModeSuccessEvent, fsm.ArgsType{
+ 				ArgAmfUe:      amfUe,
+@@ -332,6 +351,8 @@ func SecurityMode(state *fsm.State, event fsm.EventType, args fsm.ArgsType) {
+ 		logger.GmmLog.Debugln(event)
+ 	case SecurityModeFailEvent:
+ 		logger.GmmLog.Debugln(event)
++	case ReauthSuccessEvent:
++		logger.GmmLog.Debugln(event)
+ 	case fsm.ExitEvent:
+ 		logger.GmmLog.Debugln(event)
+ 		entryTime := args[ArgAmfUe].(*context.AmfUe).GmmStateEnterTime
+diff --git a/internal/logger/logger.go b/internal/logger/logger.go
+index 9af803b..3fb41b7 100644
+--- a/internal/logger/logger.go
++++ b/internal/logger/logger.go
+@@ -28,6 +28,7 @@ var (
+ 	NasLog      *logrus.Entry
+ 	ConsumerLog *logrus.Entry
+ 	EeLog       *logrus.Entry
++	AkmaLog     *logrus.Entry
+ )
+ 
+ const (
+@@ -63,4 +64,5 @@ func init() {
+ 	NasLog = NfLog.WithField(logger_util.FieldCategory, "Nas")
+ 	ConsumerLog = NfLog.WithField(logger_util.FieldCategory, "Consumer")
+ 	EeLog = NfLog.WithField(logger_util.FieldCategory, "Ee")
++	AkmaLog = NfLog.WithField(logger_util.FieldCategory, "AKMA")
+ }
+diff --git a/internal/sbi/api_reauth.go b/internal/sbi/api_reauth.go
+new file mode 100644
+index 0000000..b9b11b6
+--- /dev/null
++++ b/internal/sbi/api_reauth.go
+@@ -0,0 +1,81 @@
++package sbi
++
++import (
++	"net/http"
++
++	"github.com/gin-gonic/gin"
++
++	amf_context "github.com/free5gc/amf/internal/context"
++	"github.com/free5gc/amf/internal/gmm"
++	"github.com/free5gc/amf/internal/logger"
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/util/metrics/sbi"
++)
++
++// getHttpNotificationRoutes are the callback routes that receive
++// notifications, served without the access token check of the other callbacks:
++// OAuth 2.0 does not apply to notifications (TS 29.500 cl. 6.7.3; TS 33.501
++// cl. 13.4.1.0).
++func (s *Server) getHttpNotificationRoutes() []Route {
++	return []Route{
++		{
++			Name:    "HandleReauthNotification",
++			Method:  http.MethodPost,
++			Pattern: "/reauth/:supi",
++			APIFunc: s.HTTPHandleReauthNotification,
++		},
++	}
++}
++
++// HTTPHandleReauthNotification receives Nudm_UECM_Re-AuthenticationNotification
++// at the reauthNotifyCallbackUri of the AMF registration (TS 29.503 cl.
++// 5.3.2.15 and 6.2.5.6; TS 33.501 cl. 6.1.5.2 step 2).
++func (s *Server) HTTPHandleReauthNotification(c *gin.Context) {
++	var info models.ReauthNotificationInfo
++
++	requestBody, err := c.GetRawData()
++	if err != nil {
++		logger.CallbackLog.Errorf("Get Request Body error: %+v", err)
++		problemDetails := openapi.ProblemDetailsSystemFailure(err.Error())
++		c.Set(sbi.IN_PB_DETAILS_CTX_STR, problemDetails.Cause)
++		c.JSON(http.StatusInternalServerError, problemDetails)
++		return
++	}
++
++	supi := c.Param("supi")
++	if err = openapi.Deserialize(&info, requestBody, "application/json"); err != nil || info.Supi != supi {
++		detail := "the supi of the body differs from the callback URI"
++		if err != nil {
++			detail = reqbody + err.Error()
++		}
++		problemDetails := models.ProblemDetails{
++			Title:  "Malformed request syntax",
++			Status: http.StatusBadRequest,
++			Detail: detail,
++		}
++		logger.CallbackLog.Errorln(detail)
++		c.Set(sbi.IN_PB_DETAILS_CTX_STR, http.StatusText(http.StatusBadRequest))
++		c.JSON(http.StatusBadRequest, problemDetails)
++		return
++	}
++	// oldGuami and ausfRediscoveryInd are not used: this AMF is the
++	// registered one, and it selects the AUSF for each authentication.
++
++	status, cause := http.StatusNotFound, "CONTEXT_NOT_FOUND"
++	if ue, ok := amf_context.GetSelf().AmfUeFindBySupi(supi); ok {
++		status, cause = gmm.ReauthNotification(ue)
++	}
++	if status == http.StatusNoContent || status == http.StatusAccepted {
++		c.Status(status)
++		return
++	}
++	logger.AkmaLog.Warnf("Re-authentication of %s requested by the UDM: refused, %d %s", supi, status, cause)
++	problemDetails := models.ProblemDetails{
++		Title:  http.StatusText(status),
++		Status: int32(status),
++		Cause:  cause,
++	}
++	c.Set(sbi.IN_PB_DETAILS_CTX_STR, cause)
++	c.JSON(status, problemDetails)
++}
+diff --git a/internal/sbi/consumer/udm_service.go b/internal/sbi/consumer/udm_service.go
+index 136cfe3..d038400 100644
+--- a/internal/sbi/consumer/udm_service.go
++++ b/internal/sbi/consumer/udm_service.go
+@@ -400,13 +400,21 @@ func (s *nudmService) UeCmRegistration(
+ 			factory.AmfCallbackResUriPrefix,
+ 			ue.Supi,
+ 		)
++		// TS 33.501 cl. 6.1.5.2 step 0b: the implicit subscription to
++		// Nudm_UECM_Re-AuthenticationNotification.
++		reauthNotifyCallbackUri := fmt.Sprintf("%s%s/reauth/%s",
++			amfSelf.GetIPv4Uri(),
++			factory.AmfCallbackResUriPrefix,
++			ue.Supi,
++		)
+ 
+ 		registrationData := models.Amf3GppAccessRegistration{
+-			AmfInstanceId:          amfSelf.NfId,
+-			InitialRegistrationInd: initialRegistrationInd,
+-			Guami:                  &amfSelf.ServedGuamiList[0],
+-			RatType:                ue.RatType,
+-			DeregCallbackUri:       deregCallbackUri,
++			AmfInstanceId:           amfSelf.NfId,
++			InitialRegistrationInd:  initialRegistrationInd,
++			Guami:                   &amfSelf.ServedGuamiList[0],
++			RatType:                 ue.RatType,
++			DeregCallbackUri:        deregCallbackUri,
++			ReauthNotifyCallbackUri: reauthNotifyCallbackUri,
+ 			// TODO: not support Homogenous Support of IMS Voice over PS Sessions this stage
+ 			ImsVoPs: models.ImsVoPs_HOMOGENEOUS_NON_SUPPORT,
+ 		}
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index abc53a8..d4040f0 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -76,6 +76,8 @@ func newRouter(s *Server) *gin.Engine {
+ 		callbackAuthCheck.Check(c, amf_context.GetSelf())
+ 	})
+ 	applyRoutes(amfHttpCallBackGroup, amfHttpCallBackRoutes)
++	// Notifications, without access token (TS 29.500 cl. 6.7.3)
++	applyRoutes(router.Group(factory.AmfCallbackResUriPrefix), s.getHttpNotificationRoutes())
+ 
+ 	for _, serverName := range factory.AmfConfig.Configuration.ServiceNameList {
+ 		switch models.ServiceName(serverName) {

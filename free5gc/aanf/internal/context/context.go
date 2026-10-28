@@ -42,10 +42,13 @@ type AANFContext struct {
 	OAuth2Required bool
 
 	KafLifetime time.Duration
-	AKidOptions akid.Options
-	AfPolicy    *AfPolicy
-	NefPolicy   *NefPolicy
-	Store       *Store
+	// KakmaRefresh is the age of K_AKMA after which the AAnF asks the UDM
+	// for its refresh (TS 33.535 cl. 6.4.4); 0 disables it.
+	KakmaRefresh time.Duration
+	AKidOptions  akid.Options
+	AfPolicy     *AfPolicy
+	NefPolicy    *NefPolicy
+	Store        *Store
 
 	mu sync.RWMutex
 }
@@ -68,6 +71,10 @@ func Init(cfg *factory.Config) error {
 		c.RoutingIndicators, c.KafLifetime, c.AfPolicy.AfIds())
 	if ids := c.NefPolicy.AfIds(); len(ids) > 0 {
 		logger.AkmaLog.Infof("AF_IDs accepted from a NEF: %v", ids)
+	}
+	if c.KakmaRefresh > 0 {
+		logger.AkmaLog.Infof("K_AKMA refresh requested from the UDM when a K_AF is asked for a K_AKMA older than %s "+
+			"(TS 33.535 cl. 6.4.4)", c.KakmaRefresh)
 	}
 	return nil
 }
@@ -110,6 +117,9 @@ func New(cfg *factory.Config) (*AANFContext, error) {
 		return nil, err
 	}
 	c.KafLifetime = lifetime
+	if c.KakmaRefresh, err = configuration.Akma.GetKakmaRefresh(); err != nil {
+		return nil, err
+	}
 
 	if c.AKidOptions, err = akidOptions(configuration.Akma.AKid); err != nil {
 		return nil, err

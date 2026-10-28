@@ -1,17 +1,17 @@
 /*
- * AF: AKMA Application Function (3GPP TS 33.535) serving the simplified Ua*
- * protocol of package uastar: HTTP Digest (RFC 7616) keyed with K_AF.
+ * AF: AKMA Application Function (3GPP TS 33.535) serving the Ua* profiles of
+ * TS 24.109 Annex K: HTTP Digest inside TLS (digest-tls), TLS 1.3 and TLS 1.2
+ * with K_AF as pre-shared key (psk-tls13 and psk-tls12, with wolfSSL), and
+ * for tests the simplified Ua* protocol of package uastar (digest-http).
  */
 
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,7 +24,10 @@ import (
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/logger"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/nef"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/nrf"
+	"github.com/florianoneto07/akma-free5gc/af/af/internal/profile"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/server"
+	"github.com/florianoneto07/akma-free5gc/af/akmaoscore"
+	"github.com/florianoneto07/akma-free5gc/af/akmatls"
 	logger_util "github.com/free5gc/util/logger"
 )
 
@@ -52,8 +55,11 @@ func run(cfgPath, logPath string) error {
 	if err := setLogger(s.Logger); err != nil {
 		return err
 	}
-	logger.MainLog.Infof("AF_ID %s; realm %q; qop %v; nonce lifetime %s; K_AF expiry policy %s; anonymous %t",
-		s.AfID.Transport(), s.Realm, s.Qop, s.NonceLifetime, s.KafExpiry, s.Anonymous)
+	logger.MainLog.Infof("FQDN %s; realm %q; qop %v; nonce lifetime %s; K_AF expiry policy %s; anonymous %t",
+		s.FQDN, s.Realm, s.Qop, s.NonceLifetime, s.KafExpiry, s.Anonymous)
+	if profile.Built {
+		logger.MainLog.Infof("Built with wolfSSL: PSK profiles available")
+	}
 	if s.ClockOffset != 0 {
 		logger.MainLog.Warnf("Clock offset %s (test only): K_AF expiry is judged on a shifted clock", s.ClockOffset)
 	}
@@ -64,9 +70,9 @@ func run(cfgPath, logPath string) error {
 	var keys server.KeyProvider
 	if s.NefURI == "" {
 		logger.MainLog.Infof("AF inside the operator network: K_AF from the AAnF at %s", s.AanfURI)
-		keys = aanf.New(s.AanfURI, s.AfID, s.Anonymous)
+		keys = aanf.New(s.AanfURI, s.Anonymous)
 	} else {
-		host, _, _ := net.SplitHostPort(s.Listen)
+		host, _, _ := net.SplitHostPort(s.Profiles[0].Listen)
 		reg, err := nrf.Register(ctx, s.NrfURI, s.NfInstanceID, host)
 		if err != nil {
 			return fmt.Errorf("registration at the NRF %s: %w", s.NrfURI, err)
@@ -80,27 +86,51 @@ func run(cfgPath, logPath string) error {
 		}()
 		logger.MainLog.Infof("AF outside the operator network: K_AF through the NEF at %s; "+
 			"registered at the NRF %s as AF %s (OAuth2 %t)", s.NefURI, s.NrfURI, reg.NfID(), reg.OAuth2())
-		keys = nef.New(s.NefURI, s.AfID, s.Anonymous, reg)
+		keys = nef.New(s.NefURI, s.Anonymous, reg)
 	}
 
-	srv := &http.Server{
-		Addr:              s.Listen,
-		Handler:           server.New(s, keys),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		<-ctx.Done()
+	ua := server.New(s, keys)
+	var running []*profile.Running
+	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdown)
+		for _, r := range running {
+			r.Shutdown(shutdown)
+		}
 	}()
-
-	logger.MainLog.Infof("Ua* server listening on %s for http://%s%s", s.Listen, s.FQDN, s.Path)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	for _, p := range s.Profiles {
+		r, err := profile.Start(p, s, ua)
+		if err != nil {
+			return fmt.Errorf("Ua* server %s on %s: %w", p.Type, p.Listen, err)
+		}
+		running = append(running, r)
+		logger.MainLog.Infof("Ua* server %s listening on %s for %s", p.Type, p.Listen, describe(p, s))
 	}
+	<-ctx.Done()
 	logger.MainLog.Infof("AF terminated")
 	return nil
+}
+
+// describe names the resource and the AF_ID of a profile, for the log.
+func describe(p config.Profile, s *config.Settings) string {
+	url := "https://" + s.FQDN + s.Path
+	switch p.Type {
+	case akmatls.ProfileDigestHTTP:
+		return fmt.Sprintf("http://%s%s, AF_ID %s (simplified Ua*, test only)", s.FQDN, s.Path, s.AfID.Transport())
+	case akmatls.ProfileDigestTLS:
+		return url + ", AF_ID " + s.FQDN + ".010001<cipher suite> (TS 24.109 K.2)"
+	case akmatls.ProfilePSKTLS13:
+		return url + ", AF_ID " + s.FQDN + ".0100000007 (TS 24.109 K.3.3)"
+	case akmatls.ProfilePSKDTLS13:
+		return "coaps://" + s.FQDN + s.Path + ", AF_ID " + s.FQDN + ".0100000009 (TS 33.535 Annex C)"
+	case akmatls.ProfilePSKDTLS12:
+		return "coaps://" + s.FQDN + s.Path + ", AF_ID " + s.FQDN + ".010001<cipher suite> (DTLS 1.2)"
+	case akmatls.ProfileOSCORE:
+		return "coap://" + s.FQDN + akmaoscore.Path + " then " + s.Path + " under OSCORE, AF_ID " + s.FQDN +
+			".0100000008 (TS 33.535 Annex D)"
+	default:
+		return url + ", AF_ID " + s.FQDN + ".010001<cipher suite> (TS 24.109 K.3.2)"
+	}
 }
 
 func setLogger(l config.Logger) error {

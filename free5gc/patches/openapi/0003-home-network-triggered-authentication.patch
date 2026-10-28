@@ -1,0 +1,324 @@
+diff -ruN a/models/model_amf3_gpp_access_registration.go b/models/model_amf3_gpp_access_registration.go
+--- a/models/model_amf3_gpp_access_registration.go
++++ b/models/model_amf3_gpp_access_registration.go
+@@ -61,4 +61,7 @@
+ 	UdrRestartInd              bool     `json:"udrRestartInd,omitempty" yaml:"udrRestartInd" bson:"udrRestartInd,omitempty"`
+ 	// string with format 'date-time' as defined in OpenAPI.
+ 	LastSynchronizationTime *time.Time `json:"lastSynchronizationTime,omitempty" yaml:"lastSynchronizationTime" bson:"lastSynchronizationTime,omitempty"`
++	// String providing an URI formatted according to RFC 3986. The UDM notifies the AMF at this URI of the need
++	// to initiate a primary authentication of the UE (TS 29.503 clause 5.3.2.15; TS 33.501 clause 6.1.5).
++	ReauthNotifyCallbackUri string `json:"reauthNotifyCallbackUri,omitempty" yaml:"reauthNotifyCallbackUri" bson:"reauthNotifyCallbackUri,omitempty"`
+ }
+diff -ruN a/models/model_amf_non3_gpp_access_registration.go b/models/model_amf_non3_gpp_access_registration.go
+--- a/models/model_amf_non3_gpp_access_registration.go
++++ b/models/model_amf_non3_gpp_access_registration.go
+@@ -54,4 +54,7 @@
+ 	UdrRestartInd              bool     `json:"udrRestartInd,omitempty" yaml:"udrRestartInd" bson:"udrRestartInd,omitempty"`
+ 	// string with format 'date-time' as defined in OpenAPI.
+ 	LastSynchronizationTime *time.Time `json:"lastSynchronizationTime,omitempty" yaml:"lastSynchronizationTime" bson:"lastSynchronizationTime,omitempty"`
++	// String providing an URI formatted according to RFC 3986. The UDM notifies the AMF at this URI of the need
++	// to initiate a primary authentication of the UE (TS 29.503 clause 5.3.2.15; TS 33.501 clause 6.1.5).
++	ReauthNotifyCallbackUri string `json:"reauthNotifyCallbackUri,omitempty" yaml:"reauthNotifyCallbackUri" bson:"reauthNotifyCallbackUri,omitempty"`
+ }
+diff -ruN a/models/model_auth_trigger_info.go b/models/model_auth_trigger_info.go
+--- a/models/model_auth_trigger_info.go
++++ b/models/model_auth_trigger_info.go
+@@ -0,0 +1,20 @@
++/*
++ * Nudm_UECM
++ *
++ * Nudm Context Management Service.
++ *
++ * Source file: 3GPP TS 29.503 Unified Data Management Services, version 19.7.0
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.503/
++ *
++ * API version: 1.4.2
++ */
++
++package models
++
++// AuthTriggerInfo contains the SUPI of the UE whose primary authentication
++// the NF service consumer (e.g. the AAnF) asks the UDM to trigger (TS 29.503
++// clause 6.2.6.2.36).
++type AuthTriggerInfo struct {
++	// String identifying a Supi that shall contain either an IMSI, a network specific identifier, a Global Cable Identifier (GCI) or a Global Line Identifier (GLI) as specified in clause  2.2A of 3GPP TS 23.003.
++	Supi string `json:"supi,omitempty" yaml:"supi" bson:"supi,omitempty"`
++}
+diff -ruN a/models/model_reauth_notification_info.go b/models/model_reauth_notification_info.go
+--- a/models/model_reauth_notification_info.go
++++ b/models/model_reauth_notification_info.go
+@@ -0,0 +1,22 @@
++/*
++ * Nudm_UECM
++ *
++ * Nudm Context Management Service.
++ *
++ * Source file: 3GPP TS 29.503 Unified Data Management Services, version 19.7.0
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.503/
++ *
++ * API version: 1.4.2
++ */
++
++package models
++
++// ReauthNotificationInfo contains the SUPI of the UE that is subject to
++// reauthentication (TS 29.503 clause 6.2.6.2.35).
++type ReauthNotificationInfo struct {
++	// String identifying a Supi that shall contain either an IMSI, a network specific identifier, a Global Cable Identifier (GCI) or a Global Line Identifier (GLI) as specified in clause  2.2A of 3GPP TS 23.003.
++	Supi     string `json:"supi" yaml:"supi" bson:"supi,omitempty"`
++	OldGuami *Guami `json:"oldGuami,omitempty" yaml:"oldGuami" bson:"oldGuami,omitempty"`
++	// If true, the AUSF rediscovery is required before triggering the primary authentication.
++	AusfRediscoveryInd bool `json:"ausfRediscoveryInd,omitempty" yaml:"ausfRediscoveryInd" bson:"ausfRediscoveryInd,omitempty"`
++}
+diff -ruN a/udm/UEContextManagement/api_amf_registration_reauth_notification.go b/udm/UEContextManagement/api_amf_registration_reauth_notification.go
+--- a/udm/UEContextManagement/api_amf_registration_reauth_notification.go
++++ b/udm/UEContextManagement/api_amf_registration_reauth_notification.go
+@@ -0,0 +1,73 @@
++/*
++ * Nudm_UECM
++ *
++ * Nudm Context Management Service.
++ *
++ * Source file: 3GPP TS 29.503 Unified Data Management Services, version 19.7.0
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.503/
++ *
++ * API version: 1.4.2
++ */
++
++package UEContextManagement
++
++import (
++	"context"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++// Call3GppRegistrationReauthNotificationPostRequest
++type Call3GppRegistrationReauthNotificationPostRequest struct {
++	ReauthNotificationInfo *models.ReauthNotificationInfo
++}
++
++func (r *Call3GppRegistrationReauthNotificationPostRequest) SetReauthNotificationInfo(ReauthNotificationInfo models.ReauthNotificationInfo) {
++	r.ReauthNotificationInfo = &ReauthNotificationInfo
++}
++
++type Call3GppRegistrationReauthNotificationPostResponse struct {
++	// Pending is true when the AMF answered 202 Accepted: the UE is not
++	// reachable and the reauthentication pending flag has been set.
++	Pending bool
++}
++
++type Call3GppRegistrationReauthNotificationPostError operationError
++
++// reauthNotificationErrorCodes are the error status codes of the
++// reauthNotification callback in TS29503_Nudm_UECM.yaml.
++var reauthNotificationErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 409: true, 411: true,
++	413: true, 415: true, 429: true, 500: true, 502: true, 503: true,
++}
++
++/*
++Call3GppRegistrationReauthNotificationPost notifies the AMF registered for 3GPP
++access of the need to initiate a primary authentication of the UE: POST to the
++reauthNotifyCallbackUri of the AMF registration (TS 29.503 clauses 5.3.2.15 and
++6.2.5.6). The AMF answers 204, or 202 when the UE is not reachable.
++
++@return Call3GppRegistrationReauthNotificationPostResponse
++*/
++func (a *AMFRegistrationFor3GPPAccessApiService) Call3GppRegistrationReauthNotificationPost(ctx context.Context, uri string, request *Call3GppRegistrationReauthNotificationPostRequest) (*Call3GppRegistrationReauthNotificationPostResponse, error) {
++	var localVarReturnValue Call3GppRegistrationReauthNotificationPostResponse
++
++	body, resp, err := postJSON(ctx, a.client.cfg, uri, request.ReauthNotificationInfo)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	switch resp.StatusCode {
++	case 202:
++		localVarReturnValue.Pending = true
++		return &localVarReturnValue, nil
++	case 204:
++		return &localVarReturnValue, nil
++	}
++	if v, apiError, ok := decodeOperationError(body, resp, reauthNotificationErrorCodes); ok {
++		apiError.ErrorModel = Call3GppRegistrationReauthNotificationPostError(v)
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in Call3GppRegistrationReauthNotificationPost", resp.StatusCode)
++}
+diff -ruN a/udm/UEContextManagement/api_trigger_the_primary_re_authentication.go b/udm/UEContextManagement/api_trigger_the_primary_re_authentication.go
+--- a/udm/UEContextManagement/api_trigger_the_primary_re_authentication.go
++++ b/udm/UEContextManagement/api_trigger_the_primary_re_authentication.go
+@@ -0,0 +1,152 @@
++/*
++ * Nudm_UECM
++ *
++ * Nudm Context Management Service.
++ *
++ * Source file: 3GPP TS 29.503 Unified Data Management Services, version 19.7.0
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.503/
++ *
++ * API version: 1.4.2
++ */
++
++package UEContextManagement
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/url"
++	"strings"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type TriggerThePrimaryReAuthenticationApiService service
++
++// AuthTriggerRequest
++type AuthTriggerRequest struct {
++	UeId            *string
++	AuthTriggerInfo *models.AuthTriggerInfo
++}
++
++func (r *AuthTriggerRequest) SetUeId(UeId string) {
++	r.UeId = &UeId
++}
++func (r *AuthTriggerRequest) SetAuthTriggerInfo(AuthTriggerInfo models.AuthTriggerInfo) {
++	r.AuthTriggerInfo = &AuthTriggerInfo
++}
++
++type AuthTriggerResponse struct {
++}
++
++type AuthTriggerError operationError
++
++/*
++AuthTrigger asks the UDM to trigger a primary (re-)authentication of the UE:
++the custom operation trigger-auth on {apiRoot}/nudm-uecm/v1/{ueId}/registrations
++(TS 29.503 clauses 5.3.2.16 and 6.2.3.13).
++
++It uses POST, the method of table 6.2.3.13.4.1-1, of the procedure of clause
++5.3.2.16.2 and of every custom operation (TS 29.501 clause 4.6.1.2);
++TS29503_Nudm_UECM.yaml declares the operation with get.
++
++@return AuthTriggerResponse
++*/
++func (a *TriggerThePrimaryReAuthenticationApiService) AuthTrigger(ctx context.Context, request *AuthTriggerRequest) (*AuthTriggerResponse, error) {
++	var localVarReturnValue AuthTriggerResponse
++
++	// create path and map variables
++	localVarPath := a.client.cfg.BasePath() + "/{ueId}/registrations/trigger-auth"
++	localVarPath = strings.Replace(localVarPath, "{"+"ueId"+"}", openapi.StringOfValue(*request.UeId), -1)
++
++	body, resp, err := postJSON(ctx, a.client.cfg, localVarPath, request.AuthTriggerInfo)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 204 {
++		return &localVarReturnValue, nil
++	}
++	if v, apiError, ok := decodeOperationError(body, resp, authTriggerErrorCodes); ok {
++		apiError.ErrorModel = AuthTriggerError(v)
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in AuthTrigger", resp.StatusCode)
++}
++
++// operationError is the error representation of the operations of this file
++// and of the re-authentication notification: a ProblemDetails for 4xx/5xx
++// responses, or a RedirectResponse with the Location and
++// 3gpp-Sbi-Target-Nf-Id headers for 307/308.
++type operationError struct {
++	Location             string
++	Var3gppSbiTargetNfId string
++	ProblemDetails       models.ProblemDetails
++	RedirectResponse     models.RedirectResponse
++}
++
++// authTriggerErrorCodes are the error status codes of trigger-auth in
++// TS29503_Nudm_UECM.yaml.
++var authTriggerErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 411: true, 413: true,
++	415: true, 429: true, 500: true, 502: true, 503: true,
++}
++
++// postJSON sends a POST with a JSON body to uri and returns the raw response.
++func postJSON(ctx context.Context, cfg *Configuration, uri string, body interface{}) ([]byte, *http.Response, error) {
++	localVarHeaderParams := map[string]string{
++		"Content-Type": "application/json",
++		"Accept":       "application/json, application/problem+json",
++	}
++
++	r, err := openapi.PrepareRequest(ctx, cfg, uri, http.MethodPost, body,
++		localVarHeaderParams, url.Values{}, url.Values{}, "", "", nil)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	localVarHTTPResponse, err := openapi.CallAPI(cfg, r)
++	if err != nil || localVarHTTPResponse == nil {
++		return nil, nil, err
++	}
++
++	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
++	if err != nil {
++		return nil, nil, err
++	}
++	if err = localVarHTTPResponse.Body.Close(); err != nil {
++		return nil, nil, err
++	}
++	return localVarBody, localVarHTTPResponse, nil
++}
++
++// decodeOperationError reads the error representation of a 307/308 or of an
++// error status in codes; it returns false for any other status.
++func decodeOperationError(body []byte, resp *http.Response, codes map[int]bool) (
++	operationError, openapi.GenericOpenAPIError, bool,
++) {
++	apiError := openapi.GenericOpenAPIError{
++		RawBody:     body,
++		ErrorStatus: resp.StatusCode,
++	}
++	var v operationError
++	contentType := resp.Header.Get("Content-Type")
++	switch {
++	case resp.StatusCode == 307 || resp.StatusCode == 308:
++		if len(body) > 0 {
++			// A body that is not a RedirectResponse is kept only in RawBody.
++			_ = openapi.Deserialize(&v.RedirectResponse, body, contentType)
++		}
++		v.Location = resp.Header.Get("Location")
++		v.Var3gppSbiTargetNfId = resp.Header.Get("3gpp-Sbi-Target-Nf-Id")
++	case codes[resp.StatusCode]:
++		if len(body) > 0 {
++			// A body that is not a ProblemDetails is kept only in RawBody.
++			_ = openapi.Deserialize(&v.ProblemDetails, body, contentType)
++		}
++	default:
++		return v, apiError, false
++	}
++	return v, apiError, true
++}
+diff -ruN a/udm/UEContextManagement/client.go b/udm/UEContextManagement/client.go
+--- a/udm/UEContextManagement/client.go
++++ b/udm/UEContextManagement/client.go
+@@ -47,6 +47,7 @@
+ 	SendRoutingInfoSMCustomOperationApi                    *SendRoutingInfoSMCustomOperationApiService
+ 	TriggerAMFFor3GPPAccessDeregistrationApi               *TriggerAMFFor3GPPAccessDeregistrationApiService
+ 	TriggerPCSCFRestorationApi                             *TriggerPCSCFRestorationApiService
++	TriggerThePrimaryReAuthenticationApi                   *TriggerThePrimaryReAuthenticationApiService
+ 	UECMRegistrationInfoRetrievalApi                       *UECMRegistrationInfoRetrievalApiService
+ 	UELocationInformationRetrievalApi                      *UELocationInformationRetrievalApiService
+ }
+@@ -91,6 +92,7 @@
+ 	c.SendRoutingInfoSMCustomOperationApi = (*SendRoutingInfoSMCustomOperationApiService)(&c.common)
+ 	c.TriggerAMFFor3GPPAccessDeregistrationApi = (*TriggerAMFFor3GPPAccessDeregistrationApiService)(&c.common)
+ 	c.TriggerPCSCFRestorationApi = (*TriggerPCSCFRestorationApiService)(&c.common)
++	c.TriggerThePrimaryReAuthenticationApi = (*TriggerThePrimaryReAuthenticationApiService)(&c.common)
+ 	c.UECMRegistrationInfoRetrievalApi = (*UECMRegistrationInfoRetrievalApiService)(&c.common)
+ 	c.UELocationInformationRetrievalApi = (*UELocationInformationRetrievalApiService)(&c.common)
+ 

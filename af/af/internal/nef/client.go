@@ -26,20 +26,18 @@ type TokenSource interface {
 	TokenCtx(ctx context.Context, target models.NrfNfManagementNfType, scope string) (context.Context, error)
 }
 
-// Client requests K_AF from the NEF for one AF_ID.
+// Client requests K_AF from the NEF.
 type Client struct {
 	cfg       *configuration
-	afID      afid.AfID
 	anonymous bool
 	tokens    TokenSource
 }
 
 // New returns a client of the NEF at apiRoot. With anonymous, the requests
 // carry anonInd (TS 33.535 cl. 6.2.2).
-func New(apiRoot string, id afid.AfID, anonymous bool, tokens TokenSource) *Client {
+func New(apiRoot string, anonymous bool, tokens TokenSource) *Client {
 	return &Client{
 		cfg:       &configuration{basePath: apiRoot + "/3gpp-akma/v1"},
-		afID:      id,
 		anonymous: anonymous,
 		tokens:    tokens,
 	}
@@ -48,14 +46,14 @@ func New(apiRoot string, id afid.AfID, anonymous bool, tokens TokenSource) *Clie
 // Source names where the client obtains K_AF, for the log.
 func (c *Client) Source() string { return "the NEF" }
 
-// ApplicationKey requests the K_AF of aKid. The NEF never returns the SUPI
-// (TS 33.535 cl. 6.3 step 5).
-func (c *Client) ApplicationKey(ctx context.Context, aKid string) (aanf.Key, error) {
+// ApplicationKey requests the K_AF of aKid for the AF_ID id. The NEF never
+// returns the SUPI (TS 33.535 cl. 6.3 step 5).
+func (c *Client) ApplicationKey(ctx context.Context, id afid.AfID, aKid string) (aanf.Key, error) {
 	ctx, err := c.tokens.TokenCtx(ctx, models.NrfNfManagementNfType_NEF, string(models.ServiceName_3GPP_AKMA))
 	if err != nil {
 		return aanf.Key{}, fmt.Errorf("%w: access token: %v", aanf.ErrUnavailable, err)
 	}
-	body := models.AkmaAfKeyRequest{AfId: c.afID.Transport(), AKId: aKid, AnonInd: c.anonymous}
+	body := models.AkmaAfKeyRequest{AfId: id.Transport(), AKId: aKid, AnonInd: c.anonymous}
 	headers := map[string]string{
 		"Content-Type": "application/json",
 		"Accept":       "application/json, application/problem+json",

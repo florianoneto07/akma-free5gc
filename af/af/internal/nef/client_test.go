@@ -61,13 +61,12 @@ func fakeNef(t *testing.T, got *request, handler func(w http.ResponseWriter)) st
 	return "http://" + ts.Listener.Addr().(*net.TCPAddr).String()
 }
 
+// testAfID is the AF_ID of the requests.
+var testAfID = afid.AfID{FQDN: "af1.akma.example", Protocol: afid.UaStarDigest}
+
 func newClient(t *testing.T, apiRoot string, anonymous bool, tokens TokenSource) *Client {
 	t.Helper()
-	id, err := afid.New("af1.akma.example", afid.UaStarDigest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return New(apiRoot, id, anonymous, tokens)
+	return New(apiRoot, anonymous, tokens)
 }
 
 func writeJSON(w http.ResponseWriter, status int, contentType string, v any) {
@@ -85,7 +84,7 @@ func TestApplicationKey(t *testing.T) {
 			writeJSON(w, http.StatusOK, "application/json", models.AkmaAfKeyData{Kaf: codec.HexKey(kaf), Expiry: &exp})
 		})
 		tokens := &staticTokens{}
-		k, err := newClient(t, root, anonymous, tokens).ApplicationKey(context.Background(), testAKid)
+		k, err := newClient(t, root, anonymous, tokens).ApplicationKey(context.Background(), testAfID, testAKid)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,7 +126,7 @@ func TestApplicationKeyErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var got request
 			_, err := newClient(t, fakeNef(t, &got, tc.handler), false, &staticTokens{}).
-				ApplicationKey(context.Background(), testAKid)
+				ApplicationKey(context.Background(), testAfID, testAKid)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}

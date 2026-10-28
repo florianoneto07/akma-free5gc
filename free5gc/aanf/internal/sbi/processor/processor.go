@@ -13,6 +13,9 @@ type ProcessorAanf interface {
 // Processor implements the Naanf_AKMA service operations.
 type Processor struct {
 	ProcessorAanf
+
+	// Refresher asks for the refresh of K_AKMA; nil disables it.
+	Refresher KAkmaRefresher
 }
 
 func NewProcessor(aanf ProcessorAanf) (*Processor, error) {

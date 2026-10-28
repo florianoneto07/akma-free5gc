@@ -79,6 +79,11 @@ type Configuration struct {
 type Akma struct {
 	// KafLifetime is the K_AF lifetime as a Go duration ("1h", "30m").
 	KafLifetime string `yaml:"kafLifetime,omitempty" valid:"optional"`
+	// KakmaRefresh is the local authentication policy of TS 33.535 cl. 6.4.4,
+	// as a Go duration: when an AF asks for a K_AF of a K_AKMA registered
+	// longer ago, the AAnF asks the UDM for a new primary authentication
+	// (Nudm_UECM_AuthTrigger). Empty or "0" disables it.
+	KakmaRefresh string `yaml:"kakmaRefresh,omitempty" valid:"optional"`
 	// AuthorizedAfs is the local policy that authorizes AFs to obtain K_AF
 	// (TS 33.535 cl. 6.2.1 step 2).
 	AuthorizedAfs []AuthorizedAf `yaml:"authorizedAfs,omitempty" valid:"optional"`
@@ -167,6 +172,9 @@ func (a *Akma) validate() error {
 	if _, err := a.GetKafLifetime(); err != nil {
 		return err
 	}
+	if _, err := a.GetKakmaRefresh(); err != nil {
+		return err
+	}
 	for i, af := range a.AuthorizedAfs {
 		if _, err := afid.Parse(af.AfId); err != nil {
 			return fmt.Errorf("invalid akma.authorizedAfs[%d].afId: expected \"<FQDN>.<10 hex>\"", i)
@@ -199,6 +207,19 @@ func (a *Akma) validate() error {
 		}
 	}
 	return nil
+}
+
+// GetKakmaRefresh returns the age of K_AKMA after which the AAnF asks for
+// its refresh, or 0 when the refresh is disabled.
+func (a *Akma) GetKakmaRefresh() (time.Duration, error) {
+	if a == nil || a.KakmaRefresh == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(a.KakmaRefresh)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid akma.kakmaRefresh %q: expected a duration, 0 to disable", a.KakmaRefresh)
+	}
+	return d, nil
 }
 
 // GetKafLifetime returns the configured K_AF lifetime.

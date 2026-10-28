@@ -44,13 +44,12 @@ func client(t *testing.T, apiRoot string) *Client {
 	return clientAnon(t, apiRoot, false)
 }
 
+// testAfID is the AF_ID of the requests.
+var testAfID = afid.AfID{FQDN: "af1.akma.example", Protocol: afid.UaStarDigest}
+
 func clientAnon(t *testing.T, apiRoot string, anonymous bool) *Client {
 	t.Helper()
-	id, err := afid.New("af1.akma.example", afid.UaStarDigest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return New(apiRoot, id, anonymous)
+	return New(apiRoot, anonymous)
 }
 
 func writeJSON(w http.ResponseWriter, status int, contentType string, v any) {
@@ -70,7 +69,7 @@ func TestApplicationKey(t *testing.T) {
 		writeJSON(w, http.StatusOK, "application/json",
 			models.AkmaAfKeyData{Kaf: codec.HexKey(kaf), Expiry: &exp, Supi: "imsi-208930000000001"})
 	})
-	k, err := client(t, root).ApplicationKey(context.Background(), testAKid)
+	k, err := client(t, root).ApplicationKey(context.Background(), testAfID, testAKid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +90,7 @@ func TestApplicationKeyAnonymous(t *testing.T) {
 		got = req
 		writeJSON(w, http.StatusOK, "application/json", models.AkmaAfKeyData{Kaf: codec.HexKey(kdf.Key{7}), Expiry: &exp})
 	})
-	k, err := clientAnon(t, root, true).ApplicationKey(context.Background(), testAKid)
+	k, err := clientAnon(t, root, true).ApplicationKey(context.Background(), testAfID, testAKid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +128,7 @@ func TestApplicationKeyErrors(t *testing.T) {
 		}, ErrUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := client(t, fakeAanf(t, tc.handler)).ApplicationKey(context.Background(), testAKid)
+			_, err := client(t, fakeAanf(t, tc.handler)).ApplicationKey(context.Background(), testAfID, testAKid)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -138,7 +137,7 @@ func TestApplicationKeyErrors(t *testing.T) {
 }
 
 func TestApplicationKeyUnreachable(t *testing.T) {
-	_, err := client(t, "http://127.0.0.1:1").ApplicationKey(context.Background(), testAKid)
+	_, err := client(t, "http://127.0.0.1:1").ApplicationKey(context.Background(), testAfID, testAKid)
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v", err)
 	}

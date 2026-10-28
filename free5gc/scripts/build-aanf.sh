@@ -3,7 +3,8 @@
 #
 # Usage: free5gc/scripts/build-aanf.sh
 #   Output: free5gc/build/bin/aanf and free5gc/build/bin/seed (static binaries).
-#   Prepares the patched free5gc/openapi first when it is missing.
+#   Prepares the patched free5gc/openapi first when it is missing or lacks
+#   one of the patches.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,7 +12,8 @@ repo="$(cd "$here/.." && pwd)"
 
 command -v go >/dev/null || { echo "go not found in PATH" >&2; exit 1; }
 
-if [ ! -f "$here/build/openapi/aanf/AKMA/client.go" ]; then
+if [ ! -f "$here/build/openapi/aanf/AKMA/client.go" ] ||
+    [ ! -f "$here/build/openapi/udm/UEContextManagement/api_trigger_the_primary_re_authentication.go" ]; then
     "$here/scripts/prepare-openapi.sh"
 fi
 

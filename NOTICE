@@ -10,3 +10,9 @@ The patches in af/ue/ueransim/patches modify UERANSIM
 (https://github.com/aligungr/UERANSIM), licensed under the GNU General Public
 License, version 3. They are distributed under the same license; see
 af/ue/ueransim/patches/COPYING.
+
+af/wolftls and af/scripts/build-wolfssl.sh use wolfSSL (https://www.wolfssl.com),
+licensed under the GNU General Public License, version 3. They are
+distributed under the same license; see af/wolftls/COPYING. Binaries of the AF
+and of the Ua* client built with wolfSSL (build tag wolfssl) are covered by
+the same license.

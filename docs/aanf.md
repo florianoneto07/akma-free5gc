@@ -38,6 +38,7 @@ On top of the fields that all free5GC NFs have (`sbi`, `serviceNameList`, `nrfUr
 | `serviceNameList` | `[naanf-akma]` | the only accepted value | TS 29.535 cl. 5.1.1 |
 | `routingIndicators` | `["0000"]` | strings of 1 to 4 digits; empty means any RID. `0000` without quotes is still read as `"0000"` | TS 29.510 `AanfInfo`; TS 23.003 cl. 2.2B |
 | `akma.kafLifetime` | `1h` | positive Go duration; default `1h` | operator policy, TS 33.535 cl. 5.2 |
+| `akma.kakmaRefresh` | `0` | Go duration; `0` or absent, the default, turns it off. With a value, a K_AF request for a K_AKMA registered longer ago makes the AAnF ask the UDM for a new primary authentication (section 8) | operator policy, TS 33.535 cl. 6.4.4 |
 | `akma.authorizedAfs[].afId` | `af1.akma.example.FF00000001` | transport form `<FQDN>.<10 hex digits>` | TS 29.522 `AfId` |
 | `akma.authorizedAfs[].sourceAddresses` | `[192.168.16.129]` | at least one IP address | local policy, section 4 |
 | `akma.authorizedNefs[].sourceAddresses` | `[192.168.16.130]` | at least one IP address: those of the NEF | local policy, section 5 |
@@ -176,8 +177,26 @@ No key is logged, at any level. SUPI, A-KID and AF_ID are logged at `info`, unde
 | info | `K_AKMA not present for A-KID <A-KID>, requested by AF_ID <AF_ID>` |
 | info | `AKMA context of <SUPI> removed`, or `... to remove not found` |
 | warn | `AF at <address> not authorized for AF_ID <AF_ID>`, `NEF at <address> not authorized for AF_ID <AF_ID>` |
+| info | with `kakmaRefresh`: `K_AKMA refresh requested from the UDM when a K_AF is asked for a K_AKMA older than <duration> (TS 33.535 cl. 6.4.4)` at start; `K_AKMA of <SUPI> registered <age> ago: refresh requested from the UDM (TS 33.535 cl. 6.4.4)`; `UDM for Nudm_UECM_AuthTrigger: <URI> (discovered at the NRF)`; `Refresh of K_AKMA of <SUPI> accepted by the UDM: new primary authentication requested` |
+| warn | `Refresh of K_AKMA of <SUPI> not accepted by the UDM: <status> <cause> (<detail>)` |
 
-## 8. Limitations
+## 8. Refresh of K_AKMA
+
+TS 33.535 cl. 6.4.1: *"KAKMA shall be re-keyed by running a successful primary authentication"*. Cl. 6.4.4: *"the AAnF may decide to refresh the KAKMA based on the operator's local authentication policy by sending the Nudm_UECM_AuthTrigger Request message to the UDM"*.
+
+**Policy.** After it hands out a K_AF, the AAnF looks at the age of the K_AKMA of the context. When it was registered longer ago than `akma.kakmaRefresh`, the AAnF asks the UDM for a new primary authentication in the background; the answer to the AF does not wait. It asks once per K_AKMA, and asks again at the first K_AF request after 5 minutes if the K_AKMA did not change. The K_AF already handed out stays valid until it expires (cl. 6.4.2).
+
+**Request.** The AAnF discovers a UDM with `nudm-uecm` at the NRF once (`target-nf-type=UDM`, `requester-nf-type=AANF`) and keeps its address. With OAuth2 on, it asks the NRF for the `nnrf-disc` and `nudm-uecm` tokens. It sends `POST {apiRoot}/nudm-uecm/v1/{supi}/registrations/trigger-auth` with `{"supi": ...}` and `User-Agent: AANF-<nfInstanceId>` (TS 29.500 table 5.2.2.2-1). The method is POST, as table 6.2.3.13.4.1-1 of TS 29.503 says; the YAML of the API declares `get`. The UDM and the AMF need the patches `udm/0002` and `amf/0001` ([free5gc-fixes.md](free5gc-fixes.md), F17 to F19).
+
+**Tool.** `seed trigger-auth` sends the same request without waiting for the policy:
+
+```bash
+~/akma-tools/seed trigger-auth --nrf http://127.0.0.10:8000 --supi imsi-208930000000001
+```
+
+It prints `accepted (204)`, or `UDM answered <status> (<cause>; <detail>)`. With `--nrf`, it registers at the NRF as a temporary AF for the token. `--method` and `--body` send the request as given, for negative tests.
+
+## 9. Limitations
 
 - No TLS on the SBI.
 - No roaming status subscription; no GPSI.

@@ -144,8 +144,32 @@ func TestSampleConfig(t *testing.T) {
 	if c.NfInstanceId != "b6f417f0-06fa-4c38-b291-33066f5a5fe7" {
 		t.Errorf("nfInstanceId = %s", c.NfInstanceId)
 	}
-	if strings.Join(c.RoutingIndicators, ",") != "0000" || len(c.Akma.AuthorizedAfs) != 1 ||
-		len(c.Akma.AuthorizedNefs) != 1 || c.Sbi.Port != 8010 {
+	if strings.Join(c.RoutingIndicators, ",") != "0000" || len(c.Akma.AuthorizedAfs) != 10 ||
+		len(c.Akma.AuthorizedNefs) != 1 || len(c.Akma.AuthorizedNefs[0].AfIds) != 10 || c.Sbi.Port != 8010 {
 		t.Errorf("configuration = %+v", c)
+	}
+}
+
+func TestKakmaRefresh(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  time.Duration
+		ok    bool
+	}{
+		{"", 0, true},
+		{"0", 0, true},
+		{"20s", 20 * time.Second, true},
+		{"24h", 24 * time.Hour, true},
+		{"-1s", 0, false},
+		{"one day", 0, false},
+	} {
+		a := &Akma{KakmaRefresh: c.value}
+		d, err := a.GetKakmaRefresh()
+		if (err == nil) != c.ok || d != c.want {
+			t.Errorf("kakmaRefresh %q: %v %v", c.value, d, err)
+		}
+		if err := a.validate(); (err == nil) != c.ok {
+			t.Errorf("validate with kakmaRefresh %q: %v", c.value, err)
+		}
 	}
 }

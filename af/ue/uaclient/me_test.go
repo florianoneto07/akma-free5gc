@@ -97,3 +97,68 @@ func TestLocalAddr(t *testing.T) {
 		t.Fatal("interface name accepted as address")
 	}
 }
+
+func TestParseKeyService(t *testing.T) {
+	aKid, kaf, err := ParseKeyService("OK a-kid=" + testAKid + " af-id=af1.akma.example.FF00000001 k-af=" + kafHex + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aKid != testAKid || codec.HexKey(kaf) != kafHex {
+		t.Fatalf("got %s %s", aKid, codec.HexKey(kaf))
+	}
+	if _, _, err := ParseKeyService("ERR NOT_AUTHORIZED\n"); !errors.Is(err, ErrNotAuthorized) {
+		t.Errorf("NOT_AUTHORIZED: err = %v", err)
+	}
+	for _, bad := range []string{"ERR NO_KEY_MATERIAL", "OK af-id=x k-af=" + kafHex, "OK a-kid=x k-af=12", "", "KAF x y"} {
+		if _, _, err := ParseKeyService(bad); !errors.Is(err, ErrME) {
+			t.Errorf("%q: err = %v", bad, err)
+		}
+	}
+}
+
+// fakeKeyService answers one connection on a Unix socket like the AKMA key
+// service of the ME and records the request line.
+func fakeKeyService(t *testing.T, answer string, got *string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "akma.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 512)
+		n, _ := c.Read(buf)
+		*got = string(buf[:n])
+		_, _ = c.Write([]byte(answer))
+	}()
+	return path
+}
+
+func TestFromKeyService(t *testing.T) {
+	var got string
+	path := fakeKeyService(t, "OK a-kid="+testAKid+" af-id=af1.akma.example.FF00000001 k-af="+kafHex+"\n", &got)
+	aKid, kaf, err := FromKeyService(context.Background(), path, "af1.akma.example", "FF00000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "KAF af1.akma.example FF00000001\n" {
+		t.Errorf("request %q", got)
+	}
+	if aKid != testAKid || codec.HexKey(kaf) != kafHex {
+		t.Fatalf("got %s %s", aKid, codec.HexKey(kaf))
+	}
+
+	path = fakeKeyService(t, "ERR NOT_AUTHORIZED\n", &got)
+	if _, _, err := FromKeyService(context.Background(), path, "af2.akma.example", "FF00000001"); !errors.Is(err, ErrNotAuthorized) {
+		t.Errorf("refused AF_ID: err = %v", err)
+	}
+	if _, _, err := FromKeyService(context.Background(), filepath.Join(t.TempDir(), "none.sock"), "af1.akma.example", "FF00000001"); !errors.Is(err, ErrME) {
+		t.Errorf("no service: err = %v", err)
+	}
+}

@@ -1,0 +1,603 @@
+diff --git a/go.mod b/go.mod
+index ed4db62..64b5296 100644
+--- a/go.mod
++++ b/go.mod
+@@ -74,3 +74,5 @@ require (
+ 	google.golang.org/protobuf v1.36.1 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ )
++
++replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi
+diff --git a/go.sum b/go.sum
+index 4b6448e..008859c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -25,8 +25,6 @@ github.com/free5gc/nas v1.2.3 h1:vMA9NGORw0zr26vQWWSTy8X9HrA+wGxFvwc2g9KqUTw=
+ github.com/free5gc/nas v1.2.3/go.mod h1:A8ODi6MW0fRJiLEH4GcUPbg3dd9xm3zi+fkBWqTjQ40=
+ github.com/free5gc/ngap v1.1.3 h1:uT+IE5PkWOYjPdxCyOAwLDOXUiADcOQCs05CudyC36s=
+ github.com/free5gc/ngap v1.1.3/go.mod h1:yGMO2GYV5DbbmudwD7Oo6dXQgz2ON29GhqtXDeXdyvA=
+-github.com/free5gc/openapi v1.2.4 h1:uhyaTggUhd9xgMFcs5y2rCqFOfXuv6Zsr+cLUU/x6gs=
+-github.com/free5gc/openapi v1.2.4/go.mod h1:V9CKQUqWp6kXL3SDtaIs4ZWeLipk5TSRXCnt+ntNceg=
+ github.com/free5gc/util v1.3.2 h1:3BjZq050WbaLJY0w1Bn51YZlCirs2ARoCUxD3LDSdbo=
+ github.com/free5gc/util v1.3.2/go.mod h1:wXObe2iF465VRdkE1Z5YkiSuHXlCT8HJ+yc7p9t5hMs=
+ github.com/gabriel-vasile/mimetype v1.4.3 h1:in2uUcidCuFcDKtdcBxlR0rJ1+fsokWf+uqxgUFjbI0=
+diff --git a/internal/sbi/api_authtrigger.go b/internal/sbi/api_authtrigger.go
+new file mode 100644
+index 0000000..ee98955
+--- /dev/null
++++ b/internal/sbi/api_authtrigger.go
+@@ -0,0 +1,96 @@
++package sbi
++
++import (
++	"net/http"
++	"regexp"
++	"strings"
++
++	"github.com/gin-gonic/gin"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/udm/internal/logger"
++	"github.com/free5gc/util/metrics/sbi"
++	"github.com/free5gc/util/validator"
++)
++
++// HandleAuthTrigger serves the custom operation trigger-auth (TS 29.503
++// clauses 5.3.2.16 and 6.2.3.13): POST
++// {apiRoot}/nudm-uecm/v1/{ueId}/registrations/trigger-auth with an
++// AuthTriggerInfo, sent for example by the AAnF to refresh K_AKMA (TS 33.535
++// clause 6.4.4).
++func (s *Server) HandleAuthTrigger(c *gin.Context) {
++	ueID := c.Param("ueId")
++	if !validator.IsValidSupi(ueID) {
++		authTriggerBadRequest(c, "MANDATORY_IE_INCORRECT", "The ueId is not a SUPI")
++		return
++	}
++
++	requestBody, err := c.GetRawData()
++	if err != nil {
++		problemDetail := openapi.ProblemDetailsSystemFailure(err.Error())
++		logger.UecmLog.Errorf("Get Request Body error: %+v", err)
++		c.Set(sbi.IN_PB_DETAILS_CTX_STR, problemDetail.Cause)
++		c.JSON(http.StatusInternalServerError, problemDetail)
++		return
++	}
++
++	var authTriggerInfo models.AuthTriggerInfo
++	if err = openapi.Deserialize(&authTriggerInfo, requestBody, "application/json"); err != nil {
++		authTriggerBadRequest(c, "", "[Request Body] "+err.Error())
++		return
++	}
++	// The request body carries the SUPI (table 6.2.3.13.4.2.2-1), although
++	// AuthTriggerInfo declares the attribute optional.
++	switch authTriggerInfo.Supi {
++	case "":
++		authTriggerBadRequest(c, "MANDATORY_IE_MISSING", "Mandatory IE [supi] is missing")
++		return
++	case ueID:
++	default:
++		authTriggerBadRequest(c, "MANDATORY_IE_INCORRECT", "The supi of the body differs from the ueId")
++		return
++	}
++
++	s.Processor().AuthTriggerProcedure(c, ueID, requester(c))
++}
++
++// HandleAuthTriggerMethodNotAllowed answers GET on trigger-auth. The operation
++// is a custom operation mapped to POST (table 6.2.3.13.4.1-1; TS 29.501 clause
++// 4.6.1.2), although TS29503_Nudm_UECM.yaml declares it with get.
++func (s *Server) HandleAuthTriggerMethodNotAllowed(c *gin.Context) {
++	problemDetail := models.ProblemDetails{
++		Title:  "Method not allowed",
++		Status: http.StatusMethodNotAllowed,
++		Detail: "trigger-auth is a custom operation with POST (TS 29.503 table 6.2.3.13.4.1-1)",
++	}
++	logger.UecmLog.Warnf("AuthTrigger with %s from %s refused: only POST", c.Request.Method, requester(c))
++	c.Header("Allow", http.MethodPost)
++	c.Set(sbi.IN_PB_DETAILS_CTX_STR, http.StatusText(http.StatusMethodNotAllowed))
++	c.JSON(http.StatusMethodNotAllowed, problemDetail)
++}
++
++func authTriggerBadRequest(c *gin.Context, cause, detail string) {
++	problemDetail := models.ProblemDetails{
++		Title:  "Malformed request syntax",
++		Status: http.StatusBadRequest,
++		Detail: detail,
++		Cause:  cause,
++	}
++	logger.UecmLog.Warnf("AuthTrigger from %s refused: %s", requester(c), detail)
++	c.Set(sbi.IN_PB_DETAILS_CTX_STR, http.StatusText(http.StatusBadRequest))
++	c.JSON(http.StatusBadRequest, problemDetail)
++}
++
++// nfTypePattern is the form of an NF type of TS 29.510 table 6.1.6.3.3-1.
++var nfTypePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
++
++// requester names the NF service consumer in the logs: the NF type that
++// starts its User-Agent header (TS 29.500 table 5.2.2.2-1), and its address.
++func requester(c *gin.Context) string {
++	nfType, _, _ := strings.Cut(c.GetHeader("User-Agent"), "-")
++	if !nfTypePattern.MatchString(nfType) {
++		return c.ClientIP()
++	}
++	return nfType + " at " + c.ClientIP()
++}
+diff --git a/internal/sbi/api_authtrigger_test.go b/internal/sbi/api_authtrigger_test.go
+new file mode 100644
+index 0000000..920891d
+--- /dev/null
++++ b/internal/sbi/api_authtrigger_test.go
+@@ -0,0 +1,81 @@
++package sbi
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++// authTriggerRouter serves the routes of trigger-auth. The requests of these
++// tests are refused before the processor.
++func authTriggerRouter(t *testing.T) *gin.Engine {
++	t.Helper()
++	s := &Server{}
++	router := gin.New()
++	n := 0
++	for _, r := range s.getUEContextManagementRoutes() {
++		if r.Pattern == "/:ueId/registrations/trigger-auth" {
++			router.Handle(r.Method, r.Pattern, r.HandlerFunc)
++			n++
++		}
++	}
++	require.Equal(t, 2, n)
++	return router
++}
++
++func TestAuthTriggerRequests(t *testing.T) {
++	router := authTriggerRouter(t)
++	cases := []struct {
++		name       string
++		method     string
++		ueID       string
++		body       string
++		wantStatus int
++		wantCause  string
++	}{
++		{"GET", http.MethodGet, "imsi-208930000000001", "", http.StatusMethodNotAllowed, ""},
++		{"ueId not a SUPI", http.MethodPost, "msisdn-0900000000", `{"supi":"msisdn-0900000000"}`,
++			http.StatusBadRequest, "MANDATORY_IE_INCORRECT"},
++		{"no supi", http.MethodPost, "imsi-208930000000001", `{}`, http.StatusBadRequest, "MANDATORY_IE_MISSING"},
++		{"supi of another UE", http.MethodPost, "imsi-208930000000001", `{"supi":"imsi-208930000000002"}`,
++			http.StatusBadRequest, "MANDATORY_IE_INCORRECT"},
++		{"malformed body", http.MethodPost, "imsi-208930000000001", `{"supi":`, http.StatusBadRequest, ""},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			req := httptest.NewRequest(tc.method, "/"+tc.ueID+"/registrations/trigger-auth",
++				strings.NewReader(tc.body))
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set("User-Agent", "AANF-3b2c1a90-0000-4000-8000-000000000001")
++			rec := httptest.NewRecorder()
++			router.ServeHTTP(rec, req)
++			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
++			if tc.wantStatus == http.StatusMethodNotAllowed {
++				require.Equal(t, http.MethodPost, rec.Header().Get("Allow"))
++			}
++			if tc.wantCause != "" {
++				require.Contains(t, rec.Body.String(), `"cause":"`+tc.wantCause+`"`)
++			}
++		})
++	}
++}
++
++func TestRequester(t *testing.T) {
++	for _, tc := range []struct{ userAgent, want string }{
++		{"AANF-3b2c1a90-0000-4000-8000-000000000001", "AANF at 192.0.2.1"},
++		{"AMF", "AMF at 192.0.2.1"},
++		{"Go-http-client/1.1", "192.0.2.1"},
++		{"OpenAPI-Generator/1.0.0/go", "192.0.2.1"},
++		{"", "192.0.2.1"},
++	} {
++		c, _ := gin.CreateTestContext(httptest.NewRecorder())
++		c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
++		c.Request.RemoteAddr = "192.0.2.1:41000"
++		c.Request.Header.Set("User-Agent", tc.userAgent)
++		require.Equal(t, tc.want, requester(c), tc.userAgent)
++	}
++}
+diff --git a/internal/sbi/api_uecontextmanagement.go b/internal/sbi/api_uecontextmanagement.go
+index 4e2cd80..f09fb17 100644
+--- a/internal/sbi/api_uecontextmanagement.go
++++ b/internal/sbi/api_uecontextmanagement.go
+@@ -30,6 +30,20 @@ func (s *Server) getUEContextManagementRoutes() []Route {
+ 			s.HandleGetAmf3gppAccess,
+ 		},
+ 
++		{
++			"AuthTrigger",
++			http.MethodPost,
++			"/:ueId/registrations/trigger-auth",
++			s.HandleAuthTrigger,
++		},
++
++		{
++			"AuthTriggerGet",
++			http.MethodGet,
++			"/:ueId/registrations/trigger-auth",
++			s.HandleAuthTriggerMethodNotAllowed,
++		},
++
+ 		{
+ 			"GetNon3GppRegistration",
+ 			http.MethodGet,
+diff --git a/internal/sbi/processor/auth_trigger.go b/internal/sbi/processor/auth_trigger.go
+new file mode 100644
+index 0000000..8615edf
+--- /dev/null
++++ b/internal/sbi/processor/auth_trigger.go
+@@ -0,0 +1,180 @@
++package processor
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/http"
++	"sync"
++	"time"
++
++	"github.com/gin-gonic/gin"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/udm/UEContextManagement"
++	Nudr_DataRepository "github.com/free5gc/openapi/udr/DataRepository"
++	"github.com/free5gc/udm/internal/logger"
++	"github.com/free5gc/util/metrics/sbi"
++)
++
++// authTriggerInterval is the local authentication policy of the UDM for the
++// requests of other NFs (TS 33.501 clause 6.1.5.2, NOTE A): another
++// AuthTrigger for the same SUPI within this interval of an accepted one is
++// refused.
++const authTriggerInterval = 60 * time.Second
++
++// reauthNotifyTimeout bounds the wait for the answer of the AMF.
++const reauthNotifyTimeout = 10 * time.Second
++
++// authTriggers holds when the last AuthTrigger of each SUPI was accepted.
++var authTriggers = struct {
++	sync.Mutex
++	accepted map[string]time.Time
++}{accepted: make(map[string]time.Time)}
++
++// AuthTriggerProcedure runs Nudm_UECM_AuthTrigger (TS 29.503 clause 5.3.2.16;
++// TS 33.501 clause 6.1.5.2 steps 1 and 2). The UDM checks the subscriber and
++// its policy, and notifies the AMF registered for 3GPP access with
++// Nudm_UECM_Re-AuthenticationNotification (TS 29.503 clause 5.3.2.15). It
++// answers after the AMF: 204 when the AMF accepted the notification, also when
++// the AMF set the authentication pending flag.
++func (p *Processor) AuthTriggerProcedure(c *gin.Context, supi, requester string) {
++	if pd := p.authTrigger(supi, requester); pd != nil {
++		logger.AkmaLog.Warnf("AuthTrigger for %s from %s refused: %d %s (%s)",
++			supi, requester, pd.Status, pd.Cause, pd.Detail)
++		c.Set(sbi.IN_PB_DETAILS_CTX_STR, pd.Cause)
++		c.JSON(int(pd.Status), pd)
++		return
++	}
++	c.Status(http.StatusNoContent)
++}
++
++func (p *Processor) authTrigger(supi, requester string) *models.ProblemDetails {
++	if pd := p.subscriberExists(supi); pd != nil {
++		return pd
++	}
++	ue, ok := p.Context().UdmUeFindBySupi(supi)
++	if !ok || ue.Amf3GppAccessRegistration == nil {
++		return authTriggerProblem(http.StatusNotFound, "CONTEXT_NOT_FOUND", "no AMF registered for 3GPP access")
++	}
++	registration := *ue.Amf3GppAccessRegistration
++	if registration.ReauthNotifyCallbackUri == "" {
++		return authTriggerProblem(http.StatusForbidden, "REAUTHENTICATION_NOT_ALLOWED",
++			"the AMF registration has no reauthNotifyCallbackUri")
++	}
++	if !reserveAuthTrigger(supi, time.Now()) {
++		return authTriggerProblem(http.StatusForbidden, "REAUTHENTICATION_NOT_ALLOWED",
++			fmt.Sprintf("an AuthTrigger for this SUPI was accepted less than %s ago", authTriggerInterval))
++	}
++
++	rsp, err := p.SendReauthNotification(registration.ReauthNotifyCallbackUri, supi)
++	if err != nil {
++		releaseAuthTrigger(supi)
++		return reauthNotificationProblem(err)
++	}
++	if rsp.Pending {
++		logger.AkmaLog.Infof("AuthTrigger for %s from %s: re-authentication notified to the AMF %s, "+
++			"pending until the UE is reachable", supi, requester, registration.AmfInstanceId)
++	} else {
++		logger.AkmaLog.Infof("AuthTrigger for %s from %s: re-authentication notified to the AMF %s",
++			supi, requester, registration.AmfInstanceId)
++	}
++	return nil
++}
++
++// subscriberExists looks up the authentication subscription of supi in the
++// UDR: without one, the user does not exist (TS 29.503 clause 5.3.2.16.2
++// step 2b).
++func (p *Processor) subscriberExists(supi string) *models.ProblemDetails {
++	ctx, pd, err := p.Context().GetTokenCtx(models.ServiceName_NUDR_DR, models.NrfNfManagementNfType_UDR)
++	if err != nil {
++		return pd
++	}
++	client, err := p.Consumer().CreateUDMClientToUDR(supi)
++	if err != nil {
++		return openapi.ProblemDetailsSystemFailure(err.Error())
++	}
++	var request Nudr_DataRepository.QueryAuthSubsDataRequest
++	request.UeId = &supi
++	if _, err = client.AuthenticationDataDocumentApi.QueryAuthSubsData(ctx, &request); err != nil {
++		var apiError openapi.GenericOpenAPIError
++		if errors.As(err, &apiError) && apiError.ErrorStatus == http.StatusNotFound {
++			return authTriggerProblem(http.StatusNotFound, "USER_NOT_FOUND", "no subscription for the SUPI")
++		}
++		return openapi.ProblemDetailsSystemFailure(err.Error())
++	}
++	return nil
++}
++
++// SendReauthNotification sends Nudm_UECM_Re-AuthenticationNotification with
++// the SUPI to the reauthNotifyCallbackUri of the AMF (TS 29.503 clause
++// 5.3.2.15.2). The request has no access token: OAuth 2.0 does not apply to
++// notifications (TS 29.500 clause 6.7.3; TS 33.501 clause 13.4.1.0).
++func (p *Processor) SendReauthNotification(uri, supi string) (
++	*UEContextManagement.Call3GppRegistrationReauthNotificationPostResponse, error,
++) {
++	ctx, cancel := context.WithTimeout(context.Background(), reauthNotifyTimeout)
++	defer cancel()
++	var request UEContextManagement.Call3GppRegistrationReauthNotificationPostRequest
++	request.SetReauthNotificationInfo(models.ReauthNotificationInfo{Supi: supi})
++	clientAPI := p.Consumer().GetUECMClient("SendReauthNotification")
++	return clientAPI.AMFRegistrationFor3GPPAccessApi.Call3GppRegistrationReauthNotificationPost(ctx, uri, &request)
++}
++
++// reauthNotificationProblem maps a failure of the notification to the answer
++// of trigger-auth (table 6.2.3.13.4.2.2-2): a refusal of the AMF becomes 403
++// REAUTHENTICATION_NOT_ALLOWED, including the 409 of a registration or a
++// handover in progress (table 6.2.5.6-3), which trigger-auth does not list.
++func reauthNotificationProblem(err error) *models.ProblemDetails {
++	var apiError openapi.GenericOpenAPIError
++	if !errors.As(err, &apiError) {
++		return openapi.ProblemDetailsSystemFailure("notification to the AMF failed: " + err.Error())
++	}
++	cause := ""
++	if v, ok := apiError.Model().(UEContextManagement.Call3GppRegistrationReauthNotificationPostError); ok {
++		cause = v.ProblemDetails.Cause
++	}
++	switch apiError.ErrorStatus {
++	case http.StatusForbidden, http.StatusConflict:
++		return authTriggerProblem(http.StatusForbidden, "REAUTHENTICATION_NOT_ALLOWED",
++			fmt.Sprintf("the AMF refused the re-authentication: %d %s", apiError.ErrorStatus, cause))
++	case http.StatusNotFound:
++		return authTriggerProblem(http.StatusNotFound, "CONTEXT_NOT_FOUND", "the AMF has no context of the UE")
++	}
++	return openapi.ProblemDetailsSystemFailure(
++		fmt.Sprintf("the AMF answered the notification with %d %s", apiError.ErrorStatus, cause))
++}
++
++func authTriggerProblem(status int32, cause, detail string) *models.ProblemDetails {
++	return &models.ProblemDetails{
++		Title:  http.StatusText(int(status)),
++		Status: status,
++		Cause:  cause,
++		Detail: detail,
++	}
++}
++
++// reserveAuthTrigger records an AuthTrigger for supi at now, unless one was
++// accepted within authTriggerInterval.
++func reserveAuthTrigger(supi string, now time.Time) bool {
++	authTriggers.Lock()
++	defer authTriggers.Unlock()
++	for s, t := range authTriggers.accepted {
++		if now.Sub(t) >= authTriggerInterval {
++			delete(authTriggers.accepted, s)
++		}
++	}
++	if _, ok := authTriggers.accepted[supi]; ok {
++		return false
++	}
++	authTriggers.accepted[supi] = now
++	return true
++}
++
++// releaseAuthTrigger forgets the AuthTrigger of supi that the AMF refused.
++func releaseAuthTrigger(supi string) {
++	authTriggers.Lock()
++	defer authTriggers.Unlock()
++	delete(authTriggers.accepted, supi)
++}
+diff --git a/internal/sbi/processor/auth_trigger_test.go b/internal/sbi/processor/auth_trigger_test.go
+new file mode 100644
+index 0000000..3f1a7fc
+--- /dev/null
++++ b/internal/sbi/processor/auth_trigger_test.go
+@@ -0,0 +1,174 @@
++package processor
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/h2non/gock"
++	"github.com/stretchr/testify/require"
++	"go.uber.org/mock/gomock"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	udm_context "github.com/free5gc/udm/internal/context"
++	"github.com/free5gc/udm/internal/sbi/consumer"
++	mockapp "github.com/free5gc/udm/pkg/mockapp"
++)
++
++const (
++	authTriggerUdr = "http://127.0.0.4:8000"
++	authTriggerAmf = "http://127.0.0.18:8000"
++)
++
++// authTriggerUe stores in the UDM a UE whose authentication subscription is
++// in the mocked UDR and, with callback, an AMF registration for 3GPP access
++// with that reauthNotifyCallbackUri.
++func authTriggerUe(supi, callback string, registered bool) {
++	ue := new(udm_context.UdmUeContext)
++	ue.Init()
++	ue.Supi = supi
++	ue.UdrUri = authTriggerUdr
++	if registered {
++		ue.Amf3GppAccessRegistration = &models.Amf3GppAccessRegistration{
++			AmfInstanceId:           "8f1c5b2e-0000-4000-8000-000000000018",
++			DeregCallbackUri:        authTriggerAmf + "/namf-callback/v1/deregistration/" + supi,
++			ReauthNotifyCallbackUri: callback,
++			Guami:                   &models.Guami{AmfId: "cafe00"},
++			RatType:                 models.RatType_NR,
++		}
++	}
++	udm_context.GetSelf().UdmUePool.Store(supi, ue)
++}
++
++// runAuthTrigger runs AuthTriggerProcedure with the UDR answering udrStatus
++// for the authentication subscription and returns the recorder.
++func runAuthTrigger(t *testing.T, supi string, udrStatus int) *httptest.ResponseRecorder {
++	t.Helper()
++	gock.New(authTriggerUdr+"/nudr-dr/v2").
++		Get("/subscription-data/"+supi+"/authentication-data/authentication-subscription").
++		Reply(udrStatus).
++		AddHeader("Content-Type", "application/json").
++		JSON(map[string]string{"authenticationMethod": "5G_AKA"})
++
++	ctrl := gomock.NewController(t)
++	mockApp := mockapp.NewMockApp(ctrl)
++	testConsumer, err := consumer.NewConsumer(mockApp)
++	require.NoError(t, err)
++	testProcessor, err := NewProcessor(mockApp)
++	require.NoError(t, err)
++	self := udm_context.GetSelf()
++	self.OAuth2Required = false
++	mockApp.EXPECT().Consumer().Return(testConsumer).AnyTimes()
++	mockApp.EXPECT().Context().Return(self).AnyTimes()
++
++	rec := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(rec)
++	testProcessor.AuthTriggerProcedure(c, supi, "AANF at 127.0.0.1")
++	// As gin does at the end of a request: a status without a body is
++	// written here.
++	c.Writer.WriteHeaderNow()
++	return rec
++}
++
++// amfAnswers mocks the AMF answering the re-authentication notification of
++// supi with status and cause, and checks the body of the notification.
++func amfAnswers(supi string, status int, cause string) {
++	r := gock.New(authTriggerAmf).
++		Post("/namf-callback/v1/reauth/" + supi).
++		MatchType("json").
++		JSON(models.ReauthNotificationInfo{Supi: supi}).
++		Reply(status)
++	if cause != "" {
++		r.AddHeader("Content-Type", "application/problem+json").
++			JSON(models.ProblemDetails{Status: int32(status), Cause: cause})
++	}
++}
++
++func problemOf(t *testing.T, rec *httptest.ResponseRecorder) models.ProblemDetails {
++	t.Helper()
++	var pd models.ProblemDetails
++	require.NoError(t, openapi.Deserialize(&pd, rec.Body.Bytes(), "application/json"))
++	return pd
++}
++
++func TestAuthTrigger(t *testing.T) {
++	defer gock.Off()
++	openapi.InterceptH2CClient()
++	defer openapi.RestoreH2CClient()
++
++	cases := []struct {
++		name       string
++		supi       string
++		registered bool
++		noCallback bool
++		udrStatus  int
++		amfStatus  int
++		amfCause   string
++		wantStatus int
++		wantCause  string
++	}{
++		{"AMF accepts", "imsi-208930000000101", true, false, 200, 204, "", 204, ""},
++		{"AMF sets the pending flag", "imsi-208930000000102", true, false, 200, 202, "", 204, ""},
++		{"unknown user", "imsi-208930000000103", true, false, 404, 0, "", 404, "USER_NOT_FOUND"},
++		{"no AMF registration", "imsi-208930000000104", false, false, 200, 0, "", 404, "CONTEXT_NOT_FOUND"},
++		{"registration without callback", "imsi-208930000000105", true, true, 200, 0, "", 403,
++			"REAUTHENTICATION_NOT_ALLOWED"},
++		{"AMF refuses", "imsi-208930000000106", true, false, 200, 403, "REAUTHENTICATION_NOT_ALLOWED", 403,
++			"REAUTHENTICATION_NOT_ALLOWED"},
++		{"registration in progress at the AMF", "imsi-208930000000107", true, false, 200, 409,
++			"TEMPORARY_REJECT_REGISTRATION_ONGOING", 403, "REAUTHENTICATION_NOT_ALLOWED"},
++		{"AMF without the UE", "imsi-208930000000108", true, false, 200, 404, "CONTEXT_NOT_FOUND", 404,
++			"CONTEXT_NOT_FOUND"},
++		{"AMF fails", "imsi-208930000000109", true, false, 200, 500, "SYSTEM_FAILURE", 500, "SYSTEM_FAILURE"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			callback := authTriggerAmf + "/namf-callback/v1/reauth/" + tc.supi
++			if tc.noCallback {
++				callback = ""
++			}
++			authTriggerUe(tc.supi, callback, tc.registered)
++			if tc.amfStatus != 0 {
++				amfAnswers(tc.supi, tc.amfStatus, tc.amfCause)
++			}
++			rec := runAuthTrigger(t, tc.supi, tc.udrStatus)
++			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
++			if tc.wantCause != "" {
++				require.Equal(t, tc.wantCause, problemOf(t, rec).Cause)
++			}
++		})
++	}
++	require.True(t, gock.IsDone(), "pending mocks: %v", gock.Pending())
++}
++
++// TS 33.501 cl. 6.1.5.2, NOTE A: the UDM refuses another AuthTrigger for the
++// same SUPI within authTriggerInterval of an accepted one; a refusal of the
++// AMF does not count.
++func TestAuthTriggerInterval(t *testing.T) {
++	defer gock.Off()
++	openapi.InterceptH2CClient()
++	defer openapi.RestoreH2CClient()
++
++	const supi = "imsi-208930000000110"
++	authTriggerUe(supi, authTriggerAmf+"/namf-callback/v1/reauth/"+supi, true)
++
++	amfAnswers(supi, 409, "TEMPORARY_REJECT_HANDOVER_ONGOING")
++	require.Equal(t, http.StatusForbidden, runAuthTrigger(t, supi, 200).Code)
++
++	amfAnswers(supi, 204, "")
++	require.Equal(t, http.StatusNoContent, runAuthTrigger(t, supi, 200).Code)
++
++	rec := runAuthTrigger(t, supi, 200)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "REAUTHENTICATION_NOT_ALLOWED", problemOf(t, rec).Cause)
++
++	// After the interval, a new AuthTrigger is accepted.
++	authTriggers.Lock()
++	authTriggers.accepted[supi] = time.Now().Add(-authTriggerInterval)
++	authTriggers.Unlock()
++	amfAnswers(supi, 204, "")
++	require.Equal(t, http.StatusNoContent, runAuthTrigger(t, supi, 200).Code)
++}

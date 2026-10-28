@@ -1,12 +1,53 @@
 # AKMA AF inside the operator network: it requests K_AF from the AAnF
-# (TS 33.535 cl. 6.2.1) and serves the simplified Ua* protocol to the UE.
+# (TS 33.535 cl. 6.2.1) and serves the Ua* profiles of TS 24.109 Annex K to
+# the UE.
 configuration:
-  # The only name accepted in the Host header field; the second part of the
-  # realm and the FQDN of the AF_ID (TS 33.535 A.4).
+  # The only name accepted in the Host header field and in server_name; the
+  # second part of the realm and the FQDN of the AF_ID (TS 33.535 A.4).
   fqdn: af1.akma.example
-  # Ua* security protocol identifier, private range (TS 33.220 H.2 NOTE 2).
+  # Ua* servers, one per profile and port. Each profile has its own AF_IDs,
+  # "<FQDN>.<Ua* security protocol id>" (TS 33.220 H.3): the AAnF must
+  # authorize them (akma.authorizedAfs of aanfcfg.yaml) and the AKMA key
+  # service of the UE must give them to the client (akmaKeyService of the UE
+  # configuration).
+  profiles:
+    # HTTP Digest inside TLS, the AF authenticated by its certificate
+    # (TS 24.109 K.2). AF_ID <FQDN>.010001<cipher suite>: 0100011301,
+    # 0100011302 and 0100011303 in TLS 1.3; 010001C02B and 010001C02C in
+    # TLS 1.2 with an ECDSA certificate. Certificate and key from
+    # af/scripts/make-test-ca.sh; relative paths start at this file.
+    - type: digest-tls
+      listen: 192.168.16.129:8443
+      certificate: ../build/cert/af1.akma.example.pem
+      key: ../build/cert/af1.akma.example.key
+    # TLS 1.3 with K_AF as pre-shared key, psk_dhe_ke (TS 24.109 K.3.3).
+    # AF_ID <FQDN>.0100000007. Needs an AF built with wolfSSL.
+    - type: psk-tls13
+      listen: 192.168.16.129:8444
+    # TLS 1.2, TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256 with K_AF (TS 24.109
+    # K.3.2). AF_ID <FQDN>.010001D001. Needs an AF built with wolfSSL.
+    - type: psk-tls12
+      listen: 192.168.16.129:8445
+    # DTLS 1.3 with K_AF as pre-shared key, CoAP inside (TS 33.535 Annex C),
+    # on UDP, the port of coaps. AF_ID <FQDN>.0100000009. Needs wolfSSL.
+    - type: psk-dtls13
+      listen: 192.168.16.129:5684
+    # DTLS 1.2, TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256 with K_AF, CoAP inside,
+    # on UDP. AF_ID <FQDN>.010001D001, as psk-tls12. Needs wolfSSL.
+    - type: psk-dtls12
+      listen: 192.168.16.129:5685
+    # CoAP protected by OSCORE with a context from K_AF: POST /akma, then
+    # requests protected with the context (TS 33.535 Annex D), on UDP, the
+    # port of coap. AF_ID <FQDN>.0100000008. Without wolfSSL too.
+    - type: oscore
+      listen: 192.168.16.129:5683
+    # Test only: the simplified Ua*, HTTP Digest without TLS, with the AF_ID
+    # <FQDN>.<uaStarId>. Off by default.
+    # - type: digest-http
+    #   listen: 192.168.16.129:8080
+  # Ua* security protocol identifier of digest-http, private range
+  # (TS 33.220 H.2 NOTE 2).
   uaStarId: FF00000001
-  listen: 192.168.16.129:8080
   path: /ua/v1/session
   # First part of the realm (TS 33.535 B.1.2.2 step 3; TS 24.109 K.2 b)2)).
   realmPrefix: 3GPP-bootstrapping-akma

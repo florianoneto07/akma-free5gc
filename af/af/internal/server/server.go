@@ -1,5 +1,8 @@
 // Package server is the Ua* server of the AF: HTTP Digest (RFC 7616) with
-// the AKMA parameters of TS 33.535 B.1.2.2 and TS 24.109 K.2, without TLS.
+// the AKMA parameters of TS 33.535 B.1.2.2 and TS 24.109 K.2, inside TLS
+// (digest-tls) or, for tests, without it (digest-http); and the session
+// resource behind a TLS handshake authenticated with K_AF (psk-tls13,
+// psk-tls12; TS 24.109 K.3).
 package server
 
 import (
@@ -15,7 +18,9 @@ import (
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/aanf"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/config"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/logger"
+	"github.com/florianoneto07/akma-free5gc/af/akmatls"
 	"github.com/florianoneto07/akma-free5gc/af/uastar"
+	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
 	"github.com/florianoneto07/akma-free5gc/shared/akma/akid"
 )
 
@@ -46,7 +51,8 @@ type ErrorResponse struct {
 	Cause string `json:"cause"`
 }
 
-// Server serves the protected resource of the AF.
+// Server serves the protected resource of the AF. Its profiles share the
+// K_AF cache and the nonces.
 type Server struct {
 	s      *config.Settings
 	nonces *nonceStore
@@ -66,26 +72,55 @@ func New(s *config.Settings, p KeyProvider) *Server {
 	}
 }
 
-// ServeHTTP checks the request in the numbered order below and stops at the
-// first failure.
+// ServeHTTP serves the digest-http profile, with the AF_ID of the
+// configuration.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	now := s.now()
-	remote := r.RemoteAddr
+	s.digest(w, r, s.s.AfID)
+}
 
-	// 1. Host: the FQDN used by the UE for the key derivation (TS 33.220
+// DigestTLS returns the handler of the digest-tls profile (TS 24.109 K.2).
+// The AF_ID carries the Ua* identifier 01 00 01 yy zz of the cipher suite
+// of the connection (TS 33.220 H.3).
+func (s *Server) DigestTLS() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil {
+			writeError(w, http.StatusInternalServerError, CauseInvalidRequest)
+			return
+		}
+		s.digest(w, r, afid.AfID{FQDN: s.s.FQDN, Protocol: akmatls.UaStarTLS(r.TLS.CipherSuite)})
+	})
+}
+
+// target checks the Host, the path and the method of a request: step 1 of
+// every profile.
+func (s *Server) target(w http.ResponseWriter, r *http.Request) bool {
+	// Host: the FQDN used by the UE for the key derivation (TS 33.220
 	// cl. 4.5.2 prerequisite (3)).
 	if !strings.EqualFold(hostName(r.Host), s.s.FQDN) {
-		logger.UaLog.Warnf("Request from %s for host %q, not %s", remote, r.Host, s.s.FQDN)
+		logger.UaLog.Warnf("Request from %s for host %q, not %s", r.RemoteAddr, r.Host, s.s.FQDN)
 		writeError(w, http.StatusMisdirectedRequest, CauseMisdirectedRequest)
-		return
+		return false
 	}
 	if r.URL.Path != s.s.Path {
 		writeError(w, http.StatusNotFound, CauseNotFound)
-		return
+		return false
 	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		writeError(w, http.StatusMethodNotAllowed, CauseMethodNotAllowed)
+		return false
+	}
+	return true
+}
+
+// digest checks the request in the numbered order below and stops at the
+// first failure. id is the AF_ID of the K_AF.
+func (s *Server) digest(w http.ResponseWriter, r *http.Request, id afid.AfID) {
+	now := s.now()
+	remote := r.RemoteAddr
+
+	// 1. Host, path, method.
+	if !s.target(w, r) {
 		return
 	}
 
@@ -148,13 +183,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	aKid := creds.Username
 
 	// 9. K_AF (TS 33.535 cl. 6.2.1 steps 2 and 9; B.1.2.2 step 6).
-	key, err := s.keys.get(r.Context(), aKid, now)
+	key, err := s.keys.get(r.Context(), id, aKid, now)
 	switch {
 	case errors.Is(err, aanf.ErrKeyNotAvailable):
 		logger.UaLog.Infof("No K_AKMA at the AAnF for A-KID %s: access rejected", aKid)
 		writeError(w, http.StatusForbidden, CauseAkmaKeyNotAvailable)
 		return
-	case errors.Is(err, errKafExpired):
+	case errors.Is(err, ErrKafExpired):
 		writeError(w, http.StatusForbidden, CauseKafExpired)
 		return
 	case err != nil:
@@ -190,7 +225,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rsp, _ := json.Marshal(SessionResponse{AKid: aKid, KafExpiry: key.Expiry.UTC()})
 	info := uastar.AuthInfo{RspAuth: in.RspAuth(rsp), Qop: creds.Qop, NC: creds.NC, CNonce: creds.CNonce}
-	logger.UaLog.Infof("UE with A-KID %s authenticated (nc %s, qop %s)", aKid, creds.NC, creds.Qop)
+	logger.UaLog.Infof("UE with A-KID %s authenticated (AF_ID %s, nc %s, qop %s)", aKid, id.Transport(), creds.NC,
+		creds.Qop)
 	w.Header().Set("Authentication-Info", info.String())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

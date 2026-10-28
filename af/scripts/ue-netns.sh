@@ -10,13 +10,15 @@
 #        sudo ue-netns.sh ue [nr-ue config]       run nr-ue in the namespace
 #        sudo ue-netns.sh cli <nr-cli arguments>  run nr-cli in the namespace
 #        sudo ue-netns.sh ua [uaclient options]   run the Ua* client in the
-#             namespace, as the invoking user, with A-KID and K_AF from the ME
-#             and the address of the PDU session as source
+#             namespace, as the invoking user, with A-KID and K_AF from the
+#             AKMA key service of the ME and the address of the PDU session as
+#             source
 #
 #   UE_NETNS      namespace (default: ueransim-ue)
 #   UERANSIM_DIR  UERANSIM directory (default: ~/UERANSIM of the invoking user)
 #   UE_CONFIG     nr-ue configuration (default: config/free5gc-ue.yaml)
 #   UACLIENT      Ua* client (default: af/build/bin/uaclient of this repository)
+#   AKMA_SOCKET   AKMA key service of the ME (default: /run/ueransim/akma-<SUPI>.sock)
 #
 # The namespace reaches the gNB through a veth pair: 10.100.0.1 on the host,
 # 10.100.0.2 in the namespace. The gNB must listen there (linkIp: 10.100.0.1
@@ -97,7 +99,7 @@ ua)
     [ -n "$supi" ] || { echo "no supi in $ue_config" >&2; exit 1; }
     [ -x "$uaclient" ] || { echo "$uaclient not found: run af/scripts/build-af.sh" >&2; exit 1; }
     exec ip netns exec "$ns" runuser -u "$user" -- "$uaclient" \
-        -nr-cli "$ueransim/build/nr-cli" -ue "$supi" -bind "$addr" "$@"
+        -me-socket "${AKMA_SOCKET:-/run/ueransim/akma-$supi.sock}" -bind "$addr" "$@"
     ;;
 *)
     echo "usage: sudo $0 up|down|status|ue [config]|cli <args>|ua [uaclient options]" >&2

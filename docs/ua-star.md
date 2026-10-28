@@ -1,6 +1,6 @@
 # The simplified Ua\* protocol
 
-This is the protocol between the UE and the test AF, message by message. The AF (`af/af/`, `af/uastar/`) and the Ua\* client of the UE (`af/ue/uaclient/`) implement it.
+This is the test profile `digest-http` of the test AF, message by message: the Digest of K.2 without TLS. The AF (`af/af/`, `af/uastar/`) and the Ua\* client of the UE (`af/ue/uaclient/`) implement it next to the profiles of TS 24.109 Annex K ([ua-profiles.md](ua-profiles.md)). It is off by default in `af/config/afcfg.yaml`. The `digest-tls` profile, K.2 proper, uses the same Digest of sections 5 to 9 inside TLS.
 
 ## 1. Where it stands against the specifications
 
@@ -35,7 +35,7 @@ The protocol here is the Digest of K.2 **without the TLS tunnel**. It follows K.
 
 ## 3. Transport and FQDN
 
-HTTP/1.1 over TCP, without TLS. The test AF listens on `192.168.16.129:8080` (configurable).
+HTTP/1.1 over TCP, without TLS. In the example the profile is on `192.168.16.129:8080`, commented out in `af/config/afcfg.yaml`.
 
 TS 33.220 cl. 4.5.2: K_AF only matches if the UE and the network use the same FQDN in the derivation, and each protocol over Ua has to say how it ensures that. This one uses option (3) of that clause: the protocol carries the name used by the UE to the AF, in the `Host` header of HTTP/1.1, as in TS 33.222 cl. 5.3.0 step 2.
 
@@ -214,7 +214,7 @@ The initiation message is the `401` of section 5.1. Every request without `Autho
 | `Host` can be changed on the way | — | K_AF depends on the FQDN: with another name, `response` does not match |
 | offline dictionary attack | — | the password is the base64 of 256 random bits |
 
-A normative profile (K.2 with TLS, or the TLS 1.3 PSK of K.3.3) would replace this one, with the Ua\* identifier of TS 33.220 H.3 for that profile.
+The profiles of TS 24.109 Annex K, with the Ua\* identifiers of TS 33.220 H.3, do not have these limitations: see [ua-profiles.md](ua-profiles.md).
 
 ## 11. Configuration of the AF
 
@@ -223,8 +223,9 @@ A normative profile (K.2 with TLS, or the TLS 1.3 PSK of K.3.3) would replace th
 | Field | Example | Note |
 |---|---|---|
 | `fqdn` | `af1.akma.example` | the only name accepted in `Host` |
-| `uaStarId` | `FF00000001` | private range, TS 33.220 H.2 NOTE 2 |
-| `listen` | `192.168.16.129:8080` | |
+| `profiles` | | one server per profile; `digest-http` is this one ([ua-profiles.md](ua-profiles.md) section 6) |
+| `uaStarId` | `FF00000001` | identifier of `digest-http`, private range, TS 33.220 H.2 NOTE 2 |
+| `listen` | `192.168.16.129:8080` | without `profiles`: a single `digest-http` server |
 | `path` | `/ua/v1/session` | |
 | `realmPrefix` | `3GPP-bootstrapping-akma` | first part of the realm |
 | `qop` | `[auth]` | `auth-int` optional |

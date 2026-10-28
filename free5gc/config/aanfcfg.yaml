@@ -23,15 +23,57 @@ configuration:
     - "0000"
   akma:
     kafLifetime: 1h # K_AF lifetime (operator policy, TS 33.535 cl. 5.2)
+    # Refresh of K_AKMA (operator policy, TS 33.535 cl. 6.4.4): when an AF asks for a K_AF of a K_AKMA
+    # registered longer ago than this duration, the AAnF asks the UDM for a new primary authentication
+    # (Nudm_UECM_AuthTrigger). 0 disables it.
+    kakmaRefresh: 0
     roamingStatusSubscription: false # must stay false: not implemented (TS 33.535 cl. 6.2.1 step 5)
-    authorizedAfs: # local policy, TS 33.535 cl. 6.2.1 step 2
-      - afId: af1.akma.example.FF00000001 # "<FQDN>.<Ua* security protocol id>"
-        sourceAddresses: # addresses from which this AF may request its K_AF
+    authorizedAfs: # local policy, TS 33.535 cl. 6.2.1 step 2; one AF_ID per Ua* profile and cipher suite
+      # "<FQDN>.<Ua* security protocol id>", each with the addresses from which
+      # the AF may request its K_AF
+      - afId: af1.akma.example.0100011301 # Digest in TLS 1.3 (TS 24.109 K.2), TLS_AES_128_GCM_SHA256 (TS 33.220 H.3)
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.0100011302 # TLS_AES_256_GCM_SHA384
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.0100011303 # TLS_CHACHA20_POLY1305_SHA256
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.010001C02B # Digest in TLS 1.2, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.010001C02C # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.0100000007 # TLS 1.3 with K_AF as pre-shared key (K.3.3)
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.010001D001 # (D)TLS 1.2, TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256 (K.3.2)
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.0100000009 # DTLS 1.3 with K_AF as pre-shared key (TS 33.535 Annex C)
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.0100000008 # OSCORE with a context from K_AF (TS 33.535 Annex D)
+        sourceAddresses:
+          - 192.168.16.129
+      - afId: af1.akma.example.FF00000001 # simplified Ua*, test only (TS 33.220 H.2 NOTE 2)
+        sourceAddresses:
           - 192.168.16.129
     authorizedNefs: # K_AF requests relayed by a NEF for external AFs, TS 33.535 cl. 6.3
       - sourceAddresses: # addresses of the NEF
           - 192.168.16.130
         afIds: # external AF_IDs accepted from this NEF
+          - af1.akma.example.0100011301
+          - af1.akma.example.0100011302
+          - af1.akma.example.0100011303
+          - af1.akma.example.010001C02B
+          - af1.akma.example.010001C02C
+          - af1.akma.example.0100000007
+          - af1.akma.example.010001D001
+          - af1.akma.example.0100000009
+          - af1.akma.example.0100000008
           - af1.akma.example.FF00000001
 
 logger: # log output setting

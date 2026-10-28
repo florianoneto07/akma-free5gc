@@ -13,6 +13,7 @@ type Consumer struct {
 	ConsumerAanf
 
 	*nnrfService
+	*nudmService
 }
 
 func NewConsumer(aanf ConsumerAanf) (*Consumer, error) {
@@ -24,6 +25,7 @@ func NewConsumer(aanf ConsumerAanf) (*Consumer, error) {
 		consumer:        c,
 		nfMngmntClients: make(map[string]*Nnrf_NFManagement.APIClient),
 	}
+	c.nudmService = &nudmService{consumer: c}
 
 	return c, nil
 }

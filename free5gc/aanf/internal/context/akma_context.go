@@ -26,6 +26,10 @@ type UeAkmaContext struct {
 	KAkma   kdf.Key
 	Gpsi    string                  // always empty: AKMA_GPSI_Support is not supported
 	AfKeys  map[string]*AfKeyRecord // by AF_ID transport form
+	// Registered is when the current K_AKMA was registered.
+	Registered time.Time
+	// refreshAt is when its refresh was last requested from the UDM.
+	refreshAt time.Time
 }
 
 // AfKeyRecord is a K_AF issued to an AF. The K_AF expiration time is part of
@@ -104,8 +108,30 @@ func (s *Store) Register(supi string, id akid.AKID, akidText string, kAkma kdf.K
 	ctx.AKID = akidText
 	ctx.akidKey = k
 	ctx.KAkma = kAkma
+	ctx.Registered = s.now()
+	ctx.refreshAt = time.Time{}
 	s.byAKID[k] = supi
 	return replaced
+}
+
+// RefreshDue tells whether the K_AKMA of supi was registered at least age
+// ago and its refresh was not requested within retry; it then records the
+// request. It returns the age of the K_AKMA.
+func (s *Store) RefreshDue(supi string, age, retry time.Duration) (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, ok := s.bySupi[supi]
+	if !ok || age <= 0 {
+		return 0, false
+	}
+	now := s.now()
+	registeredFor := now.Sub(ctx.Registered)
+	if registeredFor < age || (!ctx.refreshAt.IsZero() && now.Sub(ctx.refreshAt) < retry) {
+		return registeredFor, false
+	}
+	ctx.refreshAt = now
+	return registeredFor, true
 }
 
 // ApplicationKey returns the K_AF of af for the K_AKMA identified by id,

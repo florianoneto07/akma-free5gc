@@ -1,10 +1,27 @@
 # AKMA AF outside the operator network: it requests K_AF through the NEF
 # (TS 33.535 cl. 6.3) instead of the AAnF.
 configuration:
-  # Same FQDN and Ua* id as the AF of afcfg.yaml: same AF_ID, same K_AF.
+  # Same FQDN and profiles as the AF of afcfg.yaml: same AF_IDs, same K_AF.
   fqdn: af1.akma.example
+  profiles:
+    - type: digest-tls
+      listen: 192.168.16.129:8453
+      certificate: ../build/cert/af1.akma.example.pem
+      key: ../build/cert/af1.akma.example.key
+    - type: psk-tls13
+      listen: 192.168.16.129:8454
+    - type: psk-tls12
+      listen: 192.168.16.129:8455
+    - type: psk-dtls13
+      listen: 192.168.16.129:5694
+    - type: psk-dtls12
+      listen: 192.168.16.129:5695
+    - type: oscore
+      listen: 192.168.16.129:5693
+    # Test only: the simplified Ua*. Off by default.
+    # - type: digest-http
+    #   listen: 192.168.16.129:8083
   uaStarId: FF00000001
-  listen: 192.168.16.129:8083
   path: /ua/v1/session
   realmPrefix: 3GPP-bootstrapping-akma
   qop: [auth]

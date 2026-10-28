@@ -14,7 +14,9 @@ What to do **after installing free5GC** with the official guide to use AKMA (3GP
 | 8 | End-to-end run |
 | 9 | AF outside the operator network, anonymous access, context removal |
 | 10 | UERANSIM on another host |
-| 11 | Undo |
+| 11 | Refresh K_AKMA: the AAnF asks for a new authentication |
+| 12 | Upgrading from V1 |
+| 13 | Undo |
 
 ---
 
@@ -83,10 +85,10 @@ With other addresses, change them in the commands and in these places:
 | `free5gc/config/aanfcfg.yaml` (section 3.2) | `sbi.registerIPv4`, `sbi.bindingIPv4`; `sourceAddresses` of `akma.authorizedAfs` (the AF host) and of `akma.authorizedNefs` (the free5GC host) |
 | `~/free5gc/config/nefcfg.yaml`, after the configuration patch (section 9.1) | `sbi.registerIPv4`, `sbi.bindingIPv4`; `sourceAddresses` of `akma.authorizedAfs` |
 | `~/free5gc/config/ausfcfg.yaml`, only for a fixed AAnF address (section 4.2) | `akma.aanfUri`, which the configuration patch leaves commented out |
-| `af/config/afcfg.yaml` (section 6.2) | `listen`, `aanfUri` |
-| `af/config/afcfg-external.yaml` (section 9.2) | `listen`, `nefUri` |
+| `af/config/afcfg.yaml` (section 6.2) | `listen` of each profile, `aanfUri` |
+| `af/config/afcfg-external.yaml` (section 9.2) | `listen` of each profile, `nefUri` |
 | `seed` | `--aanf`, default `http://192.168.16.130:8010` |
-| `uaclient` | `-connect`, default `192.168.16.129:8080` |
+| `uaclient` | `-connect`, default `192.168.16.129` with the port of the profile |
 | `e2e.sh` | its argument, `user@host` of the free5GC host |
 
 If you edit `nefcfg.yaml` after the configuration patch, `patch-nf.sh config revert` no longer reverses that patch. Revert by hand, or put your addresses in `free5gc/patches/config/0002-nef-akma.patch` before you apply it.
@@ -374,7 +376,7 @@ cd ~/free5gc && ./run.sh -aanf
 The AAnF shows on the same screen, with a start line that tells what it serves:
 
 ```
-[INFO][AANF][AKMA] Routing Indicators [0000]; K_AF lifetime 1h0m0s; AF_IDs authorized by local policy: [af1.akma.example.FF00000001]
+[INFO][AANF][AKMA] Routing Indicators [0000]; K_AF lifetime 1h0m0s; AF_IDs authorized by local policy: [af1.akma.example.0100000007 af1.akma.example.0100011301 …]
 ```
 
 ### 5.2 UERANSIM
@@ -385,12 +387,32 @@ On the UERANSIM host, apply the UE patches. The script keeps `build/nr-ue.orig` 
 ~/akma-free5gc/af/scripts/patch-ueransim.sh apply
 ```
 
-The patches change two things in `config/free5gc-ue.yaml`:
+The patches change three things in `config/free5gc-ue.yaml`:
 
 - they turn on the option `akma: true`;
-- they make the UE look for the gNB at 10.100.0.1.
+- they make the UE look for the gNB at 10.100.0.1;
+- they add the policy of the AKMA key service of the ME, which gives an application only the K_AF of its own AF_IDs (TS 33.535 cl. 4.4.3):
 
-If you use another configuration file, do the same there.
+  ```yaml
+  akmaKeyService:
+    applications:
+      - name: uaclient
+        uid: 1000            # the user that runs the application
+        afIds:             # one per Ua* profile and cipher suite (TS 33.220 H.3)
+          - af1.akma.example.0100011301   # Digest in TLS 1.3 (K.2)
+          - af1.akma.example.0100011302
+          - af1.akma.example.0100011303
+          - af1.akma.example.010001C02B   # Digest in TLS 1.2
+          - af1.akma.example.010001C02C
+          - af1.akma.example.0100000007   # TLS 1.3 with K_AF as pre-shared key (K.3.3)
+          - af1.akma.example.010001D001   # (D)TLS 1.2 with K_AF as pre-shared key (K.3.2)
+          - af1.akma.example.0100000009   # DTLS 1.3 with K_AF as pre-shared key (TS 33.535 Annex C)
+          - af1.akma.example.0100000008   # OSCORE with a context from K_AF (TS 33.535 Annex D)
+          - af1.akma.example.FF00000001   # simplified Ua*, test only
+  akmaCliKaf: false
+  ```
+
+If the user that runs the Ua\* client is not uid 1000 (`id -u`), change `uid`. If you use another configuration file, do the same there. `executable`, optional, also ties the application to the absolute path of its executable. An AF_ID given to two applications makes `nr-ue` refuse the configuration.
 
 10.100.0.1 is the host side of a `veth` pair that links the host to the network namespace of the UE. With UERANSIM and free5GC on the same host, the UE needs that namespace for the PDU session to work: in the host namespace, the address of the PDU session would be local to the host, and the kernel would drop the packets that the UPF delivers. Make the gNB listen there, and create the namespace once per boot:
 
@@ -447,51 +469,88 @@ An AF that uses AKMA does three things (TS 33.535 cl. 6.2.1):
 - it asks the AAnF for the K_AF of that A-KID for its own AF_ID;
 - it uses K_AF to authenticate the UE.
 
-The test AF does this with a simplified Ua\*: the HTTP Digest of TS 24.109 K.2 without TLS, with the private-range Ua\* identifier `FF00000001`. The protocol is described in [ua-star.md](ua-star.md).
+The test AF serves the Ua\* profiles of TS 24.109 Annex K, each on its own port:
+
+| Profile | Port in the example | How the UE authenticates | AF_ID |
+|---|---|---|---|
+| `digest-tls` (K.2) | 8443 | HTTP Digest keyed with K_AF inside TLS; the AF authenticates with its certificate | `<FQDN>.010001<cipher suite>` |
+| `psk-tls13` (K.3.3) | 8444 | TLS 1.3 with K_AF as external pre-shared key | `<FQDN>.0100000007` |
+| `psk-tls12` (K.3.2) | 8445 | TLS 1.2 `ECDHE-PSK` with K_AF | `<FQDN>.010001D001` |
+| `psk-dtls13` (TS 33.535 Annex C) | UDP 5684 | DTLS 1.3 with K_AF as pre-shared key; CoAP inside | `<FQDN>.0100000009` |
+| `psk-dtls12` | UDP 5685 | DTLS 1.2 `ECDHE-PSK` with K_AF; CoAP inside | `<FQDN>.010001D001` |
+| `oscore` (TS 33.535 Annex D) | UDP 5683 | CoAP protected by OSCORE, with a context derived from K_AF | `<FQDN>.0100000008` |
+| `digest-http` (test, off by default) | 8080 | the simplified Ua\*: the Digest without TLS ([ua-star.md](ua-star.md)) | `<FQDN>.FF00000001` |
 
 ### 6.1 Authorize the AF at the AAnF
 
-The AAnF only hands K_AF to an authorized AF_ID, from the address of the AF. The `aanfcfg.yaml` of part 3 already has:
+The AAnF only hands K_AF to an authorized AF_ID, from the address of the AF. Each profile, and in K.2 each cipher suite, has its own AF_ID (TS 33.220 H.3). The `aanfcfg.yaml` of part 3 already has the ten AF_IDs of `af1.akma.example`:
 
 ```yaml
 configuration:
   akma:
     authorizedAfs:
-      - afId: af1.akma.example.FF00000001
+      - afId: af1.akma.example.0100011301   # K.2 in TLS 1.3, TLS_AES_128_GCM_SHA256
         sourceAddresses:
           - 192.168.16.129
+      # ... 0100011302, 0100011303, 010001C02B, 010001C02C (K.2),
+      #     0100000007 (PSK TLS 1.3), 010001D001 (PSK TLS and DTLS 1.2),
+      #     0100000009 (PSK DTLS 1.3), 0100000008 (OSCORE), FF00000001 (test)
 ```
 
-The AF_ID is the FQDN of the AF followed by the Ua\* identifier (TS 33.535 A.4). If you change the FQDN or the AF host, change it here too.
+The AF_ID is the FQDN of the AF followed by the Ua\* identifier (TS 33.535 A.4). If you change the FQDN or the AF host, change every entry.
 
 ### 6.2 Build and configure the AF
 
-On the AF host, with Go 1.26.2:
+On the AF host, with Go 1.26.2, `gcc`, `make` and `unzip`. First wolfSSL, for the PSK profiles: Go's `crypto/tls` has neither the PSK cipher suites of TS 33.210 nor DTLS. The script downloads wolfSSL 5.9.4, checks its SHA-256 and builds it in `af/build/wolfssl`:
+
+```bash
+af/scripts/build-wolfssl.sh
+```
+
+Then a test CA and the certificate of the AF for K.2, in `af/build/cert`:
+
+```bash
+af/scripts/make-test-ca.sh
+```
+
+And the AF and the client:
 
 ```bash
 af/scripts/build-af.sh
 ```
 
+Linked with wolfSSL, the binaries are licensed under the GPL v3, like wolfSSL. Without it (`AF_WOLFSSL=no`), the AF has no PSK profiles and refuses to start with one in its configuration.
+
 The configuration is `af/config/afcfg.yaml`. The fields that matter:
 
-- `fqdn`: the name by which the UE calls the AF. It goes into K_AF, and the AF only accepts that name in the `Host` header.
-- `listen`: the address the AF listens on. Requests to the AAnF do not leave from it: they leave from the address the system picks for the route to the AAnF, and that one has to be in `sourceAddresses` (section 6.1). On a host with a single interface, the two are the same.
+- `fqdn`: the name by which the UE calls the AF. It goes into K_AF, and the AF only accepts that name in the `Host` header and in the TLS `server_name`.
+- `profiles`: one server per profile, with `type` and `listen`; `digest-tls` also has `certificate` and `key`, relative to the file. Requests to the AAnF do not leave from the `listen` addresses: they leave from the address the system picks for the route to the AAnF, and that one has to be in `sourceAddresses` (section 6.1). On a host with a single interface, they are the same.
 - `aanfUri`: the address of the AAnF, the `sbi.registerIPv4` of section 3.2 with port 8010.
-- `kafExpiry`: what to do when K_AF expires, `refetch` or `reject`.
+- `kafExpiry`: what to do when K_AF expires, `refetch` or `reject`. In the PSK profiles the AF also ends the TLS session when K_AF expires.
 
 ```bash
 af/build/bin/af -c af/config/afcfg.yaml
 ```
 
-The start line shows the AF_ID and the `realm`:
+The start lines show each profile:
 
 ```
-[INFO][AF][Main] AF_ID af1.akma.example.FF00000001; realm "3GPP-bootstrapping-akma@af1.akma.example"; ...
+[INFO][AF][Main] Built with wolfSSL: PSK profiles available
+[INFO][AF][Main] Ua* server digest-tls listening on 192.168.16.129:8443 for https://af1.akma.example/ua/v1/session, AF_ID af1.akma.example.010001<cipher suite> (TS 24.109 K.2)
+[INFO][AF][Main] Ua* server psk-tls13 listening on 192.168.16.129:8444 for https://af1.akma.example/ua/v1/session, AF_ID af1.akma.example.0100000007 (TS 24.109 K.3.3)
+[INFO][AF][Main] Ua* server psk-tls12 listening on 192.168.16.129:8445 for https://af1.akma.example/ua/v1/session, AF_ID af1.akma.example.010001<cipher suite> (TS 24.109 K.3.2)
 ```
 
 ### 6.3 Test without a UE
 
-The UERANSIM UE only hands out K_AF in part 7. Before that, play the UE with a test vector, in two steps:
+The UERANSIM UE only hands out K_AF in part 7, and it derives it for any profile. Before that, play the UE with a test vector. A vector carries the K_AF of one AF_ID only, `af1.akma.example.FF00000001`, the one of the test profile. Turn it on by uncommenting these lines of `af/config/afcfg.yaml`, and restart the AF:
+
+```yaml
+    - type: digest-http
+      listen: 192.168.16.129:8080
+```
+
+Then:
 
 1. seed the AAnF with the context of the `testbed-ue` vector, as in section 3.6 (`~/akma-tools/seed register`, with `--aanf`);
 2. run the Ua\* client with the same vector:
@@ -503,10 +562,10 @@ The UERANSIM UE only hands out K_AF in part 7. Before that, play the UE with a t
 The client asks for the session, gets the challenge, answers with the A-KID and K_AF, and checks the `rspauth` of the AF:
 
 ```
-session established (nc 00000001): AF authenticated by rspauth; K_AF valid until ...
+session established (nc 00000001): AF authenticated by rspauth; A-KID …; AF_ID af1.akma.example.FF00000001; K_AF valid until ...
 ```
 
-The AF shows `K_AF for A-KID … obtained from the AAnF` and `UE with A-KID … authenticated`. The AAnF shows `K_AF of imsi-… provided to AF_ID af1.akma.example.FF00000001`.
+The AF shows `K_AF for A-KID … and AF_ID af1.akma.example.FF00000001 obtained from the AAnF` and `UE with A-KID … authenticated`. The AAnF shows `K_AF of imsi-… provided to AF_ID af1.akma.example.FF00000001`.
 
 What to try next, and what to expect:
 
@@ -515,13 +574,19 @@ What to try next, and what to expect:
 | wrong K_AF: `-akid` with the A-KID of the vector and `-kaf` with another value (`-kaf` is ignored with `-vector`) | `401` |
 | an A-KID the AAnF does not know (`-vector rid-012`) | `403 AKMA_KEY_NOT_AVAILABLE` |
 | another name in `Host` (`-vector testbed-ue -fqdn af2.akma.example`) | `421 MISDIRECTED_REQUEST` |
-| AF_ID outside the policy of the AAnF: a second AF with `fqdn: af2.akma.example` and another port in `listen`; the client with `-vector testbed-ue -fqdn af2.akma.example -connect <listen of that AF>` | `503 AANF_UNAVAILABLE` |
+| AF_ID outside the policy of the AAnF: a second AF with `fqdn: af2.akma.example` and other ports; the client with `-vector testbed-ue -fqdn af2.akma.example -connect <listen of that AF>` | `503 AANF_UNAVAILABLE` |
+| a certificate of another name in K.2: `-profile digest-tls -ca af/build/cert/ca.pem -vector testbed-ue -fqdn af2.akma.example` | the client ends the TLS before sending the A-KID |
+| PSK with the K_AF of another AF_ID: `-profile psk-tls13 -vector testbed-ue` | the handshake fails |
 
-**Before part 7.** The `testbed-ue` vector has the SUPI of the UERANSIM UE (`imsi-208930000000001`). If the UE has already registered, the `seed register` of this test replaced its context at the AAnF. Run a new authentication of the UE (section 7.4) before section 7.3. Otherwise the AF answers `403 AKMA_KEY_NOT_AVAILABLE` to the UE, because the AAnF no longer has the A-KID the UE presents.
+Turn `digest-http` off again after the test.
+
+**Before part 7.** The `testbed-ue` vector has the SUPI of the UERANSIM UE (`imsi-208930000000001`). If the UE has already registered, the `seed register` of this test replaced its context at the AAnF. Run a new authentication of the UE (section 7.4) before section 7.3. Otherwise the AF refuses the UE, because the AAnF no longer has the A-KID the UE presents.
 
 ### 6.4 Limitations
 
-Without TLS, the A-KID and the content travel in clear, and the AF is only authenticated by `rspauth`. It is a protocol for test beds; see [ua-star.md](ua-star.md).
+- **`digest-http`.** Without TLS, the A-KID and the content travel in clear, and the AF is only authenticated by `rspauth` ([ua-star.md](ua-star.md)). Test only.
+- **Certificate.** The certificate of K.2 comes from a test CA, without revocation or OCSP.
+- **SBI.** The request of the AF to the AAnF still has no TLS.
 
 ---
 
@@ -555,25 +620,57 @@ Expected: `5 passed, 3 refused (FQDN not ASCII), 0 failed`. The three refused ve
 
 ### 7.3 Authenticate at the AF from the UE
 
-On the UERANSIM host, build the Ua\* client with `~/akma-free5gc/af/scripts/build-af.sh`, or copy `af/build/bin/uaclient` from the AF host to the same place. The AAnF must have the context of the last authentication of the UE: if section 6.3 seeded the `testbed-ue` vector after the UE registered, run the new authentication of section 7.4 first. With the AF of part 6 up:
+On the UERANSIM host, put the Ua\* client and the test CA of the AF where the script looks for them: copy `af/build/bin/uaclient` from the AF host to `~/akma-free5gc/af/build/bin/` and `af/build/cert/ca.pem` to `~/akma-free5gc/af/build/cert/`. The client built on the AF host is static and runs on the UERANSIM host. The AAnF must have the context of the last authentication of the UE: if section 6.3 seeded the `testbed-ue` vector after the UE registered, run the new authentication of section 7.4 first. With the AF of part 6 up:
 
 ```bash
-sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -n 3
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile psk-tls13 -n 2
 ```
 
 The client runs in the namespace of the UE, as your user:
 
-- it asks the UE, through `nr-cli`, for the A-KID and the K_AF of `af1.akma.example`;
+- it asks the AKMA key service of the ME, on `/run/ueransim/akma-<SUPI>.sock`, for the A-KID and the K_AF of the AF_ID of the profile;
 - it goes to the AF from the address of the PDU session;
-- it checks `rspauth`.
+- in TLS 1.3 with a pre-shared key, the handshake authenticates both sides with K_AF.
 
 ```
-ME: K_AF derived for AF_ID af1.akma.example.FF00000001
-AF af1.akma.example at 192.168.16.129:8080 from 10.60.0.1, A-KID rid0000.atid…
-session established (nc 00000001): AF authenticated by rspauth; K_AF valid until …
+AF af1.akma.example at 192.168.16.129:8444 from 10.60.0.1, profile psk-tls13
+ME: K_AF derived for AF_ID af1.akma.example.0100000007
+session established: AF authenticated by the TLS handshake with K_AF; A-KID rid0000.atid…; AF_ID af1.akma.example.0100000007; TLS 1.3, cipher suite 1301; K_AF valid until …
 ```
 
-The same A-KID shows on the screens of the UE, of free5GC (AUSF and AAnF) and of the AF. The UE screen also shows `[app] [info] AKMA K_AF derived for AF_ID[af1.akma.example.FF00000001], …`.
+The other profiles:
+
+```bash
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile psk-tls12 -reconnect -n 2
+```
+
+```bash
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile digest-tls -ca ~/akma-free5gc/af/build/cert/ca.pem -n 3
+```
+
+And the DTLS profiles, with CoAP over UDP through the PDU session:
+
+```bash
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile psk-dtls13 -reconnect -n 2
+```
+
+```bash
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile psk-dtls12 -reconnect -n 2
+```
+
+And the OSCORE profile: one `POST /akma` and two protected requests in the same context; with `-rekey`, the context is renewed before each request:
+
+```bash
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile oscore -n 2
+```
+
+```bash
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile oscore -rekey -n 2
+```
+
+In TLS 1.2, the ME derives K_AF after the AF has picked the cipher suite (`AF_ID af1.akma.example.010001D001`), and with `-reconnect` the second connection resumes the session (`resumed true`). In DTLS 1.3 the AF_ID is `af1.akma.example.0100000009`; the AF answers the first ClientHello with a cookie and asks the AAnF for K_AF only once the UE sends it back. In K.2, the client checks the certificate of the AF against `af1.akma.example` and the CA, and runs the Digest inside TLS; the AF_ID carries the cipher suite of the connection, such as `af1.akma.example.0100011301`.
+
+The same A-KID shows on the screens of the UE, of free5GC (AUSF and AAnF) and of the AF. The UE screen also shows `K_AF for AF_ID[af1.akma.example.0100000007] given to application [uaclient] (uid 1000), …`.
 
 ### 7.4 New authentication
 
@@ -592,7 +689,9 @@ The UE registers again by itself, with a new authentication. What changes:
 
 ### 7.5 Limitations
 
-`nr-cli` is a test interface: it hands the K_AF of any AF to any local process. K_AKMA never leaves the UE (TS 33.535 cl. 4.4.3).
+The key service tells applications apart by user. The executable in the policy is a best-effort check: a process of the same user can replace or inject into an application. K_AKMA never leaves the UE (TS 33.535 cl. 4.4.3).
+
+`nr-cli akma-kaf` also gives the K_AF of any AF, but only with `akmaCliKaf: true`, for tests: it answers any local process.
 
 ---
 
@@ -605,6 +704,14 @@ With parts 3 to 7 and section 9.1 done, one script runs all of AKMA and the nega
 On the AF host:
 
 ```bash
+af/scripts/build-wolfssl.sh
+```
+
+```bash
+af/scripts/make-test-ca.sh
+```
+
+```bash
 af/scripts/build-af.sh
 ```
 
@@ -612,16 +719,18 @@ af/scripts/build-af.sh
 free5gc/scripts/build-aanf.sh
 ```
 
-The AF host needs SSH with a key to the free5GC host (section 1.1) and the `af/config/afcfg.yaml` of section 6.2. On the free5GC host, the script expects what the previous parts left:
+The AF host needs SSH with a key to the free5GC host (section 1.1), `openssl`, and the `af/config/afcfg.yaml` of section 6.2. On the free5GC host, the script expects what the previous parts left:
 
 - the repository at `~/akma-free5gc`;
 - the patches applied, the AAnF deployed and `seed` in `~/akma-tools/`;
 - UERANSIM with the patches and `linkIp: 10.100.0.1`;
-- `uaclient` in `~/akma-free5gc/af/build/bin/`.
+- `uaclient` built with wolfSSL in `~/akma-free5gc/af/build/bin/` (section 7.3).
+
+The script runs its own AF with the profiles of `afcfg.yaml` plus `digest-http` on port 8080, and copies the test CA to the free5GC host.
 
 The script also checks the NEF path of part 9, so do section 9.1 first: the patched NEF, the configuration patch and `akma.authorizedNefs` in the AAnF. Without them, the NEF checks fail.
 
-free5GC must be stopped: the script starts it. Stop your own AFs too, and close the tunnel of section 9.2: the script starts its own AFs on ports 8080 to 8085 of the `listen` address and its own tunnel to the NRF.
+free5GC must be stopped: the script starts it. Stop your own AFs too, and close the tunnel of section 9.2: the script starts its own AFs on TCP ports 8080 to 8085, 8443 to 8448 and 8456 and UDP ports 5683 to 5685, 5687 and 5688 of the address of the first `listen`, and its own tunnel to the NRF.
 
 ### 8.2 Run
 
@@ -633,12 +742,14 @@ af/scripts/e2e.sh user@192.168.16.130
 
 `FREE5GC_HOST=user@192.168.16.130` works in place of the argument. The address of the AAnF comes from `aanfUri` in `af/config/afcfg.yaml`. Before it starts, the script checks that it is the `sbi.bindingIPv4` of the `aanfcfg.yaml` installed on the free5GC host.
 
-The script asks once for the `sudo` password of the free5GC host and takes about two minutes. It:
+The script asks once for the `sudo` password of the free5GC host and takes about four minutes. It:
 
 - applies the N6 NAT and creates the namespace of the UE;
 - starts free5GC with the AAnF, the gNB and the UE;
-- authenticates the UE at the AF;
+- authenticates the UE at the AF over every profile: K.2 in TLS 1.3 and 1.2, PSK in TLS 1.3 and 1.2, PSK in DTLS 1.3 and 1.2 with CoAP, and OSCORE, with session resumption and context renewal;
+- checks PSK TLS 1.3 with `openssl s_client` as the UE, and the expiry of K_AF in a TLS session; with an OpenSSL 4.1 in `OPENSSL_DTLS13`, it also checks PSK DTLS 1.3, and with libcoap in `LIBCOAP_CLIENT`, OSCORE ([testing.md](testing.md) section 5.1);
 - forces new primary authentications: with the AAnF down, without the AKMA subscription and with it restored;
+- refreshes K_AKMA through the AAnF, with `kakmaRefresh: 20s`: the UDM notifies the AMF, which re-authenticates the registered UE (part 11);
 - runs the negative tests;
 - stops everything.
 
@@ -646,8 +757,10 @@ Each check prints `PASS` or `FAIL`, and the end shows the total:
 
 ```
 report: …/af/build/e2e/<date-time>/report.md
-83 passed, 0 failed
+161 passed, 0 failed, 0 skipped
 ```
+
+Without `OPENSSL_DTLS13`, check D03 is reported as skipped; without `LIBCOAP_CLIENT`, checks O04 and O05. Without both: `158 passed, 0 failed, 3 skipped`.
 
 ### 8.3 Read the report
 
@@ -683,13 +796,13 @@ The configuration of the NEF comes from the configuration patch of part 4 (`free
 
 - `sbi.registerIPv4` and `sbi.bindingIPv4`: the address of the free5GC host, which the external AF can reach. The port stays 8000;
 - `3gpp-akma` in `serviceList`;
-- `akma.authorizedAfs`: each external AF_ID, with the source address of the AF (cl. 6.3 step 2).
+- `akma.authorizedAfs`: each external AF_ID, with the source address of the AF (cl. 6.3 step 2): the same ten AF_IDs of `af1.akma.example` as the AAnF.
 
 The patch also authorizes `af3.akma.example.FF00000001`, which the AAnF does not accept. It is there for a negative test of part 8; remove it outside a test bed.
 
 The AAnF has to accept requests that come through the NEF. In `~/free5gc/config/aanfcfg.yaml`, `akma.authorizedNefs` gives the address of the NEF and the external AF_IDs accepted from it ([aanf.md](aanf.md), section 5).
 
-Start free5GC with `./run.sh -aanf`. The NEF shows `Start SBI server (listen on 192.168.16.130:8000)`; the AAnF shows `AF_IDs accepted from a NEF: [af1.akma.example.FF00000001]`.
+Start free5GC with `./run.sh -aanf`. The NEF shows `Start SBI server (listen on 192.168.16.130:8000)`; the AAnF shows `AF_IDs accepted from a NEF: [af1.akma.example.0100000007 af1.akma.example.0100011301 …]`.
 
 ### 9.2 Run the AF outside the operator network
 
@@ -699,7 +812,7 @@ The external AF registers at the NRF to get the access token of the NEF API: fre
 ssh -N -L 127.0.0.10:8000:127.0.0.10:8000 user@192.168.16.130
 ```
 
-The configuration of the external AF is `af/config/afcfg-external.yaml`. It has `nefUri` in place of `aanfUri`, plus `nrfUri` and port 8083. In another terminal:
+The configuration of the external AF is `af/config/afcfg-external.yaml`. It has `nefUri` in place of `aanfUri`, plus `nrfUri`, and the same profiles as the internal AF on TCP ports 8453 to 8455 and UDP ports 5693 to 5695. In another terminal:
 
 ```bash
 af/build/bin/af -c af/config/afcfg-external.yaml
@@ -714,15 +827,15 @@ The AF shows:
 With the UE up (part 7), authenticate the UE at the external AF:
 
 ```bash
-sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -connect 192.168.16.129:8083 -n 3
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile psk-tls13 -connect 192.168.16.129:8454 -n 1
 ```
 
 The output of the client is that of section 7.3. The free5GC screen shows the lines of the NEF and of the AAnF:
 
 ```
-[INFO][NEF][AKMA] K_AF request from AF_ID af1.akma.example.FF00000001 for A-KID rid0000.atid…
-[INFO][AANF][AKMA] K_AF of imsi-208930000000001 provided to AF_ID af1.akma.example.FF00000001 for A-KID …, through the NEF at 192.168.16.130
-[INFO][NEF][AKMA] K_AF for A-KID rid0000.atid… relayed to AF_ID af1.akma.example.FF00000001, expires …
+[INFO][NEF][AKMA] K_AF request from AF_ID af1.akma.example.0100000007 for A-KID rid0000.atid…
+[INFO][AANF][AKMA] K_AF of imsi-208930000000001 provided to AF_ID af1.akma.example.0100000007 for A-KID …, through the NEF at 192.168.16.130
+[INFO][NEF][AKMA] K_AF for A-KID rid0000.atid… relayed to AF_ID af1.akma.example.0100000007, expires …
 ```
 
 The NEF lines do not show the SUPI, and neither does the answer of the NEF to the AF (cl. 6.3 step 5).
@@ -787,16 +900,169 @@ sudo ~/akma-free5gc/af/scripts/ue-netns.sh ue
 ```
 
 ```bash
-sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -n 3
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile psk-tls13 -n 2
 ```
 
-The gNB shows `SCTP connection established (192.168.16.130:38412)` and `NG Setup procedure is successful`. The UE shows the A-KID, which is the same in the AUSF and AAnF lines on the free5GC screen. For the external AF, use `ua -connect 192.168.16.129:8083`.
+The gNB shows `SCTP connection established (192.168.16.130:38412)` and `NG Setup procedure is successful`. The UE shows the A-KID, which is the same in the AUSF and AAnF lines on the free5GC screen. For the external AF, use `ua -profile psk-tls13 -connect 192.168.16.129:8454`.
 
 `e2e.sh` expects the gNB and the UE on the free5GC host.
 
 ---
 
-## 11. Undo
+## 11. Refresh K_AKMA: the AAnF asks for a new authentication
+
+K_AKMA only changes with a new primary authentication (TS 33.535 cl. 6.4.1). By the local policy of the operator, the AAnF may ask the UDM for one (cl. 6.4.4): the UDM notifies the AMF, the AMF authenticates the registered UE again, and the AUSF registers the new K_AKMA and A-KID at the AAnF. The UE derives its own at the Security Mode Command the AMF sends next. Nothing changes in the UERANSIM UE.
+
+free5GC has none of this chain. This part applies the patches of the UDM, the AMF and `openapi` ([free5gc-fixes.md](free5gc-fixes.md), F16 to F19) and turns on the policy of the AAnF ([aanf.md](aanf.md) section 8).
+
+### 11.1 Update `openapi` and the UDM, fix the AMF
+
+On the free5GC host, with free5GC stopped, prepare both `openapi` copies again (section 4.1); the script applies every patch up to `0003`:
+
+```bash
+~/akma-free5gc/free5gc/scripts/prepare-openapi.sh
+```
+
+```bash
+~/akma-free5gc/free5gc/scripts/prepare-openapi.sh ~/akma-free5gc/free5gc/build/openapi-test v1.2.5-0.20260527003827-02dc71b4d94f
+```
+
+If you did part 4 with this version of the repository, the UDM already has both patches (`patch-nf.sh udm status` says `patches applied`). With an older version it only has `0001`, and `apply` refuses the local changes. Revert with a copy of `0001` and apply again:
+
+```bash
+mkdir -p ~/udm-0001 && cp ~/akma-free5gc/free5gc/patches/udm/0001-*.patch ~/udm-0001/
+```
+
+```bash
+~/akma-free5gc/free5gc/scripts/patch-nf.sh udm revert ~/udm-0001
+```
+
+```bash
+~/akma-free5gc/free5gc/scripts/patch-nf.sh udm apply
+```
+
+Then the AMF. The script keeps `bin/amf.orig` and rebuilds:
+
+```bash
+~/akma-free5gc/free5gc/scripts/patch-nf.sh amf apply
+```
+
+### 11.2 Turn on the policy of the AAnF
+
+Build and install the AAnF and `seed` again (sections 3.1 and 3.4):
+
+```bash
+free5gc/scripts/build-aanf.sh
+```
+
+```bash
+free5gc/scripts/deploy.sh user@free5gc-host
+```
+
+`deploy.sh` keeps the installed configuration. Add to the `akma` block of `~/free5gc/config/aanfcfg.yaml` the age after which the AAnF asks for the refresh:
+
+```yaml
+  akma:
+    kakmaRefresh: 1m
+```
+
+`0`, or no line, turns it off. With a value, when an AF asks for the K_AF of a K_AKMA registered longer ago, the AAnF hands out the K_AF and asks the UDM for the refresh in the background, once per K_AKMA, and again after 5 minutes if the K_AKMA did not change. One minute is enough to watch it; in a real network the value is the authentication policy of the operator.
+
+### 11.3 Watch the refresh
+
+Start free5GC with the AAnF (`./run.sh -aanf`, part 5), the gNB and the UE in its namespace (part 7). Wait one minute after the UE registers, then run a Ua\* with an AF_ID the AF has not used yet with this A-KID; the AF keeps each K_AF until it expires and would not ask the AAnF again:
+
+```bash
+sudo ~/akma-free5gc/af/scripts/ue-netns.sh ua -profile psk-tls13 -n 1
+```
+
+The AF gets the K_AF, and the console of free5GC shows the chain: the AAnF (`K_AKMA of <SUPI> registered <age> ago: refresh requested from the UDM`), the UDM (`AuthTrigger for <SUPI> from AANF at <address>: re-authentication notified to the AMF <id>`), the AMF (`Re-authentication of <SUPI> requested by the UDM: started`), the AUSF with the new A-KID, the AMF again (`completed, new KAMF in use`) and the AAnF (`AKMA context of <SUPI> registered, A-KID <new A-KID> (previous context replaced)`). The UE prints `AKMA key material derived, A-KID[...]` with the same new A-KID. The PDU session goes on: the next Ua\* goes through the same `uesimtun0`, with the new A-KID. The AF still accepts the previous K_AF until it expires (TS 33.535 cl. 6.4.2).
+
+### 11.4 Ask for the refresh by hand
+
+`seed` sends the same request as the AAnF, without waiting for the policy. On the free5GC host:
+
+```bash
+~/akma-tools/seed trigger-auth --nrf http://127.0.0.10:8000 --supi imsi-208930000000001
+```
+
+It prints `accepted (204)`. A second request for the same SUPI within 60 s gets `UDM answered 403 (REAUTHENTICATION_NOT_ALLOWED; ...)`: that is the policy of the UDM (TS 33.501 cl. 6.1.5.2, NOTE A).
+
+### 11.5 Limitations
+
+- 3GPP access only, and no AS re-keying, which is optional (TS 33.501 cl. 6.9.4.4): UERANSIM has no AS security.
+- A UE in CM-IDLE (answer `202` and a pending authentication) is only covered by the unit tests of the AMF: UERANSIM does not stay in CM-IDLE.
+- After a restart of the UDM, the request gets `404 CONTEXT_NOT_FOUND` until the UE registers again: the UDR of free5GC does not keep the notification address of the AMF.
+
+---
+
+## 12. Upgrading from V1
+
+For a host that runs V1 of this repository. Between V1 and V2, one patch changed (`free5gc/patches/config/0002`) and four are new (`openapi/0003`, `udm/0002`, `amf/0001`, UERANSIM `0005`); the patches of the NRF, AUSF, NEF, `run.sh` and test bench are the same. `patch-nf.sh` and `patch-ueransim.sh` reverse exactly the patches they find, so the changed sets are reverted with the V1 copies first.
+
+### 12.1 free5GC host
+
+With free5GC and the AAnF stopped, keep a copy of the V1 patches before updating the clone:
+
+```bash
+cp -r ~/akma-free5gc/free5gc/patches ~/akma-v1-patches && cp -r ~/akma-free5gc/af/ue/ueransim/patches ~/akma-v1-ueransim-patches
+```
+
+Revert the configuration, the UDM and UERANSIM with them:
+
+```bash
+~/akma-free5gc/free5gc/scripts/patch-nf.sh config revert ~/akma-v1-patches/config
+```
+
+```bash
+~/akma-free5gc/free5gc/scripts/patch-nf.sh udm revert ~/akma-v1-patches/udm
+```
+
+```bash
+~/akma-free5gc/af/scripts/patch-ueransim.sh revert ~/akma-v1-ueransim-patches
+```
+
+Update the clone to V2 and prepare both `openapi` copies again (section 4.1):
+
+```bash
+cd ~/akma-free5gc && git pull
+```
+
+```bash
+~/akma-free5gc/free5gc/scripts/prepare-openapi.sh
+```
+
+```bash
+~/akma-free5gc/free5gc/scripts/prepare-openapi.sh ~/akma-free5gc/free5gc/build/openapi-test v1.2.5-0.20260527003827-02dc71b4d94f
+```
+
+Apply the new and changed sets:
+
+```bash
+for nf in config udm amf; do ~/akma-free5gc/free5gc/scripts/patch-nf.sh $nf apply; done
+```
+
+```bash
+~/akma-free5gc/af/scripts/patch-ueransim.sh apply
+```
+
+The UERANSIM patch `0005` adds the key service of the ME and its policy to `free5gc-ue.yaml` (part 7). With UERANSIM on another host (part 10), run the two UERANSIM commands there, with the V1 copy of its patches.
+
+### 12.2 AAnF
+
+Build and install the AAnF and `seed` again (sections 3.1 and 3.4). `deploy.sh` keeps the installed `aanfcfg.yaml`. V2 adds, in the `akma` block, one AF_ID per Ua\* profile in `authorizedAfs` and `authorizedNefs`, and `kakmaRefresh` (part 11). Copy them from `free5gc/config/aanfcfg.yaml`, or replace the file with `deploy.sh --force-config`, which shows the differences, and set your addresses again (section 1.2).
+
+### 12.3 AF host
+
+Update the clone, then build wolfSSL, the test CA and the AF (part 6):
+
+```bash
+af/scripts/build-wolfssl.sh && af/scripts/make-test-ca.sh && af/scripts/build-af.sh
+```
+
+`af/config/afcfg.yaml` has one listener per Ua\* profile; set your addresses again. Then run `af/scripts/e2e.sh` (part 8): `161 passed, 0 failed`.
+
+## 13. Undo
 
 Everything above is undone in reverse order, with free5GC stopped:
 
@@ -805,7 +1071,7 @@ Everything above is undone in reverse order, with free5GC stopped:
 ```
 
 ```bash
-for nf in nef test run config ausf udm nrf; do ~/akma-free5gc/free5gc/scripts/patch-nf.sh $nf revert; done
+for nf in nef test run config amf ausf udm nrf; do ~/akma-free5gc/free5gc/scripts/patch-nf.sh $nf revert; done
 ```
 
 ```bash

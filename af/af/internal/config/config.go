@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v2"
 
+	"github.com/florianoneto07/akma-free5gc/af/akmatls"
 	"github.com/florianoneto07/akma-free5gc/af/uastar"
 	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
 )
@@ -47,12 +49,16 @@ type Configuration struct {
 	// FQDN of the AF: the only name accepted in the Host header field, the
 	// second part of the realm and the FQDN of the AF_ID.
 	FQDN string `yaml:"fqdn"`
-	// UaStarID is the Ua* security protocol identifier, ten hexadecimal
-	// digits: FF00000001, the private-range identifier of the simplified Ua*
-	// protocol (TS 33.220 H.2 NOTE 2).
-	UaStarID string `yaml:"uaStarId"`
-	// Listen is the address of the Ua* server.
-	Listen string `yaml:"listen"`
+	// UaStarID is the Ua* security protocol identifier of the digest-http
+	// profile, ten hexadecimal digits; FF00000001, the private-range
+	// identifier of the simplified Ua* protocol (TS 33.220 H.2 NOTE 2), when
+	// absent. The other profiles have the identifiers of TS 33.220 H.3.
+	UaStarID string `yaml:"uaStarId,omitempty"`
+	// Profiles are the Ua* servers of the AF, one per profile and port.
+	Profiles []Profile `yaml:"profiles,omitempty"`
+	// Listen is the address of a digest-http profile, when there is no
+	// profiles list: the configuration of earlier versions.
+	Listen string `yaml:"listen,omitempty"`
 	// Path of the protected resource.
 	Path string `yaml:"path,omitempty"`
 	// RealmPrefix is the first part of the realm; uastar.RealmPrefix when
@@ -85,6 +91,23 @@ type Configuration struct {
 	ClockOffset string `yaml:"clockOffset,omitempty"`
 }
 
+// Profile is one Ua* server of the AF.
+type Profile struct {
+	// Type is digest-tls (TS 24.109 K.2), psk-tls13 (K.3.3), psk-tls12
+	// (K.3.2), psk-dtls13 or psk-dtls12 (TS 33.535 Annex C, CoAP inside),
+	// oscore (TS 33.535 Annex D) or digest-http (the simplified Ua*, test
+	// only).
+	Type string `yaml:"type"`
+	// Listen is a TCP address, or a UDP address for the DTLS and OSCORE
+	// profiles.
+	Listen string `yaml:"listen"`
+	// Certificate and Key are the PEM files of the certificate of the AF
+	// and its private key, for digest-tls. A relative path is relative to
+	// the configuration file.
+	Certificate string `yaml:"certificate,omitempty"`
+	Key         string `yaml:"key,omitempty"`
+}
+
 // Logger holds the log settings, as in the free5GC configurations.
 type Logger struct {
 	Enable       bool   `yaml:"enable"`
@@ -94,9 +117,10 @@ type Logger struct {
 
 // Settings is the validated configuration.
 type Settings struct {
+	// AfID is the AF_ID of the digest-http profile.
 	AfID          afid.AfID
 	FQDN          string
-	Listen        string
+	Profiles      []Profile
 	Path          string
 	Realm         string
 	Qop           []string
@@ -121,7 +145,20 @@ func Load(path string) (*Settings, error) {
 	if err := yaml.UnmarshalStrict(raw, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return c.Settings()
+	s, err := c.Settings()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(path)
+	for i, p := range s.Profiles {
+		if p.Certificate != "" && !filepath.IsAbs(p.Certificate) {
+			s.Profiles[i].Certificate = filepath.Join(dir, p.Certificate)
+		}
+		if p.Key != "" && !filepath.IsAbs(p.Key) {
+			s.Profiles[i].Key = filepath.Join(dir, p.Key)
+		}
+	}
+	return s, nil
 }
 
 // Settings validates the configuration and applies the defaults.
@@ -129,9 +166,12 @@ func (c Config) Settings() (*Settings, error) {
 	cf := c.Configuration
 	var errs []error
 
-	ua, err := parseUaStarID(cf.UaStarID)
-	if err != nil {
-		errs = append(errs, err)
+	ua := afid.UaStarDigest
+	if cf.UaStarID != "" {
+		var err error
+		if ua, err = parseUaStarID(cf.UaStarID); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if !isHostname(cf.FQDN) {
 		errs = append(errs, fmt.Errorf("fqdn: %q is not a DNS name", cf.FQDN))
@@ -140,8 +180,9 @@ func (c Config) Settings() (*Settings, error) {
 	if err != nil {
 		errs = append(errs, fmt.Errorf("fqdn: %w", err))
 	}
-	if _, _, err := net.SplitHostPort(cf.Listen); err != nil {
-		errs = append(errs, fmt.Errorf("listen: %w", err))
+	profiles, err := checkProfiles(cf)
+	if err != nil {
+		errs = append(errs, err)
 	}
 	switch {
 	case cf.AanfURI != "" && cf.NefURI != "":
@@ -164,7 +205,7 @@ func (c Config) Settings() (*Settings, error) {
 	}
 
 	s := &Settings{
-		AfID: id, FQDN: cf.FQDN, Listen: cf.Listen, Path: cf.Path, Qop: cf.Qop,
+		AfID: id, FQDN: cf.FQDN, Profiles: profiles, Path: cf.Path, Qop: cf.Qop,
 		NonceLifetime: DefaultNonceLifetime, KafExpiry: cf.KafExpiry, AanfURI: strings.TrimRight(cf.AanfURI, "/"),
 		NefURI: strings.TrimRight(cf.NefURI, "/"), NrfURI: strings.TrimRight(cf.NrfURI, "/"),
 		NfInstanceID: nfID, Anonymous: cf.Anonymous, Logger: c.Logger,
@@ -216,6 +257,56 @@ func (c Config) Settings() (*Settings, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// checkProfiles validates the profiles. Without a list, listen is a
+// digest-http profile.
+func checkProfiles(cf Configuration) ([]Profile, error) {
+	if len(cf.Profiles) == 0 {
+		if _, _, err := net.SplitHostPort(cf.Listen); err != nil {
+			return nil, fmt.Errorf("listen: %w", err)
+		}
+		return []Profile{{Type: akmatls.ProfileDigestHTTP, Listen: cf.Listen}}, nil
+	}
+	if cf.Listen != "" {
+		return nil, errors.New("listen: give the address in profiles, not here")
+	}
+	var errs []error
+	seen := map[string]bool{}
+	for i, p := range cf.Profiles {
+		where := fmt.Sprintf("profiles[%d]", i)
+		switch p.Type {
+		case akmatls.ProfileDigestTLS:
+			if p.Certificate == "" || p.Key == "" {
+				errs = append(errs, fmt.Errorf("%s: %s needs certificate and key", where, p.Type))
+			}
+		case akmatls.ProfilePSKTLS13, akmatls.ProfilePSKTLS12, akmatls.ProfilePSKDTLS13, akmatls.ProfilePSKDTLS12,
+			akmatls.ProfileOSCORE, akmatls.ProfileDigestHTTP:
+			if p.Certificate != "" || p.Key != "" {
+				errs = append(errs, fmt.Errorf("%s: %s takes no certificate", where, p.Type))
+			}
+		default:
+			errs = append(errs, fmt.Errorf("%s: type %q is not digest-tls, psk-tls13, psk-tls12, psk-dtls13, "+
+				"psk-dtls12, oscore or digest-http", where, p.Type))
+		}
+		if _, _, err := net.SplitHostPort(p.Listen); err != nil {
+			errs = append(errs, fmt.Errorf("%s: listen: %w", where, err))
+		} else if key := transport(p.Type) + p.Listen; seen[key] {
+			errs = append(errs, fmt.Errorf("%s: listen %s already used", where, p.Listen))
+		} else {
+			seen[key] = true
+		}
+	}
+	return cf.Profiles, errors.Join(errs...)
+}
+
+// transport names the transport of a profile: a TCP and a UDP server may
+// share an address and port.
+func transport(profile string) string {
+	if akmatls.IsUDP(profile) {
+		return "udp/"
+	}
+	return "tcp/"
 }
 
 func isAPIRoot(s string) bool {

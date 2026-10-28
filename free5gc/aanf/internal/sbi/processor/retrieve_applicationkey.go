@@ -96,6 +96,7 @@ func (p *Processor) RetrieveApplicationKey(
 	logger.AkmaLog.Infof("K_AF of %s provided to AF_ID %s for A-KID %s, expires %s%s",
 		supi, af.Transport(), req.AKId, exp.Format(time.RFC3339), via)
 	util.WriteJSON(c, http.StatusOK, rsp)
+	p.refreshKAkma(supi)
 }
 
 // validateAkmaAfKeyRequest checks the mandatory attributes of TS 29.522

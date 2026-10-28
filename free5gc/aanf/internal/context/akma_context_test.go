@@ -256,3 +256,50 @@ func TestConcurrentAccess(t *testing.T) {
 		<-done
 	}
 }
+
+// TS 33.535 cl. 6.4.4: the refresh of K_AKMA is requested once it is older
+// than the policy, once per K_AKMA, and again after the retry interval.
+func TestRefreshDue(t *testing.T) {
+	f := newFixture(t)
+	c := newClock()
+	s := NewStore()
+	s.SetClock(c.now)
+	if _, due := s.RefreshDue(f.supi, time.Minute, 5*time.Minute); due {
+		t.Fatal("refresh due without a context")
+	}
+	s.Register(f.supi, f.id, f.akidStr, f.kAkma)
+	if ctx, _ := s.Context(f.supi); !ctx.Registered.Equal(c.t) {
+		t.Errorf("Registered = %v, want %v", ctx.Registered, c.t)
+	}
+
+	c.advance(59 * time.Second)
+	if _, due := s.RefreshDue(f.supi, time.Minute, 5*time.Minute); due {
+		t.Fatal("refresh due before the policy age")
+	}
+	c.advance(time.Second)
+	age, due := s.RefreshDue(f.supi, time.Minute, 5*time.Minute)
+	if !due || age != time.Minute {
+		t.Fatalf("refresh not due at the policy age: %v %v", age, due)
+	}
+	c.advance(4 * time.Minute)
+	if _, due := s.RefreshDue(f.supi, time.Minute, 5*time.Minute); due {
+		t.Fatal("refresh requested twice within the retry interval")
+	}
+	c.advance(time.Minute)
+	if _, due := s.RefreshDue(f.supi, time.Minute, 5*time.Minute); !due {
+		t.Fatal("refresh not requested again after the retry interval")
+	}
+	if _, due := s.RefreshDue(f.supi, 0, 5*time.Minute); due {
+		t.Fatal("refresh due with the policy disabled")
+	}
+
+	// A new K_AKMA starts the policy again.
+	s.Register(f.supi, otherAKID(f.id, 1), "other", otherKey(1))
+	if _, due := s.RefreshDue(f.supi, time.Minute, 5*time.Minute); due {
+		t.Fatal("refresh due for a new K_AKMA")
+	}
+	c.advance(time.Minute)
+	if _, due := s.RefreshDue(f.supi, time.Minute, 5*time.Minute); !due {
+		t.Fatal("refresh not due for the new K_AKMA at the policy age")
+	}
+}

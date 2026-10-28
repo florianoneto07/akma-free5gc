@@ -1,0 +1,725 @@
+diff --git a/config/free5gc-ue.yaml b/config/free5gc-ue.yaml
+index 3d3e9f4..0c7b74c 100644
+--- a/config/free5gc-ue.yaml
++++ b/config/free5gc-ue.yaml
+@@ -15,6 +15,26 @@ routingIndicator: '0000'
+ 
+ # AKMA (3GPP TS 33.535): derive K_AKMA and the A-KID after each successful primary authentication
+ akma: true
++# AKMA key service of the ME (3GPP TS 33.535 cl. 4.4.3): each application gets only the K_AF of its own AF_IDs.
++# uid: the user that runs the application (id -u); executable (optional): the absolute path of the application.
++# The socket is /run/ueransim/akma-<SUPI>.sock unless "socket" is set.
++akmaKeyService:
++  applications:
++    - name: uaclient
++      uid: 1000
++      afIds: # one per Ua* profile and cipher suite (3GPP TS 33.220 H.3)
++        - af1.akma.example.0100011301 # Digest in TLS 1.3 (3GPP TS 24.109 K.2)
++        - af1.akma.example.0100011302
++        - af1.akma.example.0100011303
++        - af1.akma.example.010001C02B # Digest in TLS 1.2
++        - af1.akma.example.010001C02C
++        - af1.akma.example.0100000007 # TLS 1.3 with K_AF as pre-shared key (3GPP TS 24.109 K.3.3)
++        - af1.akma.example.010001D001 # (D)TLS 1.2 with K_AF as pre-shared key (3GPP TS 24.109 K.3.2)
++        - af1.akma.example.0100000009 # DTLS 1.3 with K_AF as pre-shared key (3GPP TS 33.535 Annex C)
++        - af1.akma.example.0100000008 # OSCORE with a context from K_AF (3GPP TS 33.535 Annex D)
++        - af1.akma.example.FF00000001 # simplified Ua*, test only
++# Test only: "nr-cli akma-kaf" gives the K_AF of any AF to any local process
++akmaCliKaf: false
+ 
+ # Permanent subscription key
+ key: '8baf473f2f8fd09487cccbd7097c6862'
+diff --git a/src/ue/CMakeLists.txt b/src/ue/CMakeLists.txt
+index 8375939..3330fe5 100644
+--- a/src/ue/CMakeLists.txt
++++ b/src/ue/CMakeLists.txt
+@@ -1,5 +1,5 @@
+-file(GLOB_RECURSE HDR_FILES *.hpp)
+-file(GLOB_RECURSE SRC_FILES *.cpp)
++file(GLOB_RECURSE HDR_FILES CONFIGURE_DEPENDS *.hpp)
++file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS *.cpp)
+ 
+ add_library(ue ${HDR_FILES} ${SRC_FILES})
+ 
+diff --git a/src/ue/app/akma_service.cpp b/src/ue/app/akma_service.cpp
+new file mode 100644
+index 0000000..f4cf1cc
+--- /dev/null
++++ b/src/ue/app/akma_service.cpp
+@@ -0,0 +1,228 @@
++//
++// AKMA key service of the ME (3GPP TS 33.535 cl. 4.4.3).
++//
++
++#include "akma_service.hpp"
++
++#include <algorithm>
++#include <cctype>
++#include <cerrno>
++#include <chrono>
++#include <cstring>
++#include <future>
++#include <sstream>
++
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include <ue/app/task.hpp>
++#include <ue/nas/keys.hpp>
++#include <ue/nts.hpp>
++
++static constexpr int REQUEST_TIMEOUT_MS = 5000;
++static constexpr int RECEIVE_TIMEOUT_S = 5;
++static constexpr size_t MAX_LINE = 512;
++
++namespace nr::ue
++{
++
++static std::string Upper(std::string s)
++{
++    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
++    return s;
++}
++
++static std::string Lower(std::string s)
++{
++    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
++    return s;
++}
++
++AkmaKeyService::AkmaKeyService(TaskBase *base) : m_base(base)
++{
++    m_logger = base->logBase->makeUniqueLogger(base->config->getLoggerPrefix() + "akma");
++    m_path = base->config->akmaKeySocket.empty() ? "/run/ueransim/akma-" + base->config->getNodeName() + ".sock"
++                                                 : base->config->akmaKeySocket;
++}
++
++AkmaKeyService::~AkmaKeyService()
++{
++    m_stop = true;
++    if (m_thread.joinable())
++        m_thread.join();
++    if (m_fd >= 0)
++    {
++        close(m_fd);
++        unlink(m_path.c_str());
++    }
++}
++
++bool AkmaKeyService::start()
++{
++    if (m_base->config->akmaCliKaf)
++        m_logger->warn("akma-kaf of nr-cli is enabled (akmaCliKaf): any local process gets the K_AF of any AF; "
++                       "test only");
++
++    auto &applications = m_base->config->akmaApplications;
++    if (applications.empty())
++    {
++        m_logger->info("AKMA key service not started: no application in akmaKeyService.applications");
++        return false;
++    }
++
++    sockaddr_un addr{};
++    addr.sun_family = AF_UNIX;
++    if (m_path.size() >= sizeof(addr.sun_path))
++    {
++        m_logger->err("AKMA key service not started: socket path too long: %s", m_path.c_str());
++        return false;
++    }
++    std::memcpy(addr.sun_path, m_path.c_str(), m_path.size() + 1);
++
++    auto slash = m_path.rfind('/');
++    if (slash != std::string::npos && slash > 0)
++        mkdir(m_path.substr(0, slash).c_str(), 0755); // an existing directory is fine
++    unlink(m_path.c_str());
++
++    // The file is open to every user: the policy, not the file mode, decides who gets K_AF.
++    m_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++    if (m_fd < 0 || bind(m_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0 ||
++        chmod(m_path.c_str(), 0666) < 0 || listen(m_fd, 8) < 0)
++    {
++        m_logger->err("AKMA key service not started on %s: %s", m_path.c_str(), std::strerror(errno));
++        if (m_fd >= 0)
++        {
++            close(m_fd);
++            m_fd = -1;
++        }
++        return false;
++    }
++
++    std::string names{};
++    for (auto &a : applications)
++        names += (names.empty() ? "" : ", ") + a.name;
++    m_logger->info("AKMA key service on %s; applications [%s]", m_path.c_str(), names.c_str());
++
++    m_thread = std::thread(&AkmaKeyService::run, this);
++    return true;
++}
++
++void AkmaKeyService::run()
++{
++    while (!m_stop)
++    {
++        pollfd p{m_fd, POLLIN, 0};
++        if (poll(&p, 1, 500) <= 0)
++            continue;
++        int fd = accept4(m_fd, nullptr, nullptr, SOCK_CLOEXEC);
++        if (fd < 0)
++            continue;
++        serve(fd);
++        close(fd);
++    }
++}
++
++void AkmaKeyService::serve(int fd)
++{
++    // Who is asking: the user and the executable of the process, as the kernel gives them.
++    ucred cred{};
++    socklen_t len = sizeof(cred);
++    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0)
++        return;
++    std::string executable{};
++    char buf[4096];
++    std::string proc = "/proc/" + std::to_string(cred.pid) + "/exe";
++    ssize_t n = readlink(proc.c_str(), buf, sizeof(buf) - 1);
++    if (n > 0)
++        executable.assign(buf, static_cast<size_t>(n));
++
++    timeval tv{RECEIVE_TIMEOUT_S, 0};
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++
++    std::string pending{};
++    char chunk[256];
++    while (!m_stop)
++    {
++        ssize_t r = recv(fd, chunk, sizeof(chunk), 0);
++        if (r <= 0)
++            return;
++        pending.append(chunk, static_cast<size_t>(r));
++
++        size_t nl;
++        while ((nl = pending.find('\n')) != std::string::npos)
++        {
++            std::string line = pending.substr(0, nl);
++            pending.erase(0, nl + 1);
++            if (!line.empty() && line.back() == '\r')
++                line.pop_back();
++
++            std::string answer = handle(line, static_cast<int>(cred.uid), executable) + "\n";
++            ssize_t sent = send(fd, answer.data(), answer.size(), MSG_NOSIGNAL);
++            std::fill(answer.begin(), answer.end(), '\0'); // the answer may hold K_AF
++            if (sent < 0)
++                return;
++        }
++        if (pending.size() > MAX_LINE)
++        {
++            static const std::string error = "ERR BAD_REQUEST\n";
++            send(fd, error.data(), error.size(), MSG_NOSIGNAL);
++            return;
++        }
++    }
++}
++
++std::string AkmaKeyService::handle(const std::string &line, int uid, const std::string &executable)
++{
++    std::istringstream in(line);
++    std::string verb{}, fqdn{}, uaStarId{}, extra{};
++    in >> verb >> fqdn >> uaStarId;
++    if (verb != "KAF" || fqdn.empty() || uaStarId.empty() || (in >> extra))
++        return "ERR BAD_REQUEST";
++    uaStarId = Upper(uaStarId);
++    if (!keys::IsValidAfFqdn(fqdn) || uaStarId.size() != 10 ||
++        uaStarId.find_first_not_of("0123456789ABCDEF") != std::string::npos)
++        return "ERR BAD_REQUEST";
++    std::string afId = fqdn + "." + uaStarId;
++
++    // The application: same user and same executable; failing that, same user and no executable in the policy.
++    const UeConfig::AkmaApplication *application = nullptr;
++    for (auto &a : m_base->config->akmaApplications)
++        if (a.uid == uid && !a.executable.empty() && a.executable == executable)
++            application = &a;
++    if (application == nullptr)
++        for (auto &a : m_base->config->akmaApplications)
++            if (application == nullptr && a.uid == uid && a.executable.empty())
++                application = &a;
++
++    if (application == nullptr)
++    {
++        m_logger->warn("Application of uid %d (%s) not in the AKMA key service policy; AF_ID[%s] refused", uid,
++                       executable.c_str(), afId.c_str());
++        return "ERR NOT_AUTHORIZED";
++    }
++    if (std::find(application->afIds.begin(), application->afIds.end(), afId) == application->afIds.end())
++    {
++        m_logger->warn("Application [%s] not authorized for AF_ID[%s] (TS 33.535 cl. 4.4.3)",
++                       application->name.c_str(), afId.c_str());
++        return "ERR NOT_AUTHORIZED";
++    }
++
++    auto promise = std::make_shared<std::promise<AkmaKafResult>>();
++    auto future = promise->get_future();
++    m_base->appTask->push(std::make_unique<NmUeAkmaKafRequest>(fqdn, uaStarId, promise));
++    if (future.wait_for(std::chrono::milliseconds(REQUEST_TIMEOUT_MS)) != std::future_status::ready)
++        return "ERR UNAVAILABLE";
++    AkmaKafResult result = future.get();
++    if (!result.cause.empty())
++        return "ERR " + result.cause;
++
++    m_logger->info("K_AF for AF_ID[%s] given to application [%s] (uid %d), A-KID[%s]", result.afId.c_str(),
++                   application->name.c_str(), uid, result.aKid.c_str());
++    return "OK a-kid=" + result.aKid + " af-id=" + result.afId + " k-af=" + Lower(result.kAf.toHexString());
++}
++
++} // namespace nr::ue
+diff --git a/src/ue/app/akma_service.hpp b/src/ue/app/akma_service.hpp
+new file mode 100644
+index 0000000..a454964
+--- /dev/null
++++ b/src/ue/app/akma_service.hpp
+@@ -0,0 +1,48 @@
++//
++// AKMA key service of the ME (3GPP TS 33.535 cl. 4.4.3).
++//
++
++#pragma once
++
++#include <atomic>
++#include <memory>
++#include <string>
++#include <thread>
++
++#include <ue/types.hpp>
++#include <utils/logger.hpp>
++
++namespace nr::ue
++{
++
++// Applications ask for K_AF over a Unix socket. The kernel gives the user and the process of the application
++// (SO_PEERCRED), and the policy of the UE configuration says which AF_IDs each application may get:
++// an application only gets the K_AF of its own AF_IDs, and K_AKMA never leaves the ME (TS 33.535 cl. 4.4.3).
++//
++// Protocol, one ASCII line per request and per answer:
++//   KAF <AF FQDN> <Ua* security protocol id, 10 hexadecimal digits>
++//   OK a-kid=<A-KID> af-id=<AF_ID> k-af=<64 hexadecimal digits>
++//   ERR <AKMA_DISABLED | NO_KEY_MATERIAL | BAD_REQUEST | NOT_AUTHORIZED | UNAVAILABLE>
++class AkmaKeyService
++{
++  private:
++    TaskBase *m_base;
++    std::unique_ptr<Logger> m_logger;
++    std::string m_path;
++    int m_fd{-1};
++    std::atomic<bool> m_stop{false};
++    std::thread m_thread;
++
++  public:
++    explicit AkmaKeyService(TaskBase *base);
++    ~AkmaKeyService();
++
++    bool start();
++
++  private:
++    void run();
++    void serve(int fd);
++    std::string handle(const std::string &line, int uid, const std::string &executable);
++};
++
++} // namespace nr::ue
+diff --git a/src/ue/app/cmd_handler.cpp b/src/ue/app/cmd_handler.cpp
+index 9b47f92..1789ba1 100644
+--- a/src/ue/app/cmd_handler.cpp
++++ b/src/ue/app/cmd_handler.cpp
+@@ -80,26 +80,79 @@ bool UeCmdHandler::isAllPaused()
+     return true;
+ }
+ 
+-void UeCmdHandler::handleCmd(NmUeCliCommand &msg)
++bool UeCmdHandler::pauseAndWait()
+ {
+     pauseTasks();
+ 
+     uint64_t currentTime = utils::CurrentTimeMillis();
+     uint64_t endTime = currentTime + PAUSE_CONFIRM_TIMEOUT;
+ 
+-    bool isPaused = false;
+     while (currentTime < endTime)
+     {
+         currentTime = utils::CurrentTimeMillis();
+         if (isAllPaused())
+-        {
+-            isPaused = true;
+-            break;
+-        }
++            return true;
+         utils::Sleep(PAUSE_POLLING);
+     }
++    return false;
++}
++
++// K_AF for the AKMA key service (TS 33.535 cl. 4.4.3), with the NAS security context read while the other tasks
++// are paused, as for nr-cli.
++void UeCmdHandler::handleAkmaKaf(NmUeAkmaKafRequest &msg)
++{
++    AkmaKafResult result{};
++    if (pauseAndWait())
++        result = deriveAkmaKaf(msg.afFqdn, msg.uaStarId);
++    else
++    {
++        result.cause = "UNAVAILABLE";
++        result.detail = "UE is unable to process the request due to pausing timeout";
++    }
++    unpauseTasks();
++    msg.result->set_value(std::move(result));
++}
+ 
+-    if (!isPaused)
++// TS 33.535 cl. 6.2.1 step 1: the ME derives K_AF for the AF; K_AKMA never leaves the ME (cl. 4.4.3).
++AkmaKafResult UeCmdHandler::deriveAkmaKaf(const std::string &afFqdn, const std::string &uaStarId)
++{
++    AkmaKafResult result{};
++    if (!m_base->config->akma)
++    {
++        result.cause = "AKMA_DISABLED";
++        result.detail = "AKMA is not enabled in the UE configuration";
++        return result;
++    }
++    auto &nsCtx = m_base->nasTask->usim->m_currentNsCtx;
++    if (!nsCtx || nsCtx->keys.aKid.empty())
++    {
++        result.cause = "NO_KEY_MATERIAL";
++        result.detail = "No AKMA key material: no successful primary authentication";
++        return result;
++    }
++    if (!keys::IsValidAfFqdn(afFqdn))
++    {
++        result.cause = "BAD_REQUEST";
++        result.detail = "AF FQDN must be an ASCII DNS name (no NFKC in the UE)";
++        return result;
++    }
++    if (uaStarId.size() != 10 || uaStarId.find_first_not_of("0123456789ABCDEF") != std::string::npos)
++    {
++        result.cause = "BAD_REQUEST";
++        result.detail = "Ua* security protocol identifier must be 10 hexadecimal digits";
++        return result;
++    }
++    result.kAf = keys::CalculateKAf(nsCtx->keys.kAkma, afFqdn, OctetString::FromHex(uaStarId));
++    result.afId = afFqdn + "." + uaStarId;
++    result.aKid = nsCtx->keys.aKid;
++    m_base->logBase->makeUniqueLogger(m_base->config->getLoggerPrefix() + "app")
++        ->info("AKMA K_AF derived for AF_ID[%s], A-KID[%s]", result.afId.c_str(), result.aKid.c_str());
++    return result;
++}
++
++void UeCmdHandler::handleCmd(NmUeCliCommand &msg)
++{
++    if (!pauseAndWait())
+     {
+         sendError(msg.address, "UE is unable process command due to pausing timeout");
+     }
+@@ -176,38 +229,24 @@ void UeCmdHandler::handleCmdImpl(NmUeCliCommand &msg)
+         break;
+     }
+     case app::UeCliCommand::AKMA_KAF: {
+-        // TS 33.535 cl. 6.2.1 step 1: the ME derives K_AF for the AF and hands the A-KID and K_AF to the application.
+-        // K_AKMA never leaves the ME (TS 33.535 cl. 4.4.3).
+-        if (!m_base->config->akma)
+-        {
+-            sendError(msg.address, "AKMA is not enabled in the UE configuration");
+-            break;
+-        }
+-        auto &nsCtx = m_base->nasTask->usim->m_currentNsCtx;
+-        if (!nsCtx || nsCtx->keys.aKid.empty())
+-        {
+-            sendError(msg.address, "No AKMA key material: no successful primary authentication");
+-            break;
+-        }
+-        if (!keys::IsValidAfFqdn(msg.cmd->afFqdn))
++        // Test only: nr-cli answers any local process, for any AF. Applications get K_AF from the AKMA key service,
++        // which gives each one only the K_AF of its own AF_IDs (TS 33.535 cl. 4.4.3).
++        if (!m_base->config->akmaCliKaf)
+         {
+-            sendError(msg.address, "AF FQDN must be an ASCII DNS name (no NFKC in the UE)");
++            sendError(msg.address, "akma-kaf is disabled: applications get K_AF from the AKMA key service "
++                                   "(akmaCliKaf: true enables it for tests)");
+             break;
+         }
+-        std::string uaStarId = AsciiCase(msg.cmd->uaStarId, true);
+-        if (uaStarId.size() != 10 || uaStarId.find_first_not_of("0123456789ABCDEF") != std::string::npos)
++        auto result = deriveAkmaKaf(msg.cmd->afFqdn, AsciiCase(msg.cmd->uaStarId, true));
++        if (!result.cause.empty())
+         {
+-            sendError(msg.address, "Ua* security protocol identifier must be 10 hexadecimal digits");
++            sendError(msg.address, result.detail);
+             break;
+         }
+-        auto kAf = keys::CalculateKAf(nsCtx->keys.kAkma, msg.cmd->afFqdn, OctetString::FromHex(uaStarId));
+-        std::string afId = msg.cmd->afFqdn + "." + uaStarId;
+-        m_base->logBase->makeUniqueLogger(m_base->config->getLoggerPrefix() + "app")
+-            ->info("AKMA K_AF derived for AF_ID[%s], A-KID[%s]", afId.c_str(), nsCtx->keys.aKid.c_str());
+         Json json = Json::Obj({
+-            {"a-kid", nsCtx->keys.aKid},
+-            {"af-id", afId},
+-            {"k-af", AsciiCase(kAf.toHexString(), false)},
++            {"a-kid", result.aKid},
++            {"af-id", result.afId},
++            {"k-af", AsciiCase(result.kAf.toHexString(), false)},
+         });
+         sendResult(msg.address, json.dumpYaml());
+         break;
+diff --git a/src/ue/app/cmd_handler.hpp b/src/ue/app/cmd_handler.hpp
+index 80d3712..1513bf4 100644
+--- a/src/ue/app/cmd_handler.hpp
++++ b/src/ue/app/cmd_handler.hpp
+@@ -25,11 +25,14 @@ class UeCmdHandler
+     }
+ 
+     void handleCmd(NmUeCliCommand &msg);
++    void handleAkmaKaf(NmUeAkmaKafRequest &msg);
+ 
+   private:
+     void pauseTasks();
+     void unpauseTasks();
+     bool isAllPaused();
++    bool pauseAndWait();
++    AkmaKafResult deriveAkmaKaf(const std::string &afFqdn, const std::string &uaStarId);
+ 
+   private:
+     void handleCmdImpl(NmUeCliCommand &msg);
+diff --git a/src/ue/app/task.cpp b/src/ue/app/task.cpp
+index ced0ace..c928b24 100644
+--- a/src/ue/app/task.cpp
++++ b/src/ue/app/task.cpp
+@@ -101,6 +101,12 @@ void UeAppTask::onLoop()
+         handler.handleCmd(w);
+         break;
+     }
++    case NtsMessageType::UE_AKMA_KAF_REQUEST: {
++        auto &w = dynamic_cast<NmUeAkmaKafRequest &>(*msg);
++        UeCmdHandler handler{m_base};
++        handler.handleAkmaKaf(w);
++        break;
++    }
+     case NtsMessageType::TIMER_EXPIRED: {
+         auto &w = dynamic_cast<NmTimerExpired &>(*msg);
+         if (w.timerId == SWITCH_OFF_TIMER_ID)
+diff --git a/src/ue/nts.hpp b/src/ue/nts.hpp
+index 713ea2e..c896ecf 100644
+--- a/src/ue/nts.hpp
++++ b/src/ue/nts.hpp
+@@ -11,6 +11,9 @@
+ #include "types.hpp"
+ #include "ue.hpp"
+ 
++#include <future>
++#include <memory>
++#include <string>
+ #include <utility>
+ 
+ #include <lib/app/cli_base.hpp>
+@@ -346,4 +349,27 @@ struct NmUeCliCommand : NtsMessage
+     }
+ };
+ 
++// K_AF asked by the AKMA key service of the ME for an application (TS 33.535 cl. 4.4.3, cl. 6.2.1 step 1)
++struct AkmaKafResult
++{
++    std::string cause{};  // empty on success: AKMA_DISABLED, NO_KEY_MATERIAL, BAD_REQUEST or UNAVAILABLE otherwise
++    std::string detail{}; // for nr-cli
++    std::string aKid{};
++    std::string afId{};
++    OctetString kAf{};
++};
++
++struct NmUeAkmaKafRequest : NtsMessage
++{
++    std::string afFqdn;
++    std::string uaStarId; // 10 hexadecimal digits, uppercase
++    std::shared_ptr<std::promise<AkmaKafResult>> result;
++
++    NmUeAkmaKafRequest(std::string afFqdn, std::string uaStarId, std::shared_ptr<std::promise<AkmaKafResult>> result)
++        : NtsMessage(NtsMessageType::UE_AKMA_KAF_REQUEST), afFqdn(std::move(afFqdn)), uaStarId(std::move(uaStarId)),
++          result(std::move(result))
++    {
++    }
++};
++
+ } // namespace nr::ue
+\ No newline at end of file
+diff --git a/src/ue/types.hpp b/src/ue/types.hpp
+index 3b392c0..cd16059 100644
+--- a/src/ue/types.hpp
++++ b/src/ue/types.hpp
+@@ -112,6 +112,17 @@ struct UeConfig
+     NetworkSlice configuredNssai{};
+     std::optional<std::string> tunName{};
+     bool akma{};
++    // AKMA key service of the ME (TS 33.535 cl. 4.4.3): the application that may get the K_AF of each AF_ID
++    struct AkmaApplication
++    {
++        std::string name{};
++        int uid{};
++        std::string executable{};         // empty: any executable of the user
++        std::vector<std::string> afIds{}; // "<FQDN>.<Ua* security protocol id>", identifier in uppercase
++    };
++    std::string akmaKeySocket{};                     // empty: /run/ueransim/akma-<node name>.sock
++    std::vector<AkmaApplication> akmaApplications{}; // empty: no application gets K_AF
++    bool akmaCliKaf{};                               // test only: K_AF of any AF through "nr-cli akma-kaf"
+ 
+     struct
+     {
+diff --git a/src/ue/ue.cpp b/src/ue/ue.cpp
+index 2f80ba9..2caf4f1 100644
+--- a/src/ue/ue.cpp
++++ b/src/ue/ue.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "ue.hpp"
+ 
++#include "app/akma_service.hpp"
+ #include "app/task.hpp"
+ #include "nas/task.hpp"
+ #include "rls/task.hpp"
+@@ -37,6 +38,8 @@ UserEquipment::UserEquipment(UeConfig *config, app::IUeController *ueController,
+ 
+ UserEquipment::~UserEquipment()
+ {
++    akmaKeyService.reset(); // its thread pushes to the app task
++
+     taskBase->nasTask->quit();
+     taskBase->rrcTask->quit();
+     taskBase->rlsTask->quit();
+@@ -58,6 +61,12 @@ void UserEquipment::start()
+     taskBase->rrcTask->start();
+     taskBase->rlsTask->start();
+     taskBase->appTask->start();
++
++    if (taskBase->config->akma)
++    {
++        akmaKeyService = std::make_unique<AkmaKeyService>(taskBase);
++        akmaKeyService->start();
++    }
+ }
+ 
+ void UserEquipment::pushCommand(std::unique_ptr<app::UeCliCommand> cmd, const InetAddress &address)
+diff --git a/src/ue/ue.hpp b/src/ue/ue.hpp
+index eba9851..1bddd36 100644
+--- a/src/ue/ue.hpp
++++ b/src/ue/ue.hpp
+@@ -17,10 +17,13 @@
+ namespace nr::ue
+ {
+ 
++class AkmaKeyService;
++
+ class UserEquipment
+ {
+   private:
+     TaskBase *taskBase;
++    std::unique_ptr<AkmaKeyService> akmaKeyService;
+ 
+   public:
+     UserEquipment(UeConfig *config, app::IUeController *ueController, app::INodeListener *nodeListener,
+diff --git a/src/ue.cpp b/src/ue.cpp
+index 23e43be..16ec196 100644
+--- a/src/ue.cpp
++++ b/src/ue.cpp
+@@ -6,8 +6,11 @@
+ // See README, LICENSE, and CONTRIBUTING files for licensing details.
+ //
+ 
++#include <algorithm>
++#include <cctype>
+ #include <chrono>
+ #include <iostream>
++#include <set>
+ #include <stdexcept>
+ #include <thread>
+ 
+@@ -18,6 +21,7 @@
+ #include <lib/app/cli_cmd.hpp>
+ #include <lib/app/proc_table.hpp>
+ #include <lib/app/ue_ctl.hpp>
++#include <ue/nas/keys.hpp>
+ #include <ue/ue.hpp>
+ #include <utils/common.hpp>
+ #include <utils/concurrent_map.hpp>
+@@ -100,6 +104,42 @@ class UeControllerTask : public NtsTask
+ 
+ static UeControllerTask *g_controllerTask;
+ 
++// AKMA key service of the ME (TS 33.535 cl. 4.4.3). An AF_ID belongs to one application only: two applications with
++// the same AF_ID would get the same K_AF, and one could use the key of the other.
++static void ReadAkmaKeyService(const YAML::Node &node, nr::ue::UeConfig &config)
++{
++    if (yaml::HasField(node, "socket"))
++        config.akmaKeySocket = yaml::GetString(node, "socket", 1, 107);
++    if (!yaml::HasField(node, "applications"))
++        return;
++    std::set<std::string> seen{};
++    for (auto &app : yaml::GetSequence(node, "applications"))
++    {
++        nr::ue::UeConfig::AkmaApplication a{};
++        a.name = yaml::GetString(app, "name", 1, 64);
++        a.uid = yaml::GetInt32(app, "uid", 0, std::nullopt);
++        if (yaml::HasField(app, "executable"))
++            a.executable = yaml::GetString(app, "executable", 1, 4096);
++        for (auto &item : yaml::GetSequence(app, "afIds"))
++        {
++            auto afId = item.as<std::string>();
++            auto dot = afId.rfind('.');
++            std::string id = dot == std::string::npos ? "" : afId.substr(dot + 1);
++            std::transform(id.begin(), id.end(), id.begin(), [](unsigned char c) { return std::toupper(c); });
++            if (dot == std::string::npos || !nr::ue::keys::IsValidAfFqdn(afId.substr(0, dot)) || id.size() != 10 ||
++                id.find_first_not_of("0123456789ABCDEF") != std::string::npos)
++                throw std::runtime_error("akmaKeyService: invalid AF_ID " + afId +
++                                         ", expected <FQDN>.<10 hexadecimal digits>");
++            afId = afId.substr(0, dot + 1) + id;
++            if (!seen.insert(afId).second)
++                throw std::runtime_error("akmaKeyService: AF_ID " + afId +
++                                         " is given to more than one application (TS 33.535 cl. 4.4.3)");
++            a.afIds.push_back(afId);
++        }
++        config.akmaApplications.push_back(std::move(a));
++    }
++}
++
+ static nr::ue::UeConfig *ReadConfigYaml()
+ {
+     auto *result = new nr::ue::UeConfig();
+@@ -164,6 +204,10 @@ static nr::ue::UeConfig *ReadConfigYaml()
+         result->tunName = yaml::GetString(config, "tunName", 1, 12);
+     if (yaml::HasField(config, "akma"))
+         result->akma = yaml::GetBool(config, "akma");
++    if (yaml::HasField(config, "akmaKeyService"))
++        ReadAkmaKeyService(config["akmaKeyService"], *result);
++    if (yaml::HasField(config, "akmaCliKaf"))
++        result->akmaCliKaf = yaml::GetBool(config, "akmaCliKaf");
+ 
+     yaml::AssertHasField(config, "integrity");
+     yaml::AssertHasField(config, "ciphering");
+@@ -363,6 +407,9 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
+     c->routingIndicator = g_refConfig->routingIndicator;
+     c->tunName = g_refConfig->tunName;
+     c->akma = g_refConfig->akma;
++    c->akmaKeySocket = g_refConfig->akmaKeySocket;
++    c->akmaApplications = g_refConfig->akmaApplications;
++    c->akmaCliKaf = g_refConfig->akmaCliKaf;
+     c->hplmn = g_refConfig->hplmn;
+     c->configuredNssai = g_refConfig->configuredNssai;
+     c->defaultConfiguredNssai = g_refConfig->defaultConfiguredNssai;
+diff --git a/src/utils/nts.hpp b/src/utils/nts.hpp
+index d363e9d..194d919 100644
+--- a/src/utils/nts.hpp
++++ b/src/utils/nts.hpp
+@@ -32,6 +32,7 @@ enum class NtsMessageType
+     UE_STATUS_UPDATE,
+     UE_CLI_COMMAND,
+     UE_CTL_COMMAND,
++    UE_AKMA_KAF_REQUEST,
+ 
+     UDP_SERVER_RECEIVE,
+     CLI_SEND_RESPONSE,
