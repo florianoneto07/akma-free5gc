@@ -1,8 +1,8 @@
 # Changelog
 
-## V2 — 2026-10
+## V2 — 2026-10-29
 
-Tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e.sh` with 161 checks, none failed. Upgrading from V1: [docs/install.md](docs/install.md#12-upgrading-from-v1).
+Tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e.sh` with 161 checks, none failed, also on a clean install that followed only [docs/install.md](docs/install.md). Upgrading from V1: [docs/install.md](docs/install.md#12-upgrading-from-v1).
 
 ### Added
 
