@@ -113,7 +113,7 @@ The two hosts sync on marker files at three points (A, B, C). At each one the re
 
 ### 5.1 Run
 
-Prerequisites: [install.md](install.md), parts 3 to 7 and section 9.1. Then, on the AF host:
+Prerequisites: [install.md](install.md), parts 3 to 7 and sections 9.1 and 11.1, with `kakmaRefresh: 0` in the installed `aanfcfg.yaml`. Then, on the AF host:
 
 ```bash
 af/scripts/build-af.sh

@@ -697,7 +697,7 @@ The key service tells applications apart by user. The executable in the policy i
 
 ## 8. End-to-end run
 
-With parts 3 to 7 and section 9.1 done, one script runs all of AKMA and the negative tests on both hosts, and writes a report. Details in [testing.md](testing.md).
+With parts 3 to 7 and sections 9.1 and 11.1 done, one script runs all of AKMA and the negative tests on both hosts, and writes a report. Details in [testing.md](testing.md).
 
 ### 8.1 Prepare
 
@@ -729,6 +729,8 @@ The AF host needs SSH with a key to the free5GC host (section 1.1), `openssl`, a
 The script runs its own AF with the profiles of `afcfg.yaml` plus `digest-http` on port 8080, and copies the test CA to the free5GC host.
 
 The script also checks the NEF path of part 9, so do section 9.1 first: the patched NEF, the configuration patch and `akma.authorizedNefs` in the AAnF. Without them, the NEF checks fail.
+
+It checks the refresh of K_AKMA of part 11 too, so do section 11.1 first: the patched AMF. Without it, the R6r checks fail. Leave the line `kakmaRefresh: 0` of the repository in the installed `aanfcfg.yaml`: the script turns the policy on only for step R6r, in a copy of the configuration with `20s`.
 
 free5GC must be stopped: the script starts it. Stop your own AFs too, and close the tunnel of section 9.2: the script starts its own AFs on TCP ports 8080 to 8085, 8443 to 8448 and 8456 and UDP ports 5683 to 5685, 5687 and 5688 of the address of the first `listen`, and its own tunnel to the NRF.
 
@@ -959,14 +961,14 @@ free5gc/scripts/build-aanf.sh
 free5gc/scripts/deploy.sh user@free5gc-host
 ```
 
-`deploy.sh` keeps the installed configuration. Add to the `akma` block of `~/free5gc/config/aanfcfg.yaml` the age after which the AAnF asks for the refresh:
+`deploy.sh` keeps the installed configuration. In the `akma` block of `~/free5gc/config/aanfcfg.yaml`, set `kakmaRefresh`, which the repository leaves at `0`, to the age after which the AAnF asks for the refresh:
 
 ```yaml
   akma:
     kakmaRefresh: 1m
 ```
 
-`0`, or no line, turns it off. With a value, when an AF asks for the K_AF of a K_AKMA registered longer ago, the AAnF hands out the K_AF and asks the UDM for the refresh in the background, once per K_AKMA, and again after 5 minutes if the K_AKMA did not change. One minute is enough to watch it; in a real network the value is the authentication policy of the operator.
+`0`, or no line, turns it off. With a value, when an AF asks for the K_AF of a K_AKMA registered longer ago, the AAnF hands out the K_AF and asks the UDM for the refresh in the background, once per K_AKMA, and again after 5 minutes if the K_AKMA did not change. One minute is enough to watch it; in a real network the value is the authentication policy of the operator. Set it back to `0` before you run `e2e.sh` (part 8).
 
 ### 11.3 Watch the refresh
 
