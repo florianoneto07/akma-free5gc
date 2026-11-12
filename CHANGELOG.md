@@ -1,8 +1,44 @@
 # Changelog
 
+## V3 — 2026-11-12
+
+Tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e.sh` with 333 checks, none failed, none skipped, with OpenSSL 4.1 and libcoap as the independent clients. Not yet followed on a clean install. Upgrading from V2: [docs/install.md](docs/install.md#14-upgrading-from-v2).
+
+### Added
+
+- **Mutual TLS on the SBI** ([docs/sbi-tls.md](docs/sbi-tls.md); TS 33.501 cl. 13.1; TS 33.310):
+  - a test PKI of the operator (`free5gc/scripts/make-sba-certs.sh`, `free5gc/config/sba-entities.conf`): a CA, one certificate per NF in the profile of TS 33.310 table 6.1.3c.3-1, with the NF instance ID, the FQDN and the NF type, the certificate that signs the access tokens of the NRF (table 6.1.3c.3-2), test certificates and a check of every profile;
+  - a CRL service (`free5gc/crl/`, `run.sh -crl`); the CRL is checked at both ends of every connection, and a connection without a valid CRL is refused;
+  - `openapi/0005`: the package `sbitls`, with the TLS profile of TS 33.210 cl. 6.2, the CA and the CRL; the SBI client checks the server and presents the certificate of the NF (F21), and builds the URIs by name (F24);
+  - `util/0001`: no TLS secrets written to a key log (F22);
+  - one `*-sbi-tls` patch per NF, with `sbi.fqdn` and `sbi.tls.ca`, and the configuration over `https` by name (`config/0004`);
+  - the AAnF, `seed` and the AF as TLS clients and servers.
+- **Identity in the access tokens and in the policies:**
+  - `nrf/0005` and `openapi/0006`: tokens in `ES256` with `kid`, `x5t#S256` and `iss` (F23, F26); the NRF checks each request against the certificate of the TLS session (F25); scopes per operation and NF type with `allowedOperationsPerNfType` (F4); every producer checks `iss`, `aud`, `sub`, `exp` and the scope, with the answers of TS 29.500 cl. 6.7.3 (F5, F12);
+  - the AAnF knows the AF and the NEF by the NF instance ID of their certificates, without source addresses, and checks the scopes of each operation of Naanf_AKMA;
+  - `nrf/0006`: the scope is checked on the registered profiles of the target type, or on the profile of the requested instance (F27), and `Nnrf_AccessToken_RetrieveKey` (F28, with `openapi/0008`).
+- **CAPIF** ([docs/capif.md](docs/capif.md); TS 29.522 cl. 7; TS 29.222; TS 33.122):
+  - the CCF (`free5gc/ccf/`): onboarding and offboarding of API invokers, publication and discovery of APIs, security method `OAUTH`, access tokens in `ES256`, information on the invokers for the NEF, the CRL of its CA;
+  - `openapi/0004` and `0007`: the CAPIF models and clients;
+  - `nef/0002` and `nef/0005`: the NEF as API publishing and exposing function, `check-authentication`, the token of the CCF bound to the client certificate of the AF, `allowNrfTokens: false`;
+  - the AF outside the operator network as API invoker (`af/config/afcfg-capif.yaml`);
+  - `run.sh -ccf`; `free5gc/scripts/build-ccf.sh` and `make-capif-certs.sh`.
+- **AAnF:** the heart-beat to the NRF (`heartBeatTimer`, TS 29.510 cl. 5.2.2.3.2; F29); `Server` and `3gpp-Sbi-NF-Peer-Info` in its answers, and an `SBI` log line with the `User-Agent` of each request (TS 29.500; F31).
+- **AUSF and NEF** (`ausf/0004`, `nef/0006`): any AAnF for the default Routing Indicator (TS 33.535 cl. 6.7); the result of the search reused during its validity period (TS 29.510 cl. 5.3.2.2.1); `User-Agent` and `3gpp-Sbi-NF-Peer-Info` towards the AAnF. The NEF asks the AAnF with `Naanf_AKMA_ApplicationKey_Get`, also for an anonymous AF (TS 33.535 cl. 6.3 step 3).
+- **FQDN required with `https`** in every NF, the AAnF and the internal server of the CCF (TS 29.510 table 6.1.6.2.2-1 NOTE 1): one `*-fqdn-required` patch per NF and `config/0007`.
+- **End-to-end script:** 333 checks instead of 161: every port of the SBI with Python clients (`af/scripts/negative/sbi_tls.py`, `sbi_token.py`), the profiles of the certificates, the CRL, the identity in the tokens and in the policies, CAPIF with a second invoker in Python (`af/scripts/negative/capif_api.py`), `retrieve-key`, the heart-beat and the headers of TS 29.500.
+- **Recommendations:** [docs/free5gc-fixes.md](docs/free5gc-fixes.md) grows from F1–F20 to F1–F31, and [docs/3gpp-recommendations.md](docs/3gpp-recommendations.md) from A–Z to A–AP.
+
+### Changed
+
+- Every example configuration runs the SBI over `https`, by name; the names resolve through `/etc/hosts`.
+- `akma.authorizedAfs` and `akma.authorizedNefs` of the AAnF name the NF instance IDs of the certificates (`nfInstanceIds`) in place of source addresses.
+- `af/config/afcfg-external.yaml` and the SSH tunnel to the NRF are gone: the AF outside the operator network gets its token from the CCF.
+- `free5gc/scripts/deploy.sh` also installs the CRL service.
+
 ## V2 — 2026-10-29
 
-Tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e.sh` with 161 checks, none failed, also on a clean install that followed only [docs/install.md](docs/install.md). Upgrading from V1: [docs/install.md](docs/install.md#12-upgrading-from-v1).
+Tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e.sh` with 161 checks, none failed, also on a clean install that followed only [docs/install.md](https://github.com/florianoneto07/akma-free5gc/blob/v2.0.0/docs/install.md). Upgrading from V1: [docs/install.md of V2](https://github.com/florianoneto07/akma-free5gc/blob/v2.0.0/docs/install.md#12-upgrading-from-v1).
 
 ### Added
 
@@ -30,7 +66,7 @@ Tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e
 
 ## V1 — 2026-10-20
 
-First public version, tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e.sh` with 83 checks, none failed, also on a clean install that followed only [docs/install.md](docs/install.md).
+First public version, tested on free5GC v4.2.3 and UERANSIM v3.2.6 (commit `85a0fbf`): `af/scripts/e2e.sh` with 83 checks, none failed, also on a clean install that followed only [docs/install.md](https://github.com/florianoneto07/akma-free5gc/blob/v1.0.0/docs/install.md).
 
 - The AAnF (Naanf_AKMA, TS 29.535) and the `seed` test tool.
 - Patches for free5GC: NRF (`aanfInfoList`, discovery of the AAnF by Routing Indicator, `aud` of the access token), UDM (AKMA indication and Routing Indicator), AUSF (K_AKMA, A-KID and registration at the AAnF), NEF (`3gpp-akma`), `openapi` (Naanf_AKMA), configuration, `run.sh` and the test bench.

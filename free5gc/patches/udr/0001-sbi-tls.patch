@@ -1,0 +1,176 @@
+diff --git a/go.mod b/go.mod
+index ed17824..947b9a9 100644
+--- a/go.mod
++++ b/go.mod
+@@ -84,3 +84,7 @@ require (
+ 	google.golang.org/protobuf v1.36.1 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ )
++
++replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi
++
++replace github.com/free5gc/util => ../../../akma-free5gc/free5gc/build/util
+diff --git a/internal/context/context.go b/internal/context/context.go
+index 92b1ae8..34e3ba4 100644
+--- a/internal/context/context.go
++++ b/internal/context/context.go
+@@ -188,8 +188,13 @@ func initNfService(serviceName []models.ServiceName, version string) (
+ 	return
+ }
+ 
++// GetIPv4Uri returns the URI of this UDR, by its FQDN when it has one.
+ func GetIPv4Uri() string {
+-	return fmt.Sprintf("%s://%s:%d", udrContext.UriScheme, udrContext.RegisterIPv4, udrContext.SBIPort)
++	host := udrContext.RegisterIPv4
++	if fqdn := factory.UdrConfig.GetSbiFqdn(); fqdn != "" {
++		host = fqdn
++	}
++	return fmt.Sprintf("%s://%s:%d", udrContext.UriScheme, host, udrContext.SBIPort)
+ }
+ 
+ func (context *UDRContext) GetIPv4GroupUri(udrServiceType UDRServiceType) string {
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+index 42dc549..f09a0df 100644
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -12,6 +12,7 @@ import (
+ 	"github.com/free5gc/openapi/nrf/NFManagement"
+ 	udr_context "github.com/free5gc/udr/internal/context"
+ 	"github.com/free5gc/udr/internal/logger"
++	"github.com/free5gc/udr/pkg/factory"
+ 	sbi_metrics "github.com/free5gc/util/metrics/sbi"
+ )
+ 
+@@ -49,6 +50,7 @@ func (ns *NrfService) buildNFProfile(context *udr_context.UDRContext) (models.Nr
+ 
+ 	profile := models.NrfNfManagementNfProfile{
+ 		NfInstanceId:  context.NfId,
++		Fqdn:          factory.UdrConfig.GetSbiFqdn(),
+ 		NfType:        models.NrfNfManagementNfType_UDR,
+ 		NfStatus:      models.NrfNfManagementNfStatus_REGISTERED,
+ 		Ipv4Addresses: []string{context.RegisterIPv4},
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index 6c19911..25a3d84 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/gin-gonic/gin"
+ 
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
+ 	"github.com/free5gc/udr/internal/logger"
+ 	"github.com/free5gc/udr/internal/sbi/processor"
+ 	"github.com/free5gc/udr/internal/util"
+@@ -137,6 +138,7 @@ func (s *Server) secureServe() error {
+ 		keyPath = factory.UdrDefaultPrivateKeyPath
+ 	}
+ 
++	sbitls.ConfigureServer(s.httpServer)
+ 	return s.httpServer.ListenAndServeTLS(pemPath, keyPath)
+ }
+ 
+diff --git a/internal/util/router_auth_check.go b/internal/util/router_auth_check.go
+index bce5f54..6ad3d08 100644
+--- a/internal/util/router_auth_check.go
++++ b/internal/util/router_auth_check.go
+@@ -1,11 +1,10 @@
+ package util
+ 
+ import (
+-	"net/http"
+-
+ 	"github.com/gin-gonic/gin"
+ 
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/oauth"
+ 	udr_context "github.com/free5gc/udr/internal/context"
+ 	"github.com/free5gc/udr/internal/logger"
+ )
+@@ -23,9 +22,12 @@ func NewRouterAuthorizationCheck(serviceName models.ServiceName) *RouterAuthoriz
+ func (rac *RouterAuthorizationCheck) Check(c *gin.Context, udrContext udr_context.NFContext) {
+ 	token := c.Request.Header.Get("Authorization")
+ 	err := udrContext.AuthorizationCheck(token, rac.serviceName)
++	if err == nil {
++		err = oauth.CheckTokenPeer(token, c.Request.TLS)
++	}
+ 	if err != nil {
+ 		logger.UtilLog.Debugf("RouterAuthorizationCheck: Check Unauthorized: %s", err.Error())
+-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
++		oauth.WriteTokenError(c.Writer, c.Request, err)
+ 		c.Abort()
+ 		return
+ 	}
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 8b0bf78..a3e66b1 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -141,11 +141,13 @@ type Sbi struct {
+ 	BindingIPv4 string `yaml:"bindingIPv4,omitempty" valid:"host,optional"` // IP used to run the server in the node.
+ 	Port        int    `yaml:"port" valid:"port,required"`
+ 	Tls         *Tls   `yaml:"tls,omitempty" valid:"optional"`
++	Fqdn        string `yaml:"fqdn,omitempty" valid:"dns,optional"` // FQDN of the NF; without it, URIs by IP address
+ }
+ 
+ type Tls struct {
+ 	Pem string `yaml:"pem,omitempty" valid:"type(string),minstringlength(1),required"`
+ 	Key string `yaml:"key,omitempty" valid:"type(string),minstringlength(1),required"`
++	Ca  string `yaml:"ca,omitempty" valid:"optional"` // CA of the peers on the SBI
+ }
+ 
+ func (t *Tls) validate() (bool, error) {
+@@ -380,3 +382,24 @@ func (c *Config) GetMetricsNamespace() string {
+ 	}
+ 	return UdrMetricsDefaultNamespace
+ }
++
++// GetCertCaPath returns the file with the CA of the peers on the SBI.
++func (c *Config) GetCertCaPath() string {
++	c.RLock()
++	defer c.RUnlock()
++	if c.Configuration.Sbi.Tls != nil {
++		return c.Configuration.Sbi.Tls.Ca
++	}
++	return ""
++}
++
++// GetSbiFqdn returns the FQDN of this NF (TS 29.510 cl. 6.1.6.2.2 NOTE 1),
++// empty when the URIs go by IP address.
++func (c *Config) GetSbiFqdn() string {
++	if c == nil || c.Configuration == nil || c.Configuration.Sbi == nil {
++		return ""
++	}
++	c.RLock()
++	defer c.RUnlock()
++	return c.Configuration.Sbi.Fqdn
++}
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+index f401c8b..f56f53a 100644
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	"github.com/free5gc/openapi"
+ 	"github.com/free5gc/openapi/nrf/NFManagement"
++	"github.com/free5gc/openapi/sbitls"
+ 	udr_context "github.com/free5gc/udr/internal/context"
+ 	"github.com/free5gc/udr/internal/logger"
+ 	"github.com/free5gc/udr/internal/sbi"
+@@ -55,6 +56,18 @@ func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*Ud
+ 	udr.SetLogLevel(cfg.GetLogLevel())
+ 	udr.SetReportCaller(cfg.GetLogReportCaller())
+ 
++	if cfg.Configuration.Sbi.Scheme == "https" {
++		if err := sbitls.Init(sbitls.Config{
++			Certificate:  cfg.GetCertPemPath(),
++			Key:          cfg.GetCertKeyPath(),
++			CA:           cfg.GetCertCaPath(),
++			NfInstanceId: cfg.GetNfInstanceId(),
++			Logger:       logger.InitLog,
++		}); err != nil {
++			return nil, err
++		}
++	}
++
+ 	processor := processor.NewProcessor(udr)
+ 	udr.processor = processor
+ 

@@ -1,0 +1,56 @@
+info:
+  version: 1.0.0
+  description: CCF initial local configuration
+
+configuration:
+  ccfName: ccf # issuer of the onboarding credentials (TS 33.122 cl. 6.1)
+  capif1e: # interface of the API invokers (TS 23.222 cl. 6.4.3): HTTPS, TS 33.122 cl. 6.1 and 6.3.1.1
+    bindingIPv4: 192.168.16.130 # reachable from the AF host; not 0.0.0.0: it also builds the Location headers
+    port: 8020 # not used by any free5GC NF nor by the AAnF (8010)
+    certificate: cert/ccf.pem # made by make-capif-certs.sh, with this address in subjectAltName
+    key: cert/ccf.key
+  internal: # interface of the API provider, CAPIF-3/4 (TS 23.222 cl. 6.4.6, 6.4.7): mutual TLS with the operator CA
+    bindingIPv4: 127.0.0.1
+    port: 8020
+    fqdn: ccf.5gc.mnc093.mcc208.3gppnetwork.org # in /etc/hosts; the API provider reaches the CCF by this name
+    certificate: cert/sba/ccf-internal.pem # made by make-sba-certs.sh
+    key: cert/sba/ccf-internal.key
+    ca: cert/sba/sba-ca.pem
+  ca: # signs the client certificates of the API invokers (TS 33.122 cl. 6.1 step 4)
+    certificate: cert/ccf-ca.pem
+    key: cert/ccf-ca.key # ECDSA P-384, at least as strong as the keys it certifies (TS 33.310 cl. 6.1.1)
+    invokerCertLifetime: 8760h
+    crlUri: http://192.168.16.130:8030/ccf-ca.crl # goes in the invoker certificates (TS 33.310 cl. 6.1.3a)
+    crlFile: cert/crl/ccf-ca.crl # served by the CRL service; signed when an invoker offboards (TS 33.122 cl. 6.8)
+  token: # access tokens (TS 29.222 cl. 5.6.2.3.2; TS 33.122 Annex C)
+    key: cert/ccf-token.key # ECDSA P-256, signed with ES256 (TS 33.210 cl. 6.3.3.1); the NEF checks with cert/ccf-token.pub.pem
+    lifetime: 10m
+  credentialKey: cert/ccf-credential.key # ECDSA P-256, ES256; onboarding credentials: "ccf credential --profile <name>"
+  providers: # API provider domain functions, fixed by configuration
+    - name: nef
+      nfInstanceId: 8e73ad07-906c-4952-93ac-cd32bbb076ed # the client certificate of CAPIF-3/4 (TS 33.310 cl. 6.1.3c.3)
+      apfId: nef-apf # publishes 3gpp-akma (TS 29.522 cl. 7.1)
+      aefIds:
+        - nef-aef
+  invokerProfiles: # AFs that may onboard; the onboarding credential names the profile
+    - name: af1-external
+      apis:
+        - 3gpp-akma
+      afIds: # AF_IDs the NEF accepts from invokers of this profile (TS 33.535 cl. 6.3 step 2)
+        - af1.akma.example.0100011301 # Digest in TLS 1.3 (TS 24.109 K.2), TLS_AES_128_GCM_SHA256 (TS 33.220 H.3)
+        - af1.akma.example.0100011302 # TLS_AES_256_GCM_SHA384
+        - af1.akma.example.0100011303 # TLS_CHACHA20_POLY1305_SHA256
+        - af1.akma.example.010001C02B # Digest in TLS 1.2, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - af1.akma.example.010001C02C # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - af1.akma.example.0100000007 # TLS 1.3 with K_AF as pre-shared key (K.3.3)
+        - af1.akma.example.010001D001 # (D)TLS 1.2, TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256 (K.3.2)
+        - af1.akma.example.0100000009 # DTLS 1.3 with K_AF as pre-shared key (TS 33.535 Annex C)
+        - af1.akma.example.0100000008 # OSCORE with a context from K_AF (TS 33.535 Annex D)
+        - af1.akma.example.FF00000001 # simplified Ua*, test only (TS 33.220 H.2 NOTE 2)
+        - af4.akma.example.FF00000001 # test only: outside the policy of the NEF
+        - af5.akma.example.FF00000001 # test only: accepted by the NEF and not by the AAnF (negative test E07)
+
+logger: # log output setting
+  enable: true # true or false
+  level: info # how detailed to output, value: trace, debug, info, warn, error, fatal, panic
+  reportCaller: false # enable the caller report or not, value: true or false

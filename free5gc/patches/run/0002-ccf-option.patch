@@ -1,0 +1,51 @@
+diff --git a/force_kill.sh b/force_kill.sh
+index 4e95c2e..0f20640 100755
+--- a/force_kill.sh
++++ b/force_kill.sh
+@@ -21,7 +21,7 @@ if [ $# -ne 0 ]; then
+     done
+ fi
+ 
+-NF_LIST="nrf amf smf udr pcf udm nssf ausf bsf n3iwf upf chf nef tngf aanf"
++NF_LIST="nrf amf smf udr pcf udm nssf ausf bsf n3iwf upf chf nef tngf aanf ccf"
+ 
+ for NF in ${NF_LIST}; do
+     sudo killall -9 ${NF}
+diff --git a/run.sh b/run.sh
+index 3f68854..db277b9 100755
+--- a/run.sh
++++ b/run.sh
+@@ -8,6 +8,7 @@ N3IWF_ENABLE=0
+ TNGF_ENABLE=0
+ BSF_ENABLE=0
+ AANF_ENABLE=0
++CCF_ENABLE=0
+ 
+ PID_LIST=()
+ echo $$ > run.pid
+@@ -51,6 +52,9 @@ if [ $# -ne 0 ]; then
+             -aanf)
+                 AANF_ENABLE=1
+                 ;;
++            -ccf)
++                CCF_ENABLE=1
++                ;;
+         esac
+         shift
+     done
+@@ -166,6 +170,15 @@ else
+     echo "AANF disabled - skipping AANF service"
+ fi
+ 
++# Add the CCF (CAPIF core function) just before the NEF, only if enabled:
++# the NEF publishes its AKMA API at the CCF when it starts
++if [ $CCF_ENABLE -ne 0 ]; then
++    NF_LIST="${NF_LIST/ nef/ ccf nef}"
++    echo "CCF enabled - will start CCF service before NEF"
++else
++    echo "CCF disabled - skipping CCF service"
++fi
++
+ export GIN_MODE=release
+ 
+ for NF in ${NF_LIST}; do

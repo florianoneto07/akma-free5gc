@@ -1,0 +1,23 @@
+diff --git a/go.mod b/go.mod
+index 6c28c94..7e30ddb 100644
+--- a/go.mod
++++ b/go.mod
+@@ -177,3 +177,5 @@ replace github.com/florianoneto07/akma-free5gc/shared/akma => ../../akma-free5gc
+ replace github.com/florianoneto07/akma-free5gc/free5gc/aanf => ../../akma-free5gc/free5gc/aanf
+ 
+ replace github.com/free5gc/openapi => ../../akma-free5gc/free5gc/build/openapi-test
++
++replace github.com/free5gc/util => ../../akma-free5gc/free5gc/build/util
+diff --git a/nfs_setup.go b/nfs_setup.go
+index 4d346dc..d31ef56 100644
+--- a/nfs_setup.go
++++ b/nfs_setup.go
+@@ -262,7 +262,7 @@ func NewAanfStruct(ctx context.Context) app.NFstruct {
+ 		fmt.Printf("AANF Config failed: %v\n", err)
+ 	}
+ 	aanf_ctx, aanf_cancel := context.WithCancel(ctx)
+-	aanfApp, errApp := aanf_service.NewApp(aanf_ctx, cfg, "")
++	aanfApp, errApp := aanf_service.NewApp(aanf_ctx, cfg)
+ 	if errApp != nil {
+ 		fmt.Printf("AANF NewApp failed: %v\n", errApp)
+ 	}

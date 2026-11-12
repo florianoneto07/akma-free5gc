@@ -1,0 +1,476 @@
+diff --git a/internal/sbi/consumer/aanf_service.go b/internal/sbi/consumer/aanf_service.go
+index 07bbffc..cb2d35b 100644
+--- a/internal/sbi/consumer/aanf_service.go
++++ b/internal/sbi/consumer/aanf_service.go
+@@ -2,10 +2,14 @@ package consumer
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"net/http"
+ 	"sync"
++	"time"
+ 
++	"github.com/florianoneto07/akma-free5gc/shared/akma/akid"
++	"github.com/free5gc/nef/internal/logger"
+ 	"github.com/free5gc/openapi"
+ 	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
+ 	"github.com/free5gc/openapi/models"
+@@ -19,45 +23,91 @@ type naanfService struct {
+ 
+ 	mu      sync.RWMutex
+ 	clients map[string]*Naanf_AKMA.APIClient
++	// found keeps the AAnF found at the NRF for each Routing Indicator, ""
++	// for the default one, during the validity period of the search result
++	// (TS 29.510 cl. 5.3.2.2.1).
++	found map[string]Aanf
+ }
+ 
+-func (s *naanfService) getClient(uri string) *Naanf_AKMA.APIClient {
++// Aanf is an AAnF found at the NRF: its apiRoot, its NF instance ID and until
++// when the result of the search is valid.
++type Aanf struct {
++	Uri     string
++	NfId    string
++	key     string
++	expires time.Time
++}
++
++// getClient returns the client of the AAnF. Its requests carry the
++// User-Agent with the NF type and the 3gpp-Sbi-NF-Peer-Info header
++// (TS 29.500 table 5.2.2.2-1 and cl. 5.2.3.2.21).
++func (s *naanfService) getClient(aanf Aanf) *Naanf_AKMA.APIClient {
++	key := aanf.Uri + " " + aanf.NfId
+ 	s.mu.RLock()
+-	client, ok := s.clients[uri]
++	client, ok := s.clients[key]
+ 	s.mu.RUnlock()
+ 	if ok {
+ 		return client
+ 	}
++	self := s.consumer.Context().NfInstID()
+ 	cfg := Naanf_AKMA.NewConfiguration()
+-	cfg.SetBasePath(uri)
++	cfg.SetBasePath(aanf.Uri)
+ 	cfg.SetMetrics(sbi_metrics.SbiMetricHook)
+ 	cfg.SetHTTPClient(http.DefaultClient)
++	cfg.SetUserAgent(openapi.NfAgent(models.NrfNfManagementNfType_NEF, self))
++	if info := openapi.NfPeerInfo(self, aanf.NfId); info != "" {
++		cfg.AddDefaultHeader(openapi.HeaderNfPeerInfo, info)
++	}
+ 	client = Naanf_AKMA.NewAPIClient(cfg)
+ 
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+-	s.clients[uri] = client
++	s.clients[key] = client
+ 	return client
+ }
+ 
+-// AanfUri discovers at the NRF an AAnF that serves the Routing Indicator rid
+-// (3GPP TS 33.535 clause 6.7; TS 29.510 table 6.2.3.2.3.1-1).
+-func (s *naanfService) AanfUri(rid string) (string, error) {
++// AanfFor finds at the NRF an AAnF that serves the Routing Indicator rid
++// (3GPP TS 33.535 clause 6.7; TS 29.510 table 6.2.3.2.3.1-1). The search goes
++// without the Routing Indicator when it is the default one, "0" (TS 23.003
++// clause 2.2B): then "the AAnF NF consumer can select any AAnF instance
++// within the home network of the UE". A result is reused while it is valid
++// (TS 29.510 clause 5.3.2.2.1).
++func (s *naanfService) AanfFor(rid string) (Aanf, error) {
++	key := rid
++	if rid == string(akid.DefaultRID) {
++		key = ""
++	}
++	if found, ok := s.lookup(key); ok {
++		logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (search result reused)", rid, found.Uri)
++		return found, nil
++	}
+ 	param := &NFDiscovery.SearchNFInstancesRequest{
+-		ServiceNames:     []models.ServiceName{models.ServiceName_NAANF_AKMA},
+-		RoutingIndicator: &rid,
++		ServiceNames: []models.ServiceName{models.ServiceName_NAANF_AKMA},
++	}
++	if key != "" {
++		param.RoutingIndicator = &rid
+ 	}
+-	_, uri, err := s.consumer.SearchNFInstances(s.consumer.Config().NrfUri(), models.ServiceName_NAANF_AKMA,
+-		models.NrfNfManagementNfType_AANF, models.NrfNfManagementNfType_NEF, param)
++	profile, uri, validity, err := s.consumer.SearchNFInstancesValidity(s.consumer.Config().NrfUri(),
++		models.ServiceName_NAANF_AKMA, models.NrfNfManagementNfType_AANF, models.NrfNfManagementNfType_NEF, param)
+ 	if err != nil {
+-		return "", fmt.Errorf("AAnF discovery: %w", err)
++		return Aanf{}, fmt.Errorf("AAnF discovery: %w", err)
+ 	}
+-	return uri, nil
++	found := Aanf{
++		Uri: uri, NfId: profile.NfInstanceId, key: key,
++		expires: time.Now().Add(time.Duration(validity) * time.Second),
++	}
++	s.store(found)
++	if key == "" {
++		logger.AkmaLog.Infof("AAnF for the default Routing Indicator: %s (discovered at the NRF, any AAnF)", uri)
++	} else {
++		logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (discovered at the NRF)", rid, uri)
++	}
++	return found, nil
+ }
+ 
+-// GetAKMAAPPKeyMaterial sends Naanf_AKMA_ApplicationKey_Get to the AAnF at
+-// uri (3GPP TS 29.535 clause 4.2.2.3.2).
+-func (s *naanfService) GetAKMAAPPKeyMaterial(ctx context.Context, uri string, req models.AkmaAfKeyRequest) (
++// GetAKMAAPPKeyMaterial sends Naanf_AKMA_ApplicationKey_Get to the AAnF
++// (3GPP TS 29.535 clause 4.2.2.3.2).
++func (s *naanfService) GetAKMAAPPKeyMaterial(ctx context.Context, aanf Aanf, req models.AkmaAfKeyRequest) (
+ 	*Naanf_AKMA.GetAKMAAPPKeyMaterialResponse, error,
+ ) {
+ 	// The service and the scopes of K_AF and of the SUPI (3GPP TS 29.535
+@@ -76,5 +126,37 @@ func (s *naanfService) GetAKMAAPPKeyMaterial(ctx context.Context, uri string, re
+ 	}
+ 	r := &Naanf_AKMA.GetAKMAAPPKeyMaterialRequest{}
+ 	r.SetAkmaAfKeyRequest(req)
+-	return s.getClient(uri).RetrieveTheAKMAApplicationKeyMaterialCollectionApi.GetAKMAAPPKeyMaterial(ctx, r)
++	rsp, err := s.getClient(aanf).RetrieveTheAKMAApplicationKeyMaterialCollectionApi.GetAKMAAPPKeyMaterial(ctx, r)
++	var apiErr openapi.GenericOpenAPIError
++	if err != nil && !errors.As(err, &apiErr) {
++		// No answer from the AAnF found: the next request
++		// searches again.
++		s.forget(aanf.key)
++	}
++	return rsp, err
++}
++
++func (s *naanfService) lookup(key string) (Aanf, bool) {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	found, ok := s.found[key]
++	if !ok || !time.Now().Before(found.expires) {
++		return Aanf{}, false
++	}
++	return found, true
++}
++
++func (s *naanfService) store(found Aanf) {
++	if !time.Now().Before(found.expires) {
++		return
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.found[found.key] = found
++}
++
++func (s *naanfService) forget(key string) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	delete(s.found, key)
+ }
+diff --git a/internal/sbi/consumer/consumer.go b/internal/sbi/consumer/consumer.go
+index 08d0056..4295339 100644
+--- a/internal/sbi/consumer/consumer.go
++++ b/internal/sbi/consumer/consumer.go
+@@ -52,6 +52,7 @@ func NewConsumer(nef nef) (*Consumer, error) {
+ 	c.naanfService = &naanfService{
+ 		consumer: c,
+ 		clients:  make(map[string]*Naanf_AKMA.APIClient),
++		found:    make(map[string]Aanf),
+ 	}
+ 
+ 	c.ccfService = &ccfService{
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+index c3c8c35..c2ff760 100644
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -223,35 +223,45 @@ func (s *nnrfService) DeregisterNFInstance() (problemDetails *models.ProblemDeta
+ func (s *nnrfService) SearchNFInstances(nrfUri string, srvName models.ServiceName, targetNfType,
+ 	requestNfType models.NrfNfManagementNfType, param *NFDiscovery.SearchNFInstancesRequest,
+ ) (*models.NrfNfDiscoveryNfProfile, string, error) {
++	nfProf, uri, _, err := s.SearchNFInstancesValidity(nrfUri, srvName, targetNfType, requestNfType, param)
++	return nfProf, uri, err
++}
++
++// SearchNFInstancesValidity is SearchNFInstances that also returns the
++// validity period of the search result, in seconds (TS 29.510
++// table 6.2.6.2.2-1), for its reuse (cl. 5.3.2.2.1).
++func (s *nnrfService) SearchNFInstancesValidity(nrfUri string, srvName models.ServiceName, targetNfType,
++	requestNfType models.NrfNfManagementNfType, param *NFDiscovery.SearchNFInstancesRequest,
++) (*models.NrfNfDiscoveryNfProfile, string, int32, error) {
+ 	client := s.getNFDiscoveryClient(nrfUri)
+ 
+ 	if client == nil {
+-		return nil, "", openapi.ReportError("nrf not found")
++		return nil, "", 0, openapi.ReportError("nrf not found")
+ 	}
+ 
+ 	ctx, _, err := s.consumer.Context().GetTokenCtx(models.ServiceName_NNRF_DISC, models.NrfNfManagementNfType_NRF)
+ 	if err != nil {
+-		return nil, "", err
++		return nil, "", 0, err
+ 	}
+ 
+ 	param.TargetNfType = &targetNfType
+ 	param.RequesterNfType = &requestNfType
+ 	res, err := client.NFInstancesStoreApi.SearchNFInstances(ctx, param)
+-	var result *models.SearchResult
+ 	if err != nil {
+ 		logger.ConsumerLog.Errorf("SearchNFInstances failed: %+v", err)
+-		return nil, "", err
++		return nil, "", 0, err
+ 	}
+-	if res != nil {
+-		result = &res.SearchResult
++	if res == nil {
++		return nil, "", 0, openapi.ReportError("SearchNFInstances: no search result")
+ 	}
++	result := &res.SearchResult
+ 
+ 	nfProf, uri, err := getProfileAndUri(result, srvName)
+ 	if err != nil {
+ 		logger.ConsumerLog.Errorf("%s", err.Error())
+-		return nil, "", err
++		return nil, "", 0, err
+ 	}
+-	return nfProf, uri, nil
++	return nfProf, uri, result.ValidityPeriod, nil
+ }
+ 
+ func getProfileAndUri(resp *models.SearchResult, srvName models.ServiceName) (
+diff --git a/internal/sbi/processor/akma.go b/internal/sbi/processor/akma.go
+index e1a425e..f121f39 100644
+--- a/internal/sbi/processor/akma.go
++++ b/internal/sbi/processor/akma.go
+@@ -76,18 +76,21 @@ func (p *Processor) RetrieveAkmaApplicationKey(c *gin.Context, req *models.AkmaA
+ 
+ 	// TS 33.535 clause 6.3 step 2 and clause 6.7: AAnF selection with the
+ 	// Routing Indicator of the A-KID.
+-	uri, err := p.Consumer().AanfUri(string(id.RID))
++	aanf, err := p.Consumer().AanfFor(string(id.RID))
+ 	if err != nil {
+ 		logger.AkmaLog.Warnf("No AAnF for Routing Indicator %s: %v", id.RID, err)
+ 		WriteAkmaProblem(c, serviceUnavailable("no AAnF available"))
+ 		return
+ 	}
+ 
+-	// TS 33.535 clause 6.3 step 3.
+-	rsp, err := p.Consumer().GetAKMAAPPKeyMaterial(c.Request.Context(), uri, models.AkmaAfKeyRequest{
+-		AfId:    af.Transport(),
+-		AKId:    req.AKId,
+-		AnonInd: req.AnonInd,
++	// TS 33.535 clause 6.3 step 3: "The NEF sends a
++	// Naanf_AKMA_ApplicationKey_Get request to the selected AAnF with the
++	// A-KID", without "anonInd": ApplicationKey_AnonUser_Get is only for the
++	// AF (TS 29.535 table 4.2.2.1-1). The UE Id not needed indication of the
++	// AF is for step 5: the NEF gives no GPSI then.
++	rsp, err := p.Consumer().GetAKMAAPPKeyMaterial(c.Request.Context(), aanf, models.AkmaAfKeyRequest{
++		AfId: af.Transport(),
++		AKId: req.AKId,
+ 	})
+ 	if err != nil {
+ 		p.relayAanfError(c, af, req.AKId, err)
+diff --git a/internal/sbi/processor/akma_test.go b/internal/sbi/processor/akma_test.go
+index 11ef638..15ae7ec 100644
+--- a/internal/sbi/processor/akma_test.go
++++ b/internal/sbi/processor/akma_test.go
+@@ -38,9 +38,22 @@ func setAkmaPolicy(t *testing.T) {
+ }
+ 
+ // initNRFDiscAANFStub answers the AAnF discovery for the Routing Indicator
+-// 0000 (3GPP TS 29.510 table 6.2.3.2.3.1-1).
++// 0000 (3GPP TS 29.510 table 6.2.3.2.3.1-1). The result is valid for 0 s:
++// each request searches again.
+ func initNRFDiscAANFStub(found bool) {
+-	result := models.SearchResult{ValidityPeriod: 100}
++	result := aanfSearchResult(found, 0)
++	gock.New("http://127.0.0.10:8000/nnrf-disc/v1").
++		Get("/nf-instances").
++		MatchParam("target-nf-type", "AANF").
++		MatchParam("requester-nf-type", "NEF").
++		MatchParam("routing-indicator", "0000").
++		Reply(http.StatusOK).
++		JSON(result)
++}
++
++// aanfSearchResult is the search result with the AAnF at akmaAanfUri.
++func aanfSearchResult(found bool, validity int32) models.SearchResult {
++	result := models.SearchResult{ValidityPeriod: validity}
+ 	if found {
+ 		result.NfInstances = []models.NrfNfDiscoveryNfProfile{{
+ 			NfInstanceId: "aanf-unit-testing",
+@@ -60,22 +73,17 @@ func initNRFDiscAANFStub(found bool) {
+ 			}},
+ 		}}
+ 	}
+-	gock.New("http://127.0.0.10:8000/nnrf-disc/v1").
+-		Get("/nf-instances").
+-		MatchParam("target-nf-type", "AANF").
+-		MatchParam("requester-nf-type", "NEF").
+-		MatchParam("routing-indicator", "0000").
+-		Reply(http.StatusOK).
+-		JSON(result)
++	return result
+ }
+ 
+ // initAANFRetrieveStub answers Naanf_AKMA_ApplicationKey_Get for the request
+-// the NEF must send.
+-func initAANFRetrieveStub(anon bool, status int, body string) {
+-	req := map[string]any{"afId": akmaAfId, "aKId": akmaAKId}
+-	if anon {
+-		req["anonInd"] = true
+-	}
++// the NEF must send: never "anonInd" (TS 33.535 clause 6.3 step 3).
++func initAANFRetrieveStub(status int, body string) {
++	initAANFRetrieveStubFor(akmaAKId, status, body)
++}
++
++func initAANFRetrieveStubFor(aKId string, status int, body string) {
++	req := map[string]any{"afId": akmaAfId, "aKId": aKId}
+ 	rsp := gock.New(akmaAanfUri + "/naanf-akma/v1").
+ 		Post("/retrieve-applicationkey").
+ 		MatchType("json").
+@@ -113,7 +121,7 @@ func TestRetrieveAkmaApplicationKey(t *testing.T) {
+ 
+ 	t.Run("K_AF relayed without the SUPI", func(t *testing.T) {
+ 		initNRFDiscAANFStub(true)
+-		initAANFRetrieveStub(false, http.StatusOK, aanfOK)
++		initAANFRetrieveStub(http.StatusOK, aanfOK)
+ 
+ 		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
+ 		require.Equal(t, http.StatusOK, w.Code)
+@@ -126,9 +134,11 @@ func TestRetrieveAkmaApplicationKey(t *testing.T) {
+ 		require.NotContains(t, rsp, "gpsi")
+ 	})
+ 
+-	t.Run("anonymous access relayed to the AAnF", func(t *testing.T) {
++	// The AAnF gets Naanf_AKMA_ApplicationKey_Get, without
++	// "anonInd", and answers with the SUPI, which the AF does not get.
++	t.Run("anonymous access: ApplicationKey_Get to the AAnF", func(t *testing.T) {
+ 		initNRFDiscAANFStub(true)
+-		initAANFRetrieveStub(true, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
++		initAANFRetrieveStub(http.StatusOK, aanfOK)
+ 
+ 		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId, AnonInd: true}, akmaAfAddr)
+ 		require.Equal(t, http.StatusOK, w.Code)
+@@ -186,7 +196,7 @@ func TestRetrieveAkmaApplicationKey(t *testing.T) {
+ 	for _, tc := range errorCases {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			initNRFDiscAANFStub(true)
+-			initAANFRetrieveStub(false, tc.status, tc.body)
++			initAANFRetrieveStub(tc.status, tc.body)
+ 
+ 			w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
+ 			require.Equal(t, tc.wantCode, w.Code)
+@@ -196,7 +206,7 @@ func TestRetrieveAkmaApplicationKey(t *testing.T) {
+ 
+ 	t.Run("204 of the AAnF relayed", func(t *testing.T) {
+ 		initNRFDiscAANFStub(true)
+-		initAANFRetrieveStub(false, http.StatusNoContent, "")
++		initAANFRetrieveStub(http.StatusNoContent, "")
+ 
+ 		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
+ 		require.Equal(t, http.StatusNoContent, w.Code)
+@@ -221,7 +231,7 @@ func TestAkmaNoKeyInLogs(t *testing.T) {
+ 	defer logger.Log.SetOutput(out)
+ 
+ 	initNRFDiscAANFStub(true)
+-	initAANFRetrieveStub(false, http.StatusOK,
++	initAANFRetrieveStub(http.StatusOK,
+ 		`{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z","supi":"`+akmaSupi+`"}`)
+ 	w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
+ 	require.Equal(t, http.StatusOK, w.Code)
+@@ -231,3 +241,75 @@ func TestAkmaNoKeyInLogs(t *testing.T) {
+ 	require.False(t, strings.Contains(strings.ToLower(logs), akmaKaf), "K_AF in the log")
+ 	require.NotContains(t, logs, akmaSupi)
+ }
++
++// akidWithRid is the A-KID of the vector with another Routing Indicator; the
++// AAnF of these tests does not check it.
++func akidWithRid(rid string) string {
++	return "rid" + rid + strings.TrimPrefix(akmaAKId, "rid0000")
++}
++
++// With the default Routing Indicator, "0" (TS 23.003
++// clause 2.2B), the search goes without it (TS 33.535 clause 6.7).
++func TestAkmaDefaultRoutingIndicator(t *testing.T) {
++	setAkmaPolicy(t)
++	gock.New("http://127.0.0.10:8000/nnrf-disc/v1").
++		Get("/nf-instances").
++		MatchParam("target-nf-type", "AANF").
++		AddMatcher(func(req *http.Request, _ *gock.Request) (bool, error) {
++			return !req.URL.Query().Has("routing-indicator"), nil
++		}).
++		Reply(http.StatusOK).
++		JSON(aanfSearchResult(true, 0))
++	aKId := akidWithRid("0")
++	initAANFRetrieveStubFor(aKId, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
++
++	w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: aKId}, akmaAfAddr)
++	require.Equal(t, http.StatusOK, w.Code)
++}
++
++// The result of the search is reused during its validity
++// period (TS 29.510 clause 5.3.2.2.1): one search for two requests.
++func TestAkmaReusesSearch(t *testing.T) {
++	setAkmaPolicy(t)
++	gock.New("http://127.0.0.10:8000/nnrf-disc/v1").
++		Get("/nf-instances").
++		MatchParam("routing-indicator", "0001").
++		Reply(http.StatusOK).
++		JSON(aanfSearchResult(true, 100))
++	aKId := akidWithRid("0001")
++	for range 2 {
++		initAANFRetrieveStubFor(aKId, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
++		w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: aKId}, akmaAfAddr)
++		require.Equal(t, http.StatusOK, w.Code, "the second request has no search to answer it")
++	}
++}
++
++// The User-Agent with the NF type and the
++// 3gpp-Sbi-NF-Peer-Info header (TS 29.500 table 5.2.2.2-1, clause
++// 5.2.3.2.21).
++func TestAkmaAanfHeaders(t *testing.T) {
++	setAkmaPolicy(t)
++	const self, aanfId = "8e73ad07-906c-4952-93ac-cd32bbb076ed", "aanf-headers-testing"
++	saved := nefApp.Context().NfInstID()
++	nefApp.Context().SetNfInstID(self)
++	t.Cleanup(func() { nefApp.Context().SetNfInstID(saved) })
++	// Another AAnF instance, for a client made with this NF instance ID.
++	result := aanfSearchResult(true, 0)
++	result.NfInstances[0].NfInstanceId = aanfId
++	gock.New("http://127.0.0.10:8000/nnrf-disc/v1").
++		Get("/nf-instances").
++		MatchParam("routing-indicator", "0002").
++		Reply(http.StatusOK).
++		JSON(result)
++	aKId := akidWithRid("0002")
++	gock.New(akmaAanfUri+"/naanf-akma/v1").
++		Post("/retrieve-applicationkey").
++		MatchHeader("User-Agent", "^NEF-"+self+"$").
++		MatchHeader("3gpp-Sbi-NF-Peer-Info", "^srcinst="+self+"; dstinst="+aanfId+"$").
++		Reply(http.StatusOK).
++		SetHeader("Content-Type", "application/json").
++		BodyString(`{"kaf":"` + akmaKaf + `","expiry":"2026-10-19T20:00:00Z"}`)
++
++	w := akmaRetrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: aKId}, akmaAfAddr)
++	require.Equal(t, http.StatusOK, w.Code)
++}
+diff --git a/internal/sbi/processor/capif_test.go b/internal/sbi/processor/capif_test.go
+index 56f01ce..62ba9ee 100644
+--- a/internal/sbi/processor/capif_test.go
++++ b/internal/sbi/processor/capif_test.go
+@@ -378,7 +378,7 @@ func TestCapifRetrieve(t *testing.T) {
+ 	}
+ 
+ 	initNRFDiscAANFStub(true)
+-	initAANFRetrieveStub(false, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
++	initAANFRetrieveStub(http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
+ 	w := retrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
+ 	require.Equal(t, http.StatusOK, w.Code)
+ 	require.Contains(t, buf.String(), "Access token of API invoker "+capifInvokerId+" accepted for AF_ID "+akmaAfId)
+@@ -393,7 +393,7 @@ func TestCapifRetrieve(t *testing.T) {
+ 
+ 	// With CAPIF, the address does not count.
+ 	initNRFDiscAANFStub(true)
+-	initAANFRetrieveStub(false, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
++	initAANFRetrieveStub(http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
+ 	w = retrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, "192.0.2.99")
+ 	require.Equal(t, http.StatusOK, w.Code)
+ 

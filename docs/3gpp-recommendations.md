@@ -1,8 +1,8 @@
 # Recommendations to 3GPP
 
-Inconsistencies and gaps found while implementing AKMA (TS 33.535, Release 19) on free5GC and UERANSIM. Each item was checked on 28 October 2026 against the latest version of the specification published at <https://www.3gpp.org/ftp/Specs/archive/>; the version is given in the item.
+Inconsistencies and gaps found while implementing AKMA (TS 33.535, Release 19) on free5GC and UERANSIM. Items A to Z were checked on 28 October 2026, and items AA to AP between 29 October and 12 November 2026, against the latest version of the specification published at <https://www.3gpp.org/ftp/Specs/archive/>; the version is given in the item.
 
-Items A to P are contradictions or errors in the text. Items Q to Z are gaps: the text does not say enough for two implementations to interoperate, and this repository had to choose. Each item has the fields of a Change Request, so that a 3GPP member can take it to the working group in charge. Nothing here has been submitted to 3GPP yet. The letters identify the items and stay the same in later versions of this list.
+Items A to P are contradictions or errors in the text. Items Q to Z are gaps: the text does not say enough for two implementations to interoperate, and this repository had to choose. Items AA to AP came from the work on CAPIF and on TLS on the SBI, and from a review of the specifications: AA, AB, AD, AE, AH and AJ to AO are errors, and AF, AG, AI and AP are gaps. AC, a scope in the YAML of the AKMA API of the NEF that the text does not define, is fixed in TS 29.522 V20.0.0 and is left out. Each item has the fields of a Change Request, so that a 3GPP member can take it to the working group in charge. Nothing here has been submitted to 3GPP yet. The letters identify the items and stay the same in later versions of this list.
 
 | Item | Group | Specification | Subject | Kind |
 |---|---|---|---|---|
@@ -32,6 +32,21 @@ Items A to P are contradictions or errors in the text. Items Q to Z are gaps: th
 | X | CT4 | TS 29.503 | when the UDM answers `trigger-auth` | clarification |
 | Y | CT3 | TS 29.522 | authorization server of the NEF without CAPIF | clarification |
 | Z | CT1 | TS 24.501 | scope of the NAS message container in Security Mode Complete | clarification |
+| AA | CT3, SA3 | TS 29.222, TS 33.122 | `iss` of the CAPIF access token | correction |
+| AB | CT3 | TS 29.222 | `exp` of the CAPIF access token as a duration | correction |
+| AD | SA3 | TS 33.122 | AEFPSK of CAPIF method 1 only with TLS 1.2 | correction |
+| AE | CT3 | TS 29.222, TS 29.122 | HTTP/2 through the HTTP upgrade | correction |
+| AF | CT3 | TS 29.222 | format of the security strings of CAPIF | clarification |
+| AG | CT3 | TS 29.222 | scheme of the `apiRoot` in discovery | clarification |
+| AH | CT3 | TS 29.222 | `minimum` instead of `minItems` in `securityInfo` | editorial |
+| AI | SA3 | TS 33.122 | CAPIF token without the JWS profile of TS 33.210 | clarification |
+| AJ | SA3, CT3 | TS 33.122, TS 29.222 | indication of mutual TLS in CAPIF-2e method 3 | correction |
+| AK | SA3 | TS 33.310 | table 6.1.3c.3-2 refers to itself | editorial |
+| AL | SA3, CT3 | TS 33.535, TS 29.535 | roaming subscription mandatory in Stage 2, optional in Stage 3 | correction |
+| AM | SA3, CT3 | TS 33.535, TS 29.522 | AF_ID in the service disable notification | correction |
+| AN | CT3 | TS 29.535 | GPSI in AKMA: the feature against the note | correction |
+| AO | SA3, CT3 | TS 33.535, TS 29.522 | editorial, from the review | editorial |
+| AP | SA3 | TS 33.535, TS 33.220 | form of the FQDN in the AF_ID | clarification |
 
 The last section lists three observations on TS 23.502 (SA2), editorial.
 
@@ -147,6 +162,77 @@ The last section lists three observations on TS 23.502 (SA2), editorial.
 - **Consequences if not changed:** implementations following RFC 7252 offer a suite without forward secrecy, which TS 33.210 forbids.
 - **This repository:** only the suites of TS 33.210.
 
+### AD — AEFPSK of CAPIF method 1 only with TLS 1.2
+
+- **Specifications:** TS 33.122 V19.4.0, Annex A.1; TS 33.310 V19.5.0, Annex E; TS 33.210 V19.3.0, cl. 6.2.
+- **Current text:** A.1 derives the AEFPSK of method 1 (TLS-PSK between the invoker and the AEF) from *"P1 = CAPIF-1e TLS session's Session ID, generated as part of TLS full Handshake"*, with *"The input key shall be equal to CAPIF-1e TLS session's Master Secret."* The Session ID and the Master Secret belong to TLS 1.2. A.1 also points to the TLS profile of TS 33.310 Annex E, which points to TS 33.210, and TS 33.210 cl. 6.2 requires TLS 1.3 besides 1.2. In TLS 1.3, `legacy_session_id` only exists for compatibility (RFC 8446 cl. 4.1.2), the master secret stays inside the key schedule (cl. 7.1), and the way to take keys from a session is the exporter (cl. 7.5).
+- **Reason for change:** over CAPIF-1e in TLS 1.3, the invoker and the CCF cannot derive the same AEFPSK.
+- **Proposed change:** define the derivation for TLS 1.3, for example with the exporter of RFC 8446 cl. 7.5 and a label of its own, and say which KDF input applies to each version.
+- **Consequences if not changed:** method 1 only works when both ends force TLS 1.2.
+- **This repository:** method 1 is not implemented: `OAUTH` only.
+
+### AI — CAPIF token without the JWS profile of TS 33.210
+
+- **Specifications:** TS 33.122 V19.4.0, Annex C.1; TS 33.210 V19.3.0, cl. 6.3.1 and 6.3.3.
+- **Current text:** TS 33.122 C.1 asks for the token to be *"protected by the JSON signature profile as specified in IETF RFC 7515"*, and does not point to the JWS profile of TS 33.210 cl. 6.3.3, which applies to *"All entities and functions that support JWS"* and asks for `ES256` and the `kid` parameter. For the TLS and the certificates of CAPIF-1e, TS 33.122 cl. 6.1 and 6.3.1.1 point to the 3GPP profiles; for the JWS, there is no pointer.
+- **Reason for change:** a CCF that only uses, for example, `RS512` follows TS 33.122 to the letter and does not interoperate with an AEF that only takes the profile of TS 33.210.
+- **Proposed change:** cite TS 33.210 cl. 6.3.3 in Annex C of TS 33.122.
+- **Consequences if not changed:** CCFs and AEFs from different vendors may not agree on the signature algorithm.
+- **This repository:** `ES256` with `kid` in the token and in the onboarding credential.
+
+### AJ — Indication of mutual TLS in CAPIF-2e method 3 (also CT3)
+
+- **Specifications:** TS 33.122 V19.4.0, cl. 6.5.2.3 step 5; TS 29.222 V19.8.0, tables 8.2.4.3.6-1 and 8.5.4.2.3-1, and cl. 10.3; the same in TS 29.222 V20.1.0.
+- **Current text:** TS 33.122 cl. 6.5.2.3 step 5: the invoker authenticates at the AEF *"by establishing a TLS session with the API exposing function based on the authentication and authorization method (i.e. Server (AEF) side certificate authentication or certificate-based mutual authentication) as indicated by CAPIF core function"*. TS 29.222 has no way to carry that indication: `SecurityMethod` only has `PSK`, `PKI` and `OAUTH`, and `SecurityInformation` only has `selSecurityMethod`, `authenticationInfo` and `authorizationInfo`, the last two strings without format. Step 5 also puts the Authentication Initiation Request *"prior to establishment of TLS session"*, and TS 29.222 cl. 10.3 only says that the invoker *"shall initiate the authentication with the API exposing function using the Initiate_Authentication service operation"*; neither says how that request is protected.
+- **Reason for change:** an invoker cannot tell from the specification whether the AEF will ask for a client certificate, and an AEF does not know how the CCF tells it.
+- **Proposed change:** add to `SecurityInformation` an attribute with the TLS mode of method 3, or fix the mode in TS 33.122; say in TS 29.222 cl. 10.3 over which TLS `Initiate_Authentication` runs.
+- **Consequences if not changed:** each deployment picks a mode, and without protection `Initiate_Authentication` carries the identifier of the invoker in clear.
+- **This repository:** the policy of the CCF is always mutual TLS, and the indication to the AEF is the CA of the invoker in `authenticationInfo`. The AF presents its certificate when the NEF asks for it in the handshake, and `check-authentication` also runs over mutual TLS.
+
+### AK — Table 6.1.3c.3-2 of TS 33.310 refers to itself (editorial)
+
+- **Specification:** TS 33.310 V19.5.0, cl. 6.1.3c.3.
+- **Current text:** before table 6.1.3c.3-2, of the token signing certificate: *"the rest of extensions remains the same as in table 6.1.3c.3-2, except for TLS feature extension that it is not applicable in this case"*. Table 6.1.3c.3-2 only has `keyUsage` and `extendedKeyUsage`; the other extensions, the TLS feature among them, are in table 6.1.3c.3-1.
+- **Reason for change:** read as written, the other extensions of the signing certificate are nowhere.
+- **Proposed change:** *"table 6.1.3c.3-1"*.
+- **Consequences if not changed:** none technical; the intent is clear from the context.
+- **This repository:** the certificate that signs the tokens of the NRF follows table 6.1.3c.3-1 for the other extensions.
+
+### AL — Roaming subscription mandatory in Stage 2, optional in Stage 3 (also CT3)
+
+- **Specifications:** TS 33.535 V19.0.0, cl. 6.2.1 step 5 and cl. 6.3 step 4; TS 29.535 V20.1.0, table 5.1.8-1.
+- **Current text:** TS 33.535 cl. 6.2.1 step 5: *"Once receiving the request from the AF, the AAnF shall send a Nudm_EventExposure_Subscribe request to UDM with SUPI/GPSI to request the RoamingStatusReport from the UDM."* Cl. 6.3 step 4 repeats it for the request through the NEF. TS 29.535 puts the reaction to roaming in the optional feature `RoamingRestriction` (table 5.1.8-1), and marks `ROAMING_AKMA_SERVICE_DENIED` with it (table 5.1.7.3-1).
+- **Reason for change:** an AAnF without the feature follows TS 29.535 and not the *shall* of TS 33.535; an AAnF without a roaming policy would subscribe to a status it does not use.
+- **Proposed change:** make the step conditional: *"If the AAnF applies a roaming policy (see the RoamingRestriction feature in TS 29.535), the AAnF shall send a Nudm_EventExposure_Subscribe request …"*, and the same in cl. 6.3 step 4.
+- **Consequences if not changed:** conformance of an AAnF without a roaming policy depends on which specification is read.
+- **This repository:** no subscription; the test bed has no visited PLMN.
+
+### AM — AF_ID in the service disable notification (also CT3)
+
+- **Specifications:** TS 33.535 V19.0.0, cl. 6.8.2 step 5 and cl. 7.1.6; TS 29.522 V20.1.0, table 5.14.5.3.4-1.
+- **Current text:** cl. 6.8.2 step 5: *"The AAnF sends Naanf_AKMA_ServiceDisableNotification to NEF. The notification includes the A-KID and the AF_ID."* Cl. 7.1.6 only has *"Input, Required: A-KID"* and no optional input, and `ServiceDisableNotif` only has `aKId`. The same step 5 says *"If AF(s) are determined at step 5"*; the step meant is step 4.
+- **Reason for change:** who follows Stage 3 sends no AF_ID, and a NEF that uses one notification URI for several AFs cannot tell to whom to forward.
+- **Proposed change:** an optional `afId` in the notification from the AAnF to the NEF, and the AF_ID as *"Input, Optional"* of cl. 7.1.6; *"determined at step 4"*.
+- **Consequences if not changed:** the NEF has to keep one notification URI per AF to forward the notification.
+- **This repository:** no service disable procedure (cl. 6.8), which depends on the roaming subscription of item AL.
+
+### AO — Editorial, from the review (also CT3)
+
+- **Specifications:** TS 33.535 V19.0.0, cl. 6.6, 6.8, 7.1.1, 7.1.4, 7.1.6 and 7.3.1; TS 29.522 V20.1.0, cl. 4.4.23.2.
+- **Current text:** TS 33.535 names the operations `Naanf_AKMA_ServiceDisableNotification` and `Naanf_AKMA_Context_Remove`; TS 29.535 names them `Naanf_AKMA_Notify` and `Naanf_AKMA_ContextRemove`. Table 7.3.1-1 gives *"Request/Response"* to `ServiceDisableNotification`, and table 7.1.1-1 *"Notification/Response"*; table 7.1.1-1 does not list the NEF among the consumers of that notification, which cl. 6.8.2 uses. TS 29.522 cl. 4.4.23.2 writes "RoamingRestiction".
+- **Proposed change:** the names of TS 29.535 in TS 33.535; *"Notification/Response"* in both tables; *"AF, NEF"* in table 7.1.1-1; "RoamingRestriction".
+- **Consequences if not changed:** none technical.
+- **This repository:** nothing to implement.
+
+### AP — Form of the FQDN in the AF_ID
+
+- **Specifications:** TS 33.535 V19.0.0, Annex A.4; TS 33.220 V19.1.0, cl. 4.5.2 and B.2.1.2.
+- **Current text:** A.4: *"AF_ID = FQDN of the AF || Ua\* security protocol identifier"*. TS 33.220 B.2.1.2: *"A character string shall be encoded to an octet string according to UTF-8 encoding rules as specified in IETF RFC 3629 [24] and apply Normalization Form KC (NFKC) as specified in [37]."*
+- **Reason for change:** an internationalized name has two forms, the A-label, in ASCII, and the U-label, in Unicode (RFC 5890). The DNS, the certificates (RFC 5280 cl. 7.2) and the TLS `server_name` (RFC 6066 cl. 3) use the A-label. The specification does not say which form goes into the AF_ID, and NFKC only changes the U-label. The NAF_Id of GBA (TS 33.220 cl. 4.5.2) has the same gap.
+- **Proposed change:** in A.4, after the definition: *"The FQDN of the AF shall be represented as in the DNS, i.e. internationalized labels shall be A-labels as defined in IETF RFC 5890."* The same sentence in TS 33.220 cl. 4.5.2, for the NAF_Id. The UE already has the A-label in the TLS and DTLS profiles, where it sends it in `server_name`; in OSCORE, it converts the name of the CoAP URI.
+- **Consequences if not changed:** a UE and an AAnF that pick different forms derive different K_AF, and Ua\* fails without an error that says why.
+- **This repository:** the Go library and the AAnF apply NFKC to the AF_ID as it comes; the UE refuses a non-ASCII FQDN. The names of the test bed are ASCII, where both forms are the same.
+
 ---
 
 ## CT1
@@ -239,7 +325,70 @@ The last section lists three observations on TS 23.502 (SA2), editorial.
 - **Reason for change:** without CAPIF the AF does not know where to ask for the token.
 - **Proposed change:** name the authorization server when CAPIF is not used, or say that the AF gets it by configuration.
 - **Consequences if not changed:** each deployment picks one (the NRF, an operator server), and AFs need per-operator integration.
-- **This repository:** the NRF, by local configuration.
+- **This repository:** V1 and V2 used the NRF, by local configuration. Since V3 the AF uses CAPIF, where the CCF is the authorization server.
+
+### AA — `iss` of the CAPIF access token (also SA3)
+
+- **Specifications:** TS 29.222 V19.8.0, table 8.5.4.2.8-1 and `TS29222_CAPIF_Security_API.yaml`, the same in V20.1.0; TS 33.122 V19.4.0, C.2.2.
+- **Current text:** TS 29.222: `iss` *"shall contain the API invoker Identifier as defined in Annex C.2.2 of 3GPP TS 33.122 [16] and in clause 4.1.1 of IETF RFC 7519 [24]."* TS 33.122 C.2.2 has no `iss` and puts the API invoker identifier in `client_id`, *"REQUIRED"*. RFC 7519 cl. 4.1.1 defines `iss` as *"the principal that issued the JWT"*: the CCF.
+- **Reason for change:** a CCF that follows TS 29.222 and an AEF that follows TS 33.122, or the other way round, do not agree on where the invoker is.
+- **Proposed change:** in the table and the YAML, `iss` *"shall contain the identifier of the CAPIF core function that issued the access token, as defined in clause 4.1.1 of IETF RFC 7519"*, and a new mandatory attribute `client_id`, *"the API invoker Identifier as defined in Annex C.2.2 of 3GPP TS 33.122"*.
+- **Consequences if not changed:** the AEF looks for `client_id` and does not find it, or reads the issuer in `iss`.
+- **This repository:** both claims, `iss` and `client_id`, carry the API invoker ID.
+
+### AB — `exp` of the CAPIF access token as a duration
+
+- **Specifications:** TS 29.222 V19.8.0, table 8.5.4.2.8-1 and `TS29222_CAPIF_Security_API.yaml`, the same in V20.1.0; TS 33.122 V19.4.0, C.2.2 and C.6.
+- **Current text:** TS 29.222 types the claim `exp` as `DurationSec`: *"This attribute shall contain the number of seconds after which the access_token is considered to be expired as defined in clause 4.1.4 of IETF RFC 7519 [24]."* RFC 7519 cl. 4.1.4, which the table cites, defines `exp` as an instant (NumericDate): *"the expiration time on or after which the JWT MUST NOT be accepted for processing"*. TS 33.122 C.6 also takes it as an instant. `AccessTokenClaims` has no `iat`, and a duration without the instant of issue does not say when the token expires.
+- **Reason for change:** a CCF that puts a duration in `exp`, say 3600, issues tokens that an AEF faithful to RFC 7519 takes as expired since 1970.
+- **Proposed change:** type `exp` as an instant (`Uinteger`), *"the expiration time of the access token, as a NumericDate, as defined in clause 4.1.4 of IETF RFC 7519"*. The duration stays in `expires_in` of the answer.
+- **Consequences if not changed:** tokens refused, or accepted forever, depending on the library.
+- **This repository:** `exp` as an instant.
+
+### AE — HTTP/2 through the HTTP upgrade
+
+- **Specifications:** TS 29.222 V19.8.0, cl. 7.3, the same in V20.1.0; TS 29.122 V19.7.0, cl. 5.2.2.1, which TS 29.522 cl. 5.2 applies to the NEF.
+- **Current text:** *"A functional entity desiring to use HTTP/2 shall use the HTTP upgrade mechanism to negotiate applicable HTTP version as described in IETF RFC 9113 [10]."* RFC 9113 cl. 3.1 says of `h2c` in the HTTP Upgrade: *"This usage was never widely deployed and is deprecated by this document."* Over TLS, which the same clause requires, HTTP/2 is negotiated with ALPN, and `h2c` *"MUST NOT be sent by a client or selected by a server"* (RFC 9113 cl. 3.2).
+- **Reason for change:** who follows the clause implements a mechanism that the cited RFC deprecated and that does not apply over TLS.
+- **Proposed change:** in both specifications: *"HTTP/2 over TLS shall be negotiated with the Application-Layer Protocol Negotiation (ALPN) extension, as described in clause 3.2 of IETF RFC 9113."*
+- **Consequences if not changed:** implementations that follow the text do not interoperate with those that follow RFC 9113.
+- **This repository:** ALPN, in the CCF and in the NEF.
+
+### AF — Format of the security strings of CAPIF
+
+- **Specification:** TS 29.222 V19.8.0, tables 8.4.4.2.5-1 and 8.5.4.2.3-1.
+- **Current text:** `apiInvokerPublicKey` and `apiInvokerCertificate` (table 8.4.4.2.5-1), `authenticationInfo` and `authorizationInfo` (table 8.5.4.2.3-1) are strings without format. The specification does not say whether the key and the certificate go in PEM, in base64 DER or as JWK, nor what the authentication and authorization information of each security method contains.
+- **Reason for change:** an invoker, a CCF and an AEF from different implementations only interoperate if they agree on the formats.
+- **Proposed change:** fix the encoding of the keys and certificates (PEM, for example, or JWK for the keys) and the content of `authenticationInfo` and `authorizationInfo` for each method.
+- **Consequences if not changed:** per-vendor integration of CAPIF.
+- **This repository:** PEM; `authenticationInfo` with the CA of the CCF; `authorizationInfo` with the JSON text `{"akmaAfIds":[...]}`.
+
+### AG — Scheme of the `apiRoot` in discovery
+
+- **Specifications:** TS 29.222 V19.8.0, table 8.2.4.2.3-1 and cl. 5.2.2.2.2 NOTE; TS 29.501 V19.5.0, cl. 4.4.1.
+- **Current text:** the invoker builds the `apiRoot` of a discovered API from `domainName` or `interfaceDescriptions` (cl. 5.2.2.2.2 NOTE). `InterfaceDescription` carries the address, the port and the prefix, but not the scheme, and TS 29.501 cl. 4.4.1 allows `http` and `https`.
+- **Reason for change:** discovery does not tell the invoker whether the API is `https` or `http`.
+- **Proposed change:** say that APIs discovered through CAPIF use `https` (TS 33.501 cl. 12.3; TS 33.122 cl. 6.5), or add the scheme to `InterfaceDescription`.
+- **Consequences if not changed:** the invoker has to guess or be configured.
+- **This repository:** `apiScheme` in the configuration of the AF, `https`.
+
+### AH — `minimum` instead of `minItems` in `securityInfo` (editorial)
+
+- **Specification:** TS 29.222 V19.8.0, `TS29222_CAPIF_Security_API.yaml` (`ServiceSecurity`) and table 8.5.4.2.2-1; the same in V20.1.0.
+- **Current text:** in the YAML, `ServiceSecurity.securityInfo` is an array with `minimum: 1`. `minimum` is a keyword for numbers. Table 8.5.4.2.2-1 gives the cardinality 1..N, which OpenAPI writes `minItems: 1`.
+- **Reason for change:** an OpenAPI validator ignores `minimum` on an array and accepts an empty `securityInfo`, which the table does not allow.
+- **Proposed change:** `minItems: 1` in place of `minimum: 1`.
+- **Consequences if not changed:** generated servers accept what the table forbids.
+- **This repository:** the CCF follows the table and refuses an empty `securityInfo` with `400 MANDATORY_IE_MISSING`.
+
+### AN — GPSI in AKMA: the feature against the note
+
+- **Specifications:** TS 29.535 V20.1.0, cl. 4.2.2.2.2, cl. 4.2.2.3.2 and table 5.1.4.3.2-2; TS 33.535 V19.0.0, cl. 6.1 step 4 and cl. 7.1.2.
+- **Current text:** cl. 4.2.2.3.2: with `AKMA_GPSI_Support`, the answer carries *"either the SUPI within the "supi" attribute or the GPSI within the "gpsi" attribute"*. Table 5.1.4.3.2-2, NOTE 2: *"For the "AkmaAfKeyData" data structure used in the current release of this specification, the "gpsi" attribute is not applicable and the "supi" attribute shall be included"*, with no exception for the feature. Cl. 4.2.2.2.2 allows, with the feature, the GPSI in place of the SUPI in the `AkmaKeyInfo` of the registration; TS 33.535 cl. 6.1 step 4 and cl. 7.1.2 ask for the SUPI, and the AUSF does not have the GPSI.
+- **Reason for change:** the text does not say whether an AAnF with the feature may send the GPSI to an AF inside the operator network, which is the purpose of the feature (table 5.1.8-1).
+- **Proposed change:** NOTE 2: *"When the "AKMA_GPSI_Support" feature is not supported, the "gpsi" attribute is not applicable and the "supi" attribute shall be included."* In cl. 4.2.2.2.2, the SUPI only; the GPSI comes from the UDM (TS 33.535 cl. 6.2.1 steps 3 and 4).
+- **Consequences if not changed:** AAnFs with the feature behave differently towards the same AF.
+- **This repository:** `AKMA_GPSI_Support` is not supported.
 
 ---
 

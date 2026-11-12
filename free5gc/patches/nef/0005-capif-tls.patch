@@ -1,0 +1,488 @@
+diff --git a/internal/context/akma.go b/internal/context/akma.go
+index d91857e..cd0228f 100644
+--- a/internal/context/akma.go
++++ b/internal/context/akma.go
+@@ -13,7 +13,8 @@ import (
+ // AkmaAfPolicy is the local policy with which the NEF authorizes an AF to
+ // request K_AF, including the verification of the AF_ID (3GPP TS 33.535
+ // clause 6.3 step 2). Each AF_ID is bound to the source addresses of the AF,
+-// so that an AF cannot request the K_AF of another AF_ID.
++// so that an AF cannot request the K_AF of another AF_ID. With CAPIF, the
++// list of AF_IDs counts, and not the addresses.
+ type AkmaAfPolicy struct {
+ 	sources map[string]map[netip.Addr]struct{}
+ }
+@@ -52,6 +53,13 @@ func (p *AkmaAfPolicy) AfIds() []string {
+ 	return ids
+ }
+ 
++// Listed reports whether id is in the policy, for an API invoker of CAPIF: its
++// certificate and its access token say who the AF is.
++func (p *AkmaAfPolicy) Listed(id afid.AfID) bool {
++	_, ok := p.sources[id.Transport()]
++	return ok
++}
++
+ // KnownSource reports whether remote is a source address of an AF of the
+ // policy, whatever its AF_ID.
+ func (p *AkmaAfPolicy) KnownSource(remote netip.Addr) bool {
+diff --git a/internal/sbi/processor/akma.go b/internal/sbi/processor/akma.go
+index 2ede564..e1a425e 100644
+--- a/internal/sbi/processor/akma.go
++++ b/internal/sbi/processor/akma.go
+@@ -61,7 +61,7 @@ func (p *Processor) RetrieveAkmaApplicationKey(c *gin.Context, req *models.AkmaA
+ 		})
+ 		return
+ 	}
+-	if !p.Context().AkmaAfs.Authorize(af, remote) {
++	if (capif && !p.Context().AkmaAfs.Listed(af)) || (!capif && !p.Context().AkmaAfs.Authorize(af, remote)) {
+ 		logger.AkmaLog.Warnf("AF at %s not authorized for AF_ID %s", remote, af.Transport())
+ 		WriteAkmaProblem(c, &models.ProblemDetails{
+ 			Title:  "Forbidden",
+diff --git a/internal/sbi/processor/capif.go b/internal/sbi/processor/capif.go
+index 08ffb6d..d7f001b 100644
+--- a/internal/sbi/processor/capif.go
++++ b/internal/sbi/processor/capif.go
+@@ -2,7 +2,10 @@ package processor
+ 
+ import (
+ 	"context"
++	"crypto/tls"
++	"crypto/x509"
+ 	"encoding/json"
++	"encoding/pem"
+ 	"errors"
+ 	"fmt"
+ 	"net/http"
+@@ -17,6 +20,7 @@ import (
+ 	"github.com/free5gc/nef/pkg/factory"
+ 	"github.com/free5gc/openapi"
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/golang-jwt/jwt/v5"
+ )
+@@ -137,6 +141,11 @@ func (p *Processor) capifAuthorize(c *gin.Context, raw string) capifResult {
+ 	case claims.ClientId == "" || claims.Iss != claims.ClientId:
+ 		return capifInvalidToken(c, claims.ClientId, "iss and client_id are not the same API invoker")
+ 	}
++	// The access token is of the API invoker of the client certificate: its CN
++	// (3GPP TS 29.222 table 8.4.4.2.5-1; TS 33.122 clause 6.5.2.3 step 5).
++	if cert := sbitls.PeerCertificate(c.Request.TLS); cert != nil && cert.Subject.CommonName != claims.ClientId {
++		return capifInvalidToken(c, claims.ClientId, "of another API invoker than the client certificate")
++	}
+ 
+ 	cfg := p.Config().Capif()
+ 	if !scopeGrants(claims.Scope, cfg.AefId, factory.ServiceAkma) {
+@@ -266,9 +275,22 @@ func (p *Processor) CheckAuthentication(c *gin.Context, req *models.CapifCheckAu
+ 			"not a SupportedFeatures string"))
+ 		return
+ 	}
+-	// Without TLS on CAPIF-2e, the operation is accepted only from the
+-	// source addresses of the AFs of the AKMA policy.
+-	if !p.Context().AkmaAfs.KnownSource(remote) {
++	// The API invoker is the CN of the client certificate (3GPP TS 29.222
++	// table 8.4.4.2.5-1; TS 33.122 clause 6.5.2.3 step 5). Without TLS on
++	// CAPIF-2e, the operation is accepted only from the source addresses of
++	// the AFs of the AKMA policy.
++	cert := sbitls.PeerCertificate(c.Request.TLS)
++	switch {
++	case cert != nil && cert.Subject.CommonName != req.ApiInvokerId:
++		logger.CapifLog.Warnf("check-authentication of API invoker %s refused: the client certificate is of %s",
++			req.ApiInvokerId, cert.Subject.CommonName)
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Detail: "the client certificate is of another API invoker",
++		})
++		return
++	case cert == nil && !p.Context().AkmaAfs.KnownSource(remote):
+ 		logger.CapifLog.Warnf("check-authentication from %s refused: not an address of an authorized AF", remote)
+ 		WriteAkmaProblem(c, &models.ProblemDetails{
+ 			Title:  "Forbidden",
+@@ -292,11 +314,36 @@ func (p *Processor) CheckAuthentication(c *gin.Context, req *models.CapifCheckAu
+ 		WriteAkmaProblem(c, serviceUnavailable("CAPIF core function not reachable"))
+ 		return
+ 	}
++	// The CA of the certificate is the one that the CAPIF core function gave in
++	// authenticationInfo (3GPP TS 33.122 clause 6.5.2.3 step 5).
++	if cert != nil && !issuedBy(c.Request.TLS, inv.AuthenticationInfo) {
++		logger.CapifLog.Warnf("check-authentication of API invoker %s refused: the certificate is not of its CA", inv.Id)
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Detail: "the client certificate is not of the CA of the API invoker",
++		})
++		return
++	}
+ 	logger.CapifLog.Infof("check-authentication of API invoker %s: %d AF_IDs from the CCF", inv.Id, len(inv.AkmaAfIds))
+ 	// The NEF supports none of the features of table 9.1.6-1.
+ 	c.JSON(http.StatusOK, models.CapifCheckAuthenticationRsp{SupportedFeatures: "0"})
+ }
+ 
++// issuedBy reports whether the client certificate of a session was issued by
++// the CA in caPEM.
++func issuedBy(state *tls.ConnectionState, caPEM string) bool {
++	if state == nil || len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) < 2 {
++		return false
++	}
++	block, _ := pem.Decode([]byte(caPEM))
++	if block == nil {
++		return false
++	}
++	ca, err := x509.ParseCertificate(block.Bytes)
++	return err == nil && ca.Equal(state.VerifiedChains[0][1])
++}
++
+ func capifBadRequest(cause, param, reason string) *models.ProblemDetails {
+ 	return &models.ProblemDetails{
+ 		Title:         "Bad Request",
+diff --git a/internal/sbi/processor/capif_test.go b/internal/sbi/processor/capif_test.go
+index d09ff7a..56f01ce 100644
+--- a/internal/sbi/processor/capif_test.go
++++ b/internal/sbi/processor/capif_test.go
+@@ -7,9 +7,14 @@ import (
+ 	"crypto/elliptic"
+ 	"crypto/rand"
+ 	"crypto/rsa"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
+ 	"encoding/json"
++	"encoding/pem"
+ 	"errors"
+ 	"fmt"
++	"math/big"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"net/netip"
+@@ -96,9 +101,40 @@ func capifToken(t *testing.T, key *ecdsa.PrivateKey, header map[string]any, clai
+ 	return s
+ }
+ 
++// capifPeer is the TLS state of a session of a client with a certificate of
++// CN cn, and the PEM of the CA of that certificate.
++func capifPeer(t *testing.T, cn string) (*tls.ConnectionState, string) {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	require.NoError(t, err)
++	tmpl := &x509.Certificate{
++		SerialNumber:          big.NewInt(1),
++		Subject:               pkix.Name{CommonName: "CCF CA"},
++		NotBefore:             time.Now().Add(-time.Hour),
++		NotAfter:              time.Now().Add(time.Hour),
++		IsCA:                  true,
++		BasicConstraintsValid: true,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	require.NoError(t, err)
++	ca, err := x509.ParseCertificate(der)
++	require.NoError(t, err)
++	leaf := &x509.Certificate{Subject: pkix.Name{CommonName: cn}}
++	return &tls.ConnectionState{
++		PeerCertificates: []*x509.Certificate{leaf},
++		VerifiedChains:   [][]*x509.Certificate{{leaf, ca}},
++	}, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
++}
++
+ // initCCFInvokerInfoStub answers Obtain_API_Invoker_Info for id
+ // (3GPP TS 29.222 clause 5.6.2.4).
+ func initCCFInvokerInfoStub(id string, status int, afIds ...string) {
++	initCCFInvokerCaStub(capifCaCertPEM, id, status, afIds...)
++}
++
++// initCCFInvokerCaStub is initCCFInvokerInfoStub with the CA of the API
++// invoker in authenticationInfo.
++func initCCFInvokerCaStub(caPEM, id string, status int, afIds ...string) {
+ 	r := gock.New(capifCcfUri+"/capif-security/v1").
+ 		Get("/trustedInvokers/"+id).
+ 		MatchParam("authenticationInfo", "true").
+@@ -115,7 +151,7 @@ func initCCFInvokerInfoStub(id string, status int, afIds ...string) {
+ 			{AefId: "other-aef", PrefSecurityMethods: oauth, SelSecurityMethod: models.CapifSecurityMethod_OAUTH,
+ 				AuthorizationInfo: `{"akmaAfIds":["af9.akma.example.FF00000001"]}`},
+ 			{AefId: "nef-aef", PrefSecurityMethods: oauth, SelSecurityMethod: models.CapifSecurityMethod_OAUTH,
+-				AuthenticationInfo: capifCaCertPEM, AuthorizationInfo: string(authz)},
++				AuthenticationInfo: caPEM, AuthorizationInfo: string(authz)},
+ 		},
+ 		NotificationDestination: "https://192.0.2.10/capif/notify",
+ 		SupportedFeatures:       "0",
+@@ -126,9 +162,17 @@ func initCCFInvokerInfoStub(id string, status int, afIds ...string) {
+ // the Authorization header auth; nrf tells whether the check of the access
+ // tokens of the NRF ran.
+ func akmaAuthorize(auth string) (w *httptest.ResponseRecorder, c *gin.Context, nrf bool) {
++	return akmaAuthorizePeer(auth, nil)
++}
++
++// akmaAuthorizePeer is akmaAuthorize in a session with the TLS state peer.
++func akmaAuthorizePeer(auth string, peer *tls.ConnectionState) (
++	w *httptest.ResponseRecorder, c *gin.Context, nrf bool,
++) {
+ 	w = httptest.NewRecorder()
+ 	c, _ = gin.CreateTestContext(w)
+ 	c.Request = httptest.NewRequest(http.MethodPost, factory.AkmaResUriPrefix+"/retrieve", nil)
++	c.Request.TLS = peer
+ 	if auth != "" {
+ 		c.Request.Header.Set("Authorization", auth)
+ 	}
+@@ -251,6 +295,29 @@ func TestCapifAccessToken(t *testing.T) {
+ 	requireRefused(t, "data of the API invoker asked again", w, c, nrf, http.StatusUnauthorized, capifInvalidHdr)
+ }
+ 
++// TestCapifTokenOfTheCertificate covers the binding of the access token to the
++// client certificate on CAPIF-2e: the CN of the certificate is the API invoker
++// of the token (3GPP TS 33.122 clause 6.5.2.3 step 5; TS 33.501 clause
++// 13.3.1.3).
++func TestCapifTokenOfTheCertificate(t *testing.T) {
++	key := setCapif(t, true)
++	bearer := "Bearer " + capifToken(t, key, nil, capifClaims())
++
++	// The certificate of the API invoker of the token.
++	own, _ := capifPeer(t, capifInvokerId)
++	initCCFInvokerInfoStub(capifInvokerId, http.StatusOK, akmaAfId)
++	w, c, nrf := akmaAuthorizePeer(bearer, own)
++	require.False(t, c.IsAborted())
++	require.False(t, nrf)
++	require.Equal(t, http.StatusOK, w.Code)
++
++	// The certificate of another API invoker: the token does not go to the
++	// check of the NRF.
++	other, _ := capifPeer(t, "0b4a3c2d-1e0f-4a5b-8c7d-6e5f4a3b2c1d")
++	w, c, nrf = akmaAuthorizePeer(bearer, other)
++	requireRefused(t, "certificate of another API invoker", w, c, nrf, http.StatusUnauthorized, capifInvalidHdr)
++}
++
+ // tamper changes the last character of the payload of a JWS.
+ func tamper(s string) string {
+ 	parts := strings.Split(s, ".")
+@@ -290,7 +357,8 @@ func TestCapifNotConfigured(t *testing.T) {
+ 
+ // TestCapifRetrieve covers the AF_ID of a K_AF request with an access token
+ // of the CAPIF core function: in the profile of the API invoker and in the
+-// address policy (3GPP TS 29.522 clause 7.2; TS 33.535 clause 6.3 step 2).
++// local policy, whatever the address (3GPP TS 29.522 clause 7.2; TS 33.535
++// clause 6.3 step 2).
+ func TestCapifRetrieve(t *testing.T) {
+ 	setCapif(t, true)
+ 	var buf bytes.Buffer
+@@ -315,7 +383,7 @@ func TestCapifRetrieve(t *testing.T) {
+ 	require.Equal(t, http.StatusOK, w.Code)
+ 	require.Contains(t, buf.String(), "Access token of API invoker "+capifInvokerId+" accepted for AF_ID "+akmaAfId)
+ 
+-	// In the address policy, outside the profile of the API invoker.
++	// In the local policy, outside the profile of the API invoker.
+ 	w = retrieve(models.AkmaAfKeyRequest{AfId: capifOtherAfId, AKId: akmaAKId}, akmaAfAddr)
+ 	require.Equal(t, http.StatusForbidden, w.Code)
+ 	pd := akmaProblem(t, w)
+@@ -323,8 +391,16 @@ func TestCapifRetrieve(t *testing.T) {
+ 	require.Equal(t, "AF_ID not authorized for the API invoker", pd.Detail)
+ 	require.Contains(t, buf.String(), "AF_ID "+capifOtherAfId+" outside the profile of API invoker "+capifInvokerId)
+ 
+-	// In the profile, from an address outside the policy.
++	// With CAPIF, the address does not count.
++	initNRFDiscAANFStub(true)
++	initAANFRetrieveStub(false, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
+ 	w = retrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, "192.0.2.99")
++	require.Equal(t, http.StatusOK, w.Code)
++
++	// In the profile, outside the local policy.
++	const unlisted = "af3.akma.example.FF00000001"
++	inv.AkmaAfIds[unlisted] = struct{}{}
++	w = retrieve(models.AkmaAfKeyRequest{AfId: unlisted, AKId: akmaAKId}, akmaAfAddr)
+ 	require.Equal(t, http.StatusForbidden, w.Code)
+ 	pd = akmaProblem(t, w)
+ 	require.Empty(t, pd.Cause)
+@@ -384,6 +460,52 @@ func TestCapifCheckAuthentication(t *testing.T) {
+ 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+ }
+ 
++// TestCapifCheckAuthenticationCertificate covers check-authentication over
++// mutual TLS: the CN of the client certificate is the API invoker of the body,
++// and the CA of the certificate is that of authenticationInfo, whatever the
++// address (3GPP TS 29.222 clause 6.2.2.2; TS 33.122 clause 6.5.2.3 step 5).
++func TestCapifCheckAuthenticationCertificate(t *testing.T) {
++	setCapif(t, true)
++	check := func(peer *tls.ConnectionState) *httptest.ResponseRecorder {
++		w := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(w)
++		c.Request = httptest.NewRequest(http.MethodPost, factory.AefSecurityResUriPrefix+"/check-authentication", nil)
++		c.Request.TLS = peer
++		req := models.CapifCheckAuthenticationReq{ApiInvokerId: capifInvokerId, SupportedFeatures: "0"}
++		nefApp.Processor().CheckAuthentication(c, &req, netip.MustParseAddr("192.0.2.99"))
++		c.Writer.WriteHeaderNow()
++		return w
++	}
++
++	own, caPEM := capifPeer(t, capifInvokerId)
++	initCCFInvokerCaStub(caPEM, capifInvokerId, http.StatusOK, akmaAfId)
++	require.Equal(t, http.StatusOK, check(own).Code)
++
++	// The certificate of another API invoker: the CCF is not asked.
++	other, _ := capifPeer(t, "0b4a3c2d-1e0f-4a5b-8c7d-6e5f4a3b2c1d")
++	w := check(other)
++	require.Equal(t, http.StatusForbidden, w.Code)
++	require.Equal(t, "the client certificate is of another API invoker", akmaProblem(t, w).Detail)
++
++	// A certificate with the CN of the API invoker, of another CA.
++	forged, _ := capifPeer(t, capifInvokerId)
++	w = check(forged)
++	require.Equal(t, http.StatusForbidden, w.Code)
++	require.Equal(t, "the client certificate is not of the CA of the API invoker", akmaProblem(t, w).Detail)
++}
++
++func TestIssuedBy(t *testing.T) {
++	own, caPEM := capifPeer(t, capifInvokerId)
++	_, otherPEM := capifPeer(t, capifInvokerId)
++	require.True(t, issuedBy(own, caPEM))
++	require.False(t, issuedBy(own, otherPEM))
++	require.False(t, issuedBy(own, capifCaCertPEM))
++	require.False(t, issuedBy(own, ""))
++	require.False(t, issuedBy(nil, caPEM))
++	require.False(t, issuedBy(&tls.ConnectionState{}, caPEM))
++	require.False(t, issuedBy(&tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{own.PeerCertificates[0]}}}, caPEM))
++}
++
+ // TestCapifPublication covers the publication of the AKMA API at the CAPIF
+ // core function, again after a failure, and its withdrawal (3GPP TS 29.222
+ // clauses 5.3.2.2 and 5.3.2.3).
+diff --git a/pkg/factory/capif_test.go b/pkg/factory/capif_test.go
+index 32b0976..0602582 100644
+--- a/pkg/factory/capif_test.go
++++ b/pkg/factory/capif_test.go
+@@ -2,6 +2,7 @@ package factory
+ 
+ import (
+ 	"testing"
++	"time"
+ 
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -51,6 +52,8 @@ func TestCapifConfig(t *testing.T) {
+ 		"no interface":                 func(c *Capif) { c.Interface = nil },
+ 		"no tokenPublicKey":            func(c *Capif) { c.TokenPublicKey = "" },
+ 		"lifetime 500ms":               func(c *Capif) { c.InvokerInfoLifetime = "500ms" },
++		"CRL max age of 0":             func(c *Capif) { c.InvokerCrlMaxAge = "0s" },
++		"CRL max age in days":          func(c *Capif) { c.InvokerCrlMaxAge = "1d" },
+ 	} {
+ 		cfg := capifConfig(ServiceAkma)
+ 		change(cfg.Configuration.Capif)
+@@ -62,3 +65,29 @@ func TestCapifConfig(t *testing.T) {
+ 	_, err = capifConfig(ServiceNefOam).Validate()
+ 	require.Error(t, err)
+ }
++
++// TestCapifCrlMaxAge covers the maximum age of the CRL of the API invokers.
++func TestCapifCrlMaxAge(t *testing.T) {
++	c := capifConfig(ServiceAkma).Configuration.Capif
++	d, err := c.GetInvokerCrlMaxAge()
++	require.NoError(t, err)
++	require.Zero(t, d)
++	c.InvokerCrlMaxAge = "5s"
++	d, err = c.GetInvokerCrlMaxAge()
++	require.NoError(t, err)
++	require.Equal(t, 5*time.Second, d)
++}
++
++// TestAkmaSourceAddresses covers the source addresses of the AKMA policy: they
++// are optional with CAPIF only.
++func TestAkmaSourceAddresses(t *testing.T) {
++	cfg := capifConfig(ServiceAkma)
++	cfg.Configuration.Akma = &Akma{AuthorizedAfs: []AkmaAuthorizedAf{{AfId: "af1.akma.example.FF00000001"}}}
++	ok, err := cfg.Validate()
++	require.NoError(t, err)
++	require.True(t, ok)
++
++	cfg.Configuration.Capif = nil
++	_, err = cfg.Validate()
++	require.ErrorContains(t, err, "at least one source address is required")
++}
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 4797ff0..346f658 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -114,18 +114,19 @@ type Akma struct {
+ }
+ 
+ // AkmaAuthorizedAf binds an AF_ID to the source addresses of the AF, so that
+-// an AF cannot request the K_AF of another AF_ID.
++// an AF cannot request the K_AF of another AF_ID. With CAPIF, the certificate
++// and the access token say who the AF is, and the addresses are optional.
+ type AkmaAuthorizedAf struct {
+ 	AfId            string   `yaml:"afId" valid:"required"`
+-	SourceAddresses []string `yaml:"sourceAddresses" valid:"required"`
++	SourceAddresses []string `yaml:"sourceAddresses,omitempty" valid:"optional"`
+ }
+ 
+-func (a *Akma) validate() error {
++func (a *Akma) validate(capif bool) error {
+ 	for i, af := range a.AuthorizedAfs {
+ 		if _, err := afid.Parse(af.AfId); err != nil {
+ 			return fmt.Errorf("invalid akma.authorizedAfs[%d].afId: expected \"<FQDN>.<10 hex>\"", i)
+ 		}
+-		if len(af.SourceAddresses) == 0 {
++		if len(af.SourceAddresses) == 0 && !capif {
+ 			return fmt.Errorf("akma.authorizedAfs[%d]: at least one source address is required", i)
+ 		}
+ 		for j, addr := range af.SourceAddresses {
+@@ -161,6 +162,11 @@ type Capif struct {
+ 	// InvokerCrl says that the certificates of the API invokers have a CRL
+ 	// distribution point.
+ 	InvokerCrl bool `yaml:"invokerCrl,omitempty" valid:"optional"`
++	// InvokerCrlMaxAge is how long the NEF keeps the CRL of the CA of the API
++	// invokers, a Go duration ("5s"): the CAPIF core function revokes a
++	// certificate when its API invoker offboards. Empty: until the nextUpdate
++	// of the CRL.
++	InvokerCrlMaxAge string `yaml:"invokerCrlMaxAge,omitempty" valid:"optional"`
+ 	// AllowNrfTokens keeps the AKMA API open to the access tokens of the NRF,
+ 	// as when CAPIF is not used (3GPP TS 29.522 clause 6).
+ 	AllowNrfTokens bool `yaml:"allowNrfTokens,omitempty" valid:"optional"`
+@@ -197,11 +203,27 @@ func (c *Capif) validate() error {
+ 	if _, err := c.GetInvokerInfoLifetime(); err != nil {
+ 		return err
+ 	}
++	if _, err := c.GetInvokerCrlMaxAge(); err != nil {
++		return err
++	}
+ 	return nil
+ }
+ 
+ // GetInvokerInfoLifetime returns how long the NEF keeps the data of an API
+ // invoker.
++// GetInvokerCrlMaxAge returns the maximum age of the CRL of the API invokers;
++// 0 is until its nextUpdate.
++func (c *Capif) GetInvokerCrlMaxAge() (time.Duration, error) {
++	if c.InvokerCrlMaxAge == "" {
++		return 0, nil
++	}
++	d, err := time.ParseDuration(c.InvokerCrlMaxAge)
++	if err != nil || d <= 0 {
++		return 0, fmt.Errorf("invalid capif.invokerCrlMaxAge: a positive Go duration")
++	}
++	return d, nil
++}
++
+ func (c *Capif) GetInvokerInfoLifetime() (time.Duration, error) {
+ 	if c.InvokerInfoLifetime == "" {
+ 		return NefCapifDefaultInvokerInfoLifetime, nil
+@@ -261,7 +283,7 @@ func (c *Configuration) validate() (bool, error) {
+ 		}
+ 	}
+ 	if c.Akma != nil {
+-		if err := c.Akma.validate(); err != nil {
++		if err := c.Akma.validate(c.Capif != nil); err != nil {
+ 			return false, appendInvalid(err)
+ 		}
+ 	}
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+index 9393d12..495576c 100644
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -70,6 +70,9 @@ func NewApp(
+ 		if capif := cfg.Capif(); capif != nil {
+ 			tlsConfig.ExtraClientCA = capif.InvokerCa
+ 			tlsConfig.ExtraClientCANoCrl = !capif.InvokerCrl
++			if tlsConfig.ExtraClientCrlMaxAge, err = capif.GetInvokerCrlMaxAge(); err != nil {
++				return nil, err
++			}
+ 		}
+ 		if err = sbitls.Init(tlsConfig); err != nil {
+ 			return nil, err

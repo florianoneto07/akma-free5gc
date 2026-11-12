@@ -16,6 +16,7 @@ import (
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/internal/sbi/processor"
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/pkg/app"
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/pkg/factory"
+	"github.com/free5gc/openapi/sbitls"
 )
 
 var AANF *AanfApp
@@ -35,7 +36,7 @@ type AanfApp struct {
 	processor *processor.Processor
 }
 
-func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*AanfApp, error) {
+func NewApp(ctx context.Context, cfg *factory.Config) (*AanfApp, error) {
 	aanf := &AanfApp{
 		cfg: cfg,
 	}
@@ -43,6 +44,17 @@ func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*Aa
 	aanf.SetLogLevel(cfg.GetLogLevel())
 	aanf.SetReportCaller(cfg.GetLogReportCaller())
 
+	if cfg.GetSbiScheme() == "https" {
+		if err := sbitls.Init(sbitls.Config{
+			Certificate:  cfg.GetCertPemPath(),
+			Key:          cfg.GetCertKeyPath(),
+			CA:           cfg.GetCertCaPath(),
+			NfInstanceId: cfg.GetNfInstanceId(),
+			Logger:       logger.InitLog,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	if err := aanf_context.Init(cfg); err != nil {
 		return nil, err
 	}
@@ -59,7 +71,7 @@ func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*Aa
 
 	aanf.ctx, aanf.cancel = context.WithCancel(ctx)
 
-	if aanf.sbiServer, err = sbi.NewServer(aanf, tlsKeyLogPath); err != nil {
+	if aanf.sbiServer, err = sbi.NewServer(aanf); err != nil {
 		return nil, err
 	}
 

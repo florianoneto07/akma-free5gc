@@ -1,0 +1,68 @@
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 72424a3..b8c8526 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -177,10 +177,17 @@ type Sbi struct {
+ 	BindingIPv4  string `yaml:"bindingIPv4,omitempty" valid:"host,required"`  // IP used to run the server in the node.
+ 	Port         int    `yaml:"port,omitempty" valid:"port,required"`
+ 	Tls          *Tls   `yaml:"tls,omitempty" valid:"optional"`
+-	Fqdn         string `yaml:"fqdn,omitempty" valid:"dns,optional"` // FQDN of the NF; without it, URIs by IP address
++	Fqdn         string `yaml:"fqdn,omitempty" valid:"dns,optional"` // FQDN of the NF; required with https
+ }
+ 
+ func (s *Sbi) validate() (bool, error) {
++	// With https, the FQDN is in the NF profile and builds the target URIs
++	// (TS 29.510 table 6.1.6.2.2-1 NOTE 1): no URIs by IP address.
++	if s.Scheme == "https" && s.Fqdn == "" {
++		return false, govalidator.Errors{
++			errors.New("sbi.fqdn is required with https (TS 29.510 table 6.1.6.2.2-1 NOTE 1)"),
++		}
++	}
+ 	if tls := s.Tls; tls != nil {
+ 		if result, err := tls.validate(); err != nil {
+ 			return result, err
+@@ -477,7 +484,7 @@ func (c *Config) GetCertCaPath() string {
+ }
+ 
+ // GetSbiFqdn returns the FQDN of this NF (TS 29.510 cl. 6.1.6.2.2 NOTE 1),
+-// empty when the URIs go by IP address.
++// required with https; empty only with http, when the URIs go by IP address.
+ func (c *Config) GetSbiFqdn() string {
+ 	if c == nil || c.Configuration == nil || c.Configuration.Sbi == nil {
+ 		return ""
+diff --git a/pkg/factory/config_fqdn_test.go b/pkg/factory/config_fqdn_test.go
+new file mode 100644
+index 0000000..afae7ac
+--- /dev/null
++++ b/pkg/factory/config_fqdn_test.go
+@@ -0,0 +1,30 @@
++package factory
++
++import (
++	"testing"
++
++	"github.com/asaskevich/govalidator"
++)
++
++// With https, the FQDN is mandatory (TS 29.510 table 6.1.6.2.2-1 NOTE 1;
++// F24); with http, the URIs may go by IP address.
++func TestSbiFqdnRequiredWithHttps(t *testing.T) {
++	govalidator.TagMap["scheme"] = func(str string) bool { return str == "https" || str == "http" }
++	sbi := &Sbi{Scheme: "https", RegisterIPv4: "127.0.0.9", BindingIPv4: "127.0.0.9", Port: 8000}
++	_, err := sbi.validate()
++	if err == nil {
++		t.Fatal("https without fqdn accepted")
++	}
++	// The factory of the NF reads the errors as govalidator.Errors.
++	if _, ok := err.(govalidator.Errors); !ok {
++		t.Fatalf("error of type %T, not govalidator.Errors", err)
++	}
++	sbi.Fqdn = "ausf.5gc.mnc093.mcc208.3gppnetwork.org"
++	if _, err := sbi.validate(); err != nil {
++		t.Fatalf("https with fqdn refused: %v", err)
++	}
++	sbi = &Sbi{Scheme: "http", RegisterIPv4: "127.0.0.9", BindingIPv4: "127.0.0.9", Port: 8000}
++	if _, err := sbi.validate(); err != nil {
++		t.Fatalf("http without fqdn refused: %v", err)
++	}
++}

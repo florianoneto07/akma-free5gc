@@ -133,3 +133,64 @@ func TestApplicationKeyErrors(t *testing.T) {
 		})
 	}
 }
+
+// rotatingTokens gives "t<n>", a new one after each Invalidate, as the
+// API invoker of CAPIF does.
+type rotatingTokens struct {
+	n           int
+	invalidated int
+}
+
+func (r *rotatingTokens) TokenCtx(ctx context.Context, _ models.NrfNfManagementNfType, _ string) (
+	context.Context, error,
+) {
+	return context.WithValue(ctx, openapi.ContextAccessToken, "t"+string(rune('1'+r.n))), nil
+}
+
+func (r *rotatingTokens) Invalidate() {
+	r.n++
+	r.invalidated++
+}
+
+// A token refused by the NEF is dropped and a new one used, once, when the
+// token source can drop it (TS 33.122 Annex C.4.1); never with the tokens of
+// the NRF.
+func TestRefusedToken(t *testing.T) {
+	kaf := kdf.Key{1, 2, 3}
+	exp := time.Date(2026, 10, 19, 20, 0, 0, 0, time.UTC)
+	var auths []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /3gpp-akma/v1/retrieve", func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") != "Bearer t2" {
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			writeJSON(w, http.StatusUnauthorized, "application/problem+json", models.ProblemDetails{Status: 401})
+			return
+		}
+		writeJSON(w, http.StatusOK, "application/json", models.AkmaAfKeyData{Kaf: codec.HexKey(kaf), Expiry: &exp})
+	})
+	ts := httptest.NewUnstartedServer(h2c.NewHandler(mux, &http2.Server{}))
+	ts.Start()
+	t.Cleanup(ts.Close)
+
+	tokens := &rotatingTokens{}
+	key, err := New(ts.URL, false, tokens).ApplicationKey(context.Background(), testAfID, testAKid)
+	if err != nil || key.KAf != kaf || tokens.invalidated != 1 || len(auths) != 2 || auths[0] != "Bearer t1" {
+		t.Fatalf("key %v err %v invalidated %d requests %v", key, err, tokens.invalidated, auths)
+	}
+
+	// Refused twice: the error is reported after one retry.
+	auths = nil
+	tokens = &rotatingTokens{n: 5}
+	_, err = New(ts.URL, false, tokens).ApplicationKey(context.Background(), testAfID, testAKid)
+	if !errors.Is(err, aanf.ErrUnavailable) || len(auths) != 2 {
+		t.Fatalf("err %v requests %v", err, auths)
+	}
+
+	// The tokens of the NRF are not dropped.
+	auths = nil
+	_, err = New(ts.URL, false, &staticTokens{}).ApplicationKey(context.Background(), testAfID, testAKid)
+	if !errors.Is(err, aanf.ErrUnavailable) || len(auths) != 1 {
+		t.Fatalf("err %v requests %v", err, auths)
+	}
+}

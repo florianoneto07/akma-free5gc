@@ -32,6 +32,10 @@ const (
 	// AanfDefaultKafLifetime is used when akma.kafLifetime is not configured.
 	// The lifetime of K_AF is operator policy (TS 33.535 cl. 4.4.0, 5.2).
 	AanfDefaultKafLifetime = time.Hour
+	// AanfDefaultHeartBeatTimer is the heart-beat interval, in seconds, that
+	// the AAnF proposes when heartBeatTimer is not configured; the interval is
+	// deployment-specific (TS 29.510 cl. 5.2.2.3.2).
+	AanfDefaultHeartBeatTimer = 60
 )
 
 type Config struct {
@@ -72,7 +76,12 @@ type Configuration struct {
 	// AAnF serves any Routing Indicator. Quote them in YAML: each digit is
 	// significant ("0000" is not "0", TS 23.003 cl. 2.2B).
 	RoutingIndicators []string `yaml:"routingIndicators,omitempty" valid:"optional"`
-	Akma              *Akma    `yaml:"akma,omitempty" valid:"required"`
+	// HeartBeatTimer is the heart-beat interval, in seconds, that the AAnF
+	// proposes in its registration (TS 29.510 table 6.1.6.2.2-1); the value
+	// in the answer of the NRF prevails (cl. 5.2.2.3.2).
+	// AanfDefaultHeartBeatTimer when absent.
+	HeartBeatTimer int   `yaml:"heartBeatTimer,omitempty" valid:"optional"`
+	Akma           *Akma `yaml:"akma,omitempty" valid:"required"`
 }
 
 // Akma holds the AKMA-specific settings of the AAnF.
@@ -97,18 +106,20 @@ type Akma struct {
 	AKid *AKidFormat `yaml:"aKid,omitempty" valid:"optional"`
 }
 
-// AuthorizedAf binds an AF identifier to the source addresses the AF uses,
-// so that an AF cannot request the K_AF of another AF_ID.
+// AuthorizedAf binds an AF identifier to the NF instances of the AF, the ones
+// of their client certificates (TS 33.501 cl. 13.1.0), so that an AF cannot
+// request the K_AF of another AF_ID.
 type AuthorizedAf struct {
-	AfId            string   `yaml:"afId" valid:"required"`
-	SourceAddresses []string `yaml:"sourceAddresses" valid:"required"`
+	AfId          string   `yaml:"afId" valid:"required"`
+	NfInstanceIds []string `yaml:"nfInstanceIds" valid:"required"`
 }
 
-// AuthorizedNef binds the source addresses of a NEF to the AF_IDs of the
-// external AFs whose K_AF the NEF may request.
+// AuthorizedNef binds the NF instances of a NEF, the ones of their client
+// certificates, to the AF_IDs of the external AFs whose K_AF the NEF may
+// request.
 type AuthorizedNef struct {
-	SourceAddresses []string `yaml:"sourceAddresses" valid:"required"`
-	AfIds           []string `yaml:"afIds" valid:"required"`
+	NfInstanceIds []string `yaml:"nfInstanceIds" valid:"required"`
+	AfIds         []string `yaml:"afIds" valid:"required"`
 }
 
 // AKidFormat configures the textual form of the A-KID.
@@ -135,6 +146,11 @@ func (c *Configuration) validate() (bool, error) {
 		if result, err := sbi.validate(); err != nil {
 			return result, err
 		}
+	}
+
+	// The range that the NRF of free5GC accepts.
+	if c.HeartBeatTimer < 0 || c.HeartBeatTimer > 3600 {
+		return false, errors.New("invalid heartBeatTimer: 1 to 3600 seconds")
 	}
 
 	if len(c.ServiceNameList) != 1 || c.ServiceNameList[0] != string(models.ServiceName_NAANF_AKMA) {
@@ -179,22 +195,22 @@ func (a *Akma) validate() error {
 		if _, err := afid.Parse(af.AfId); err != nil {
 			return fmt.Errorf("invalid akma.authorizedAfs[%d].afId: expected \"<FQDN>.<10 hex>\"", i)
 		}
-		if len(af.SourceAddresses) == 0 {
-			return fmt.Errorf("akma.authorizedAfs[%d]: at least one source address is required", i)
+		if len(af.NfInstanceIds) == 0 {
+			return fmt.Errorf("akma.authorizedAfs[%d]: at least one NF instance ID is required", i)
 		}
-		for j, addr := range af.SourceAddresses {
-			if net.ParseIP(addr) == nil {
-				return fmt.Errorf("invalid akma.authorizedAfs[%d].sourceAddresses[%d]", i, j)
+		for j, id := range af.NfInstanceIds {
+			if err := uuid.Validate(id); err != nil {
+				return fmt.Errorf("invalid akma.authorizedAfs[%d].nfInstanceIds[%d]", i, j)
 			}
 		}
 	}
 	for i, nef := range a.AuthorizedNefs {
-		if len(nef.SourceAddresses) == 0 {
-			return fmt.Errorf("akma.authorizedNefs[%d]: at least one source address is required", i)
+		if len(nef.NfInstanceIds) == 0 {
+			return fmt.Errorf("akma.authorizedNefs[%d]: at least one NF instance ID is required", i)
 		}
-		for j, addr := range nef.SourceAddresses {
-			if net.ParseIP(addr) == nil {
-				return fmt.Errorf("invalid akma.authorizedNefs[%d].sourceAddresses[%d]", i, j)
+		for j, id := range nef.NfInstanceIds {
+			if err := uuid.Validate(id); err != nil {
+				return fmt.Errorf("invalid akma.authorizedNefs[%d].nfInstanceIds[%d]", i, j)
 			}
 		}
 		if len(nef.AfIds) == 0 {
@@ -256,9 +272,18 @@ type Sbi struct {
 	BindingIPv4  string `yaml:"bindingIPv4,omitempty" valid:"host,required"`  // IP used to run the server in the node.
 	Port         int    `yaml:"port,omitempty" valid:"port,required"`
 	Tls          *Tls   `yaml:"tls,omitempty" valid:"optional"`
+	// Fqdn is the FQDN of the AAnF in its NF profile (TS 29.510 cl. 6.1.6.2.2
+	// NOTE 1), required with https. Only with http may the URIs go by IP
+	// address.
+	Fqdn string `yaml:"fqdn,omitempty" valid:"dns,optional"`
 }
 
 func (s *Sbi) validate() (bool, error) {
+	// With https, the FQDN is in the NF profile and builds the target URIs
+	// (TS 29.510 table 6.1.6.2.2-1 NOTE 1): no URIs by IP address.
+	if s.Scheme == "https" && s.Fqdn == "" {
+		return false, errors.New("sbi.fqdn is required with https (TS 29.510 table 6.1.6.2.2-1 NOTE 1)")
+	}
 	if tls := s.Tls; tls != nil {
 		if result, err := govalidator.ValidateStruct(tls); err != nil {
 			return result, err
@@ -271,6 +296,7 @@ func (s *Sbi) validate() (bool, error) {
 type Tls struct {
 	Pem string `yaml:"pem,omitempty" valid:"type(string),minstringlength(1),required"`
 	Key string `yaml:"key,omitempty" valid:"type(string),minstringlength(1),required"`
+	Ca  string `yaml:"ca,omitempty" valid:"optional"` // CA of the peers on the SBI
 }
 
 func appendInvalid(err error) error {
@@ -316,6 +342,16 @@ func (c *Config) GetCertKeyPath() string {
 		return ""
 	}
 	return c.Configuration.Sbi.Tls.Key
+}
+
+// GetCertCaPath returns the file with the CA of the peers on the SBI.
+func (c *Config) GetCertCaPath() string {
+	c.RLock()
+	defer c.RUnlock()
+	if c.Configuration.Sbi.Tls != nil {
+		return c.Configuration.Sbi.Tls.Ca
+	}
+	return ""
 }
 
 func (c *Config) GetLogEnable() bool {

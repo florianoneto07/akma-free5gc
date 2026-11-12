@@ -1,0 +1,176 @@
+diff --git a/go.mod b/go.mod
+index b3f7ae1..b5e122b 100644
+--- a/go.mod
++++ b/go.mod
+@@ -84,3 +84,5 @@ require (
+ replace github.com/florianoneto07/akma-free5gc/shared/akma => ../../../akma-free5gc/shared/akma
+ 
+ replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi
++
++replace github.com/free5gc/util => ../../../akma-free5gc/free5gc/build/util
+diff --git a/internal/context/ausf_context_init.go b/internal/context/ausf_context_init.go
+index adb7352..65109aa 100644
+--- a/internal/context/ausf_context_init.go
++++ b/internal/context/ausf_context_init.go
+@@ -50,7 +50,11 @@ func InitAusfContext(context *AUSFContext) {
+ 		}
+ 	}
+ 
+-	context.Url = string(context.UriScheme) + "://" + context.RegisterIPv4 + ":" + strconv.Itoa(context.SBIPort)
++	host := context.RegisterIPv4
++	if fqdn := factory.AusfConfig.GetSbiFqdn(); fqdn != "" {
++		host = fqdn
++	}
++	context.Url = string(context.UriScheme) + "://" + host + ":" + strconv.Itoa(context.SBIPort)
+ 	context.PlmnList = append(context.PlmnList, configuration.PlmnSupportList...)
+ 
+ 	// context.NfService
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+index b5235c5..b6ddca3 100644
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -10,6 +10,7 @@ import (
+ 
+ 	ausf_context "github.com/free5gc/ausf/internal/context"
+ 	"github.com/free5gc/ausf/internal/logger"
++	"github.com/free5gc/ausf/pkg/factory"
+ 	"github.com/free5gc/openapi"
+ 	"github.com/free5gc/openapi/models"
+ 	Nnrf_NFDiscovery "github.com/free5gc/openapi/nrf/NFDiscovery"
+@@ -192,6 +193,7 @@ func (s *nnrfService) buildNfProfile(ausfContext *ausf_context.AUSFContext) (
+ 	profile.NfInstanceId = ausfContext.NfId
+ 	profile.NfType = models.NrfNfManagementNfType_AUSF
+ 	profile.NfStatus = models.NrfNfManagementNfStatus_REGISTERED
++	profile.Fqdn = factory.AusfConfig.GetSbiFqdn()
+ 	profile.Ipv4Addresses = append(profile.Ipv4Addresses, ausfContext.RegisterIPv4)
+ 	services := []models.NrfNfManagementNfService{}
+ 	for _, nfService := range ausfContext.NfService {
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index 6c7ac82..eb4045f 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/free5gc/ausf/pkg/app"
+ 	"github.com/free5gc/ausf/pkg/factory"
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
+ 	"github.com/free5gc/util/httpwrapper"
+ 	logger_util "github.com/free5gc/util/logger"
+ 	"github.com/free5gc/util/metrics"
+@@ -147,6 +148,7 @@ func (s *Server) startServer(wg *sync.WaitGroup) {
+ 	case "http":
+ 		err = s.httpServer.ListenAndServe()
+ 	case "https":
++		sbitls.ConfigureServer(s.httpServer)
+ 		err = s.httpServer.ListenAndServeTLS(
+ 			cfg.GetCertPemPath(),
+ 			cfg.GetCertKeyPath())
+diff --git a/internal/util/router_auth_check.go b/internal/util/router_auth_check.go
+index 754fc83..c36b856 100644
+--- a/internal/util/router_auth_check.go
++++ b/internal/util/router_auth_check.go
+@@ -1,13 +1,12 @@
+ package util
+ 
+ import (
+-	"net/http"
+-
+ 	"github.com/gin-gonic/gin"
+ 
+ 	ausf_context "github.com/free5gc/ausf/internal/context"
+ 	"github.com/free5gc/ausf/internal/logger"
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/oauth"
+ )
+ 
+ type RouterAuthorizationCheck struct {
+@@ -23,9 +22,12 @@ func NewRouterAuthorizationCheck(serviceName models.ServiceName) *RouterAuthoriz
+ func (rac *RouterAuthorizationCheck) Check(c *gin.Context, ausfContext ausf_context.NFContext) {
+ 	token := c.Request.Header.Get("Authorization")
+ 	err := ausfContext.AuthorizationCheck(token, rac.serviceName)
++	if err == nil {
++		err = oauth.CheckTokenPeer(token, c.Request.TLS)
++	}
+ 	if err != nil {
+ 		logger.UtilLog.Debugf("RouterAuthorizationCheck: Check Unauthorized: %s", err.Error())
+-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
++		oauth.WriteTokenError(c.Writer, c.Request, err)
+ 		c.Abort()
+ 		return
+ 	}
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index c8dc564..72424a3 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -177,6 +177,7 @@ type Sbi struct {
+ 	BindingIPv4  string `yaml:"bindingIPv4,omitempty" valid:"host,required"`  // IP used to run the server in the node.
+ 	Port         int    `yaml:"port,omitempty" valid:"port,required"`
+ 	Tls          *Tls   `yaml:"tls,omitempty" valid:"optional"`
++	Fqdn         string `yaml:"fqdn,omitempty" valid:"dns,optional"` // FQDN of the NF; without it, URIs by IP address
+ }
+ 
+ func (s *Sbi) validate() (bool, error) {
+@@ -193,6 +194,7 @@ func (s *Sbi) validate() (bool, error) {
+ type Tls struct {
+ 	Pem string `yaml:"pem,omitempty" valid:"type(string),minstringlength(1),required"`
+ 	Key string `yaml:"key,omitempty" valid:"type(string),minstringlength(1),required"`
++	Ca  string `yaml:"ca,omitempty" valid:"optional"` // CA of the peers on the SBI
+ }
+ 
+ func (t *Tls) validate() (bool, error) {
+@@ -463,3 +465,24 @@ func (c *Config) GetMetricsNamespace() string {
+ 	}
+ 	return AusfMetricsDefaultNamespace
+ }
++
++// GetCertCaPath returns the file with the CA of the peers on the SBI.
++func (c *Config) GetCertCaPath() string {
++	c.RLock()
++	defer c.RUnlock()
++	if c.Configuration.Sbi.Tls != nil {
++		return c.Configuration.Sbi.Tls.Ca
++	}
++	return ""
++}
++
++// GetSbiFqdn returns the FQDN of this NF (TS 29.510 cl. 6.1.6.2.2 NOTE 1),
++// empty when the URIs go by IP address.
++func (c *Config) GetSbiFqdn() string {
++	if c == nil || c.Configuration == nil || c.Configuration.Sbi == nil {
++		return ""
++	}
++	c.RLock()
++	defer c.RUnlock()
++	return c.Configuration.Sbi.Fqdn
++}
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+index 0ec68ac..4a3516f 100644
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -17,6 +17,7 @@ import (
+ 	"github.com/free5gc/ausf/internal/sbi/processor"
+ 	"github.com/free5gc/ausf/pkg/app"
+ 	"github.com/free5gc/ausf/pkg/factory"
++	"github.com/free5gc/openapi/sbitls"
+ 	"github.com/free5gc/util/metrics"
+ 	"github.com/free5gc/util/metrics/utils"
+ )
+@@ -47,6 +48,18 @@ func NewApp(ctx context.Context, cfg *factory.Config, tlsKeyLogPath string) (*Au
+ 	ausf.SetLogEnable(cfg.GetLogEnable())
+ 	ausf.SetLogLevel(cfg.GetLogLevel())
+ 	ausf.SetReportCaller(cfg.GetLogReportCaller())
++
++	if cfg.GetSbiScheme() == "https" {
++		if err := sbitls.Init(sbitls.Config{
++			Certificate:  cfg.GetCertPemPath(),
++			Key:          cfg.GetCertKeyPath(),
++			CA:           cfg.GetCertCaPath(),
++			NfInstanceId: cfg.GetNfInstanceId(),
++			Logger:       logger.InitLog,
++		}); err != nil {
++			return nil, err
++		}
++	}
+ 	ausf_context.Init()
+ 
+ 	processor, err_p := processor.NewProcessor(ausf)

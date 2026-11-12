@@ -45,6 +45,14 @@ cd free5gc/aanf && go test ./...
 ```
 
 ```bash
+cd free5gc/ccf && go test ./...
+```
+
+```bash
+cd free5gc/crl && go test ./...
+```
+
+```bash
 cd af && go test ./...
 ```
 
@@ -54,14 +62,16 @@ With the wolfSSL library of `af/scripts/build-wolfssl.sh`, the PSK binding and p
 cd af && go test -tags wolfssl ./...
 ```
 
-`free5gc/aanf` and `af` need the patched `openapi` copy: run `free5gc/scripts/prepare-openapi.sh` once, or the build scripts, which run it. All of them also pass with `-race`.
+`free5gc/aanf`, `free5gc/ccf` and `af` need the patched `openapi` copy: run `free5gc/scripts/prepare-openapi.sh` once, or the build scripts, which run it. All of them also pass with `-race`.
 
 | Module | What the tests cover |
 |---|---|
 | `shared/akma` | KDF, SUPI as parameter, A-KID, AF_ID, encodings, against the vectors |
 | `shared/crosscheck` | the KDF against `ueauth.GetKDFValue` of `free5gc/util` |
-| `free5gc/aanf` | configuration; storage; OAuth2 checks; the three operations and every error code over h2c, with hand-built HTTP/2 frames for 411; the NEF policy; no key in the log at `trace` level |
-| `af` | the Digest computations against the vectors; the checks of the AF in order; the client refusing a bad `rspauth`; K_AF expiry; the AAnF and NEF clients; the NRF registration; no key in the log. K.2: the AF_ID of the cipher suite at the UE and at the AAnF, a certificate or a `realm` of another FQDN, tickets refused after 24 hours. With `-tags wolfssl`: TLS and DTLS 1.2 and 1.3 with PSK, the DTLS cookies (no key lookup before the client returns it), the extensions and cipher suites on the wire (`psk_dhe_ke` only, no early data, EMS, `renegotiation_info`, SNI), wrong key, unknown identity, `psk_ke` only and another server name refused, resumption bound to the expiry of the key, `net/http` on top, OpenSSL as an independent client, and the AF profiles end to end with the client |
+| `free5gc/aanf` | configuration, the FQDN required with `https`; storage; the checks of the access tokens and the scopes of each operation; the policies by certificate; the three operations and every error code, with hand-built HTTP/2 frames for 411; the heart-beat, the registration again on 404, and the headers of TS 29.500; no key in the log at `trace` level |
+| `free5gc/ccf` | configuration; the onboarding credential; the JWS of the tokens; every operation of the CCF and its errors, mutual TLS on both servers, the CRL of its CA at offboarding |
+| `free5gc/crl` | the files served, `HEAD`, 404 for anything else, no directory listing |
+| `af` | the Digest computations against the vectors; the checks of the AF in order; the client refusing a bad `rspauth`; K_AF expiry; the AAnF and NEF clients over mutual TLS; the API invoker of CAPIF and the CRL of the CCF; no key in the log. K.2: the AF_ID of the cipher suite at the UE and at the AAnF, a certificate or a `realm` of another FQDN, tickets refused after 24 hours. With `-tags wolfssl`: TLS and DTLS 1.2 and 1.3 with PSK, the DTLS cookies (no key lookup before the client returns it), the extensions and cipher suites on the wire (`psk_dhe_ke` only, no early data, EMS, `renegotiation_info`, SNI), wrong key, unknown identity, `psk_ke` only and another server name refused, resumption bound to the expiry of the key, `net/http` on top, OpenSSL as an independent client, and the AF profiles end to end with the client |
 
 With the patches applied on the free5GC host:
 
@@ -73,11 +83,11 @@ cd ~/free5gc/NFs/ausf && go test ./internal/sbi/processor/
 cd ~/free5gc/NFs/nef && go test ./internal/sbi/processor/
 ```
 
-The AUSF tests cover the AKMA key info built from the vectors, its errors, and that the registration does not block the authentication. The NEF tests cover the answers of the AKMA API against a fake NRF and AAnF, and that neither `supi` nor a key comes out.
+The AUSF tests cover the AKMA key info built from the vectors, its errors, that the registration does not block the authentication, the default Routing Indicator, the reuse of the search and the headers sent to the AAnF. The NEF tests cover the answers of the AKMA API against a fake NRF and AAnF, the token of the CCF, the same search rules, and that neither `supi` nor a key comes out. Each NF patched by a `*-fqdn-required` patch has a test of its configuration (`pkg/factory/config_fqdn_test.go`).
 
 ## 3. free5GC test bench
 
-With `patch-nf.sh test apply`, the Go test bench of free5GC (`~/free5gc/test`) gets three AKMA tests. They run a real core, without `sudo`:
+With `patch-nf.sh test apply`, the Go test bench of free5GC (`~/free5gc/test`) gets three AKMA tests and the configuration of the patched NFs. It keeps the SBI on `http`. The tests run a real core, without `sudo`:
 
 ```bash
 cd ~/free5gc/test && go test -v -count=1 -run TestAkma .
@@ -104,16 +114,17 @@ Expected: `5 passed, 3 refused (FQDN not ASCII), 0 failed`. The UE does not appl
 - a real primary authentication;
 - K_AKMA and the A-KID in the AUSF and in the UE;
 - the registration at the AAnF;
-- K_AF to the AF, directly and through the NEF;
-- Ua\* from the UE over the user plane, over every profile of TS 24.109 Annex K.
+- K_AF to the AF, directly and through the NEF, with the AF as API invoker of the CCF;
+- Ua\* from the UE over the user plane, over every profile of TS 24.109 Annex K and TS 33.535 Annexes C and D;
+- mutual TLS on every port of the SBI, the certificates, the CRL, and the identity in the tokens and in the policies.
 
 It runs on the AF host and drives the free5GC host by SSH. There, it asks for the `sudo` password **once**: the remote part (`af/scripts/e2e-remote.sh`) runs in a single `ssh -t` session, because free5GC (the UPF), the namespace and the UE need root.
 
-The two hosts sync on marker files at three points (A, B, C). At each one the remote part waits while the AF host runs the checks that have to start from it: the AAnF authorizes K_AF by AF_ID and source address, and only the AF host is the authorized AF.
+The two hosts sync on marker files at three points (A, B, C). At each one the remote part waits while the AF host runs the checks that have to start from it: the AAnF authorizes K_AF by AF_ID and the client certificate of the AF, which only the AF host has.
 
 ### 5.1 Run
 
-Prerequisites: [install.md](install.md), parts 3 to 7 and sections 9.1 and 11.1, with `kakmaRefresh: 0` in the installed `aanfcfg.yaml`. Then, on the AF host:
+Prerequisites: [install.md](install.md), parts 3 to 7, sections 9.1 and 11.1, part 12 (the CCF) and part 13 (TLS), with `kakmaRefresh: 0` in the installed `aanfcfg.yaml`. Then, on the AF host:
 
 ```bash
 af/scripts/build-af.sh
@@ -127,7 +138,7 @@ free5gc/scripts/build-aanf.sh
 af/scripts/e2e.sh user@192.168.16.130
 ```
 
-The argument is the free5GC host, `user@address`, or `FREE5GC_HOST` when absent. The address of the AAnF comes from `aanfUri` in `af/config/afcfg.yaml`. Before it starts, the script checks that this is the `sbi.bindingIPv4` of the `~/free5gc/config/aanfcfg.yaml` installed on the free5GC host, and stops if not. The address of the NEF comes from `nefUri` in `af/config/afcfg-external.yaml`. The extra AFs listen on the address of `listen` in `afcfg.yaml`.
+The argument is the free5GC host, `user@address`, or `FREE5GC_HOST` when absent. The URI of the AAnF comes from `aanfUri` in `af/config/afcfg.yaml`. Before it starts, the script checks that this is the `sbi.fqdn` of the `~/free5gc/config/aanfcfg.yaml` installed on the free5GC host, and stops if not. It copies the certificates of the AF host from the free5GC host to `af/build/sba/`, and the CA of the CCF and an onboarding credential to `af/build/capif/`. The external AFs discover the NEF at the CCF. The extra AFs listen on the address of `listen` in `afcfg.yaml`.
 
 Check D03 runs `openssl s_client` as the UE over DTLS 1.3. The OpenSSL of Ubuntu 24.04, 3.0, has no DTLS 1.3 in `s_client`; 4.1 has it. Build it apart, outside the repository; the check was done with 4.1.0-beta2:
 
@@ -196,35 +207,39 @@ With `--keep`, free5GC, the gNB and the UE stay up at the end. The files go to `
 | `report.md` | summary, the A-KID of each authentication, table of checks, and the AKMA lines of free5GC, of the UE and of the AF |
 | `local-results.txt`, `remote/remote-results.txt` | one `PASS`, `FAIL` or `SKIP` line per check |
 | `remote/` | `free5gc.log`, `ue.log`, `gnb.log`, outputs of the Ua\* client and of `seed`, `state` (the A-KIDs) |
-| `af.log`, `af-*.log` | the AF, and the extra AFs |
+| `af.log`, `af-*.log` | the AF, and the extra AFs, among them the AF in CAPIF mode |
 
-The exit code is 0 only when no check fails; a skipped check is not a failure. It takes about four minutes and runs 161 checks: 80 on the free5GC host and 81 on the AF host.
+The exit code is 0 only when no check fails; a skipped check is not a failure. It takes about five minutes and runs 333 checks: 209 on the free5GC host and 124 on the AF host. Without `OPENSSL_DTLS13` and `LIBCOAP_CLIENT`: `330 passed, 0 failed, 3 skipped`.
 
 ### 5.2 Groups
 
 | Group | Where | What it checks |
 |---|---|---|
 | S | AF host, before the run | self-test of the ME against the vectors |
-| R1 | free5GC host | N6 NAT, namespace of the UE, `linkIp` of the gNB, AKMA subscription; free5GC with `-aanf`, the gNB and the UE up |
+| R1 | free5GC host | N6 NAT, namespace of the UE, `linkIp` of the gNB, AKMA subscription, no NF profile of an earlier run at the NRF; the CRL signed for the run and the CRL service up; free5GC with `-crl -aanf -ccf`, the gNB and the UE up; the CCF up, `3gpp-akma` published by the NEF at the CCF and the onboarding credential of the AF issued |
+| R1s | free5GC host | the mutual TLS of the SBI (section 5.6): each port, the identity in the tokens and in the policies, the profiles of the certificates, `seed` against an `openssl s_server`; the fixes of section 5.7 that run there |
 | R2 | free5GC host | registration; A-KID of the UE = of the AUSF = of the AAnF; Ua\* from the UE over the user plane, 3 requests |
 | R2k | free5GC host | the key service of the ME (TS 33.535 cl. 4.4.3): `uaclient` got the K_AF of its AF_ID; another AF_ID, another user and `nr-cli akma-kaf` are refused; a configuration that gives one AF_ID to two applications does not start |
 | R2t | free5GC host | Ua\* from the UE over the TLS profiles, with the K_AF of the ME for the AF_ID of each profile and cipher suite: K.2 in TLS 1.3 (two connections, the second resumed) and in TLS 1.2; PSK TLS 1.3 and PSK TLS 1.2, two connections each; a ClientHello with `psk_ke` only refused |
 | R2d | free5GC host | Ua\* from the UE over the DTLS profiles, with CoAP: DTLS 1.3 with the AF_ID `…0100000009` and DTLS 1.2 with `…010001D001`, two associations each, the second resumed; a ClientHello with `psk_ke` only refused |
 | R2o | free5GC host | Ua\* from the UE over OSCORE: `POST /akma` in CBOR and two protected requests in one context, AF_ID `…0100000008`; the context renewed by RFC 8613 Appendix B.2 before each request; a new `POST` for each request |
-| N (point A) | AF host | negative tests of the AAnF API, of `register-anchorkey`, of the RID and of the AF; anonymous access directly at the AAnF |
+| N (point A) | AF host | negative tests of the AAnF API, of `register-anchorkey`, of the RID and of the AF; anonymous access directly at the AAnF; the headers of the answers of the AAnF |
+| S (point A) | AF host | the mutual TLS of the SBI from the AF host, at the AAnF and at the NEF (section 5.6) |
+| E (point A) | AF host | three external AFs, API invokers of the CCF (external on 8083, external anonymous on 8084, external with PSK TLS 1.3 on 8456), and an internal anonymous AF on 8085; the NEF API (section 5.4) |
+| CP (point A) | AF host | the AF in CAPIF mode on 8086, and a second invoker in Python (section 5.5) |
 | D (point A) | AF host | what the AF saw of R2d; DTLS 1.3 with `openssl s_client` of OpenSSL 4.1 as the UE, sending the CoAP GET (with `OPENSSL_DTLS13`; skipped without it); unknown A-KID and K_AF of another AF_ID refused |
 | O (point A) | AF host | what the AF saw of R2o (four contexts, one AAnF query, six requests served, two renewals); `coap-client` of libcoap as the UE, with the request and the context computed by `oscore-check.py` (with `LIBCOAP_CLIENT`; skipped without it); an OSC-INP with another algorithm, an unknown A-KID and the K_AF of another AF_ID refused; K_AF expiry with `refetch` and `reject`, on the AFs with a shifted clock |
 | T (point A) | AF host | what the AF saw of R2t (the AF_ID of each cipher suite, the resumptions); PSK TLS 1.3 with `openssl s_client` as the UE; refusals (K_AF of another AF_ID, unknown A-KID, `psk_ke`, certificate of another FQDN, AF_ID outside the policy of the AAnF); K_AF expiry in a TLS session, with the `refetch` and `reject` policies |
-| E (point A) | AF host | tunnel to the NRF; four extra AFs (external on 8083, external anonymous on 8084, internal anonymous on 8085, external with PSK TLS 1.3 on 8456); the NEF API |
-| R2n | free5GC host | Ua\* from the UE with the four extra AFs, the last one over PSK TLS 1.3; the AAnF hands K_AF through the NEF; the NEF relays it and does not log the SUPI |
+| R2n | free5GC host | Ua\* from the UE with the four extra AFs, the last one over PSK TLS 1.3; the AAnF hands K_AF through the NEF; the NEF relays it and does not log the SUPI; the `User-Agent` of the AUSF and of the NEF at the AAnF, `ApplicationKey_Get` from the NEF, and the reuse of the search |
+| R2c | free5GC host | Ua\* from the UE with the AF in CAPIF mode; the NEF accepts the token of the CCF |
 | R3 | free5GC host | new authentication: new A-KID, context replaced, Ua\* with the new one; Ua\* with the previous A-KID and K_AF, still accepted by the AF until `expiry` |
-| B (point B) | AF host | the extra AFs deregister from the NRF; the AAnF refuses the previous A-KID and accepts the new one |
-| R4 | free5GC host | AAnF down during a primary authentication: the authentication succeeds, the registration fails |
+| B (point B) | AF host | the external AFs offboard from the CCF; the AAnF refuses the previous A-KID and accepts the new one |
+| R4 | free5GC host | the heart-beat of the AAnF; AAnF down during a primary authentication: the authentication succeeds, the registration fails |
 | R5 | free5GC host | subscriber without an AKMA subscription, then restored |
 | R6 | free5GC host | `remove-context`, and again (404) |
 | R6r | free5GC host | refresh of K_AKMA by the AAnF (TS 33.535 cl. 6.4.4), with a copy of its configuration with `kakmaRefresh: 20s`: a K_AF for a young K_AKMA asks for nothing; after 20 s, a K_AF for another AF_ID makes the AAnF send `trigger-auth`; the UDM notifies the AMF, the AMF re-authenticates the registered UE and runs the NAS SMC, the UE derives a new A-KID equal to the AUSF's and the AAnF's, and the PDU session goes on. Then `seed trigger-auth`: 403 within 60 s, 405 with GET, 400 without `supi`, 404 for an unknown SUPI. The installed configuration comes back at the end |
 | C (point C) | AF host | `retrieve` after `remove-context` |
-| R7, L1 | both | no string of 64 hex digits in the logs of free5GC, of the UE, of the gNB and of the AF |
+| R7, L1 | both | no string of 64 hex digits in the logs of free5GC, of the UE, of the gNB and of the AF; no token, credential, onboarding secret or private key in the logs; no TLS key log written during the run |
 
 ### 5.3 Negative tests
 
@@ -248,30 +263,95 @@ The exit code is 0 only when no check fails; a skipped check is not a failure. I
 | `remove-context` then `retrieve` | R6, C1 | 204, then 404 `AKMA_CONTEXT_NOT_FOUND`; `retrieve`: 403 |
 | Ua\* | N24, N25 | wrong K_AF: 401; `Host` of another AF: 421 |
 
-`af/scripts/negative/aanf_api.py` runs N01 to N16 with raw HTTP/1.1 requests, without the Go code of this repository. The `register-anchorkey` cases need a token and use `seed` on the free5GC host, with the test options `--gpsi` and `--k-akma`.
+`af/scripts/negative/aanf_api.py` runs N01 to N16 with raw HTTP/1.1 requests over mutual TLS, with the certificate of the AF, without the Go code of this repository. The `register-anchorkey` cases need a token and use `seed` on the free5GC host, with the test options `--gpsi` and `--k-akma`.
 
 The RID, clock and Ua\* cases use contexts seeded with the `rid-012` and `mnc-3-digits` vectors, of other SUPIs, so as not to touch the context of the real UE; the script removes them afterwards. The shifted clock comes from the test option `clockOffset` of the AF, which does not touch the system clock. Those AFs listen on ports 8081 and 8082.
 
 ### 5.4 NEF API and anonymous access
 
-`af/scripts/negative/nef_api.py` sends raw HTTP/1.1 requests, without the Go code of this repository. It registers a temporary AF at the NRF, through the tunnel, to get the tokens, and deregisters it at the end.
+`af/scripts/negative/nef_api.py` sends raw HTTP/1.1 requests over mutual TLS, without the Go code of this repository. It onboards at the CCF as an API invoker, gets its token from the CCF, and offboards at the end.
 
 | Check | Case | Expected |
 |---|---|---|
-| E00 | the two external AFs register at the NRF through the tunnel | 2 registrations |
+| E00 | the three external AFs onboard at the CCF and discover the NEF | 3 onboardings |
 | E01 | K_AF through the NEF | 200 with `kaf` and `expiry`, without `supi` and `gpsi` (TS 33.535 cl. 6.3 step 5) |
 | E02 | the same K_AF through the NEF and directly from the AAnF, for the same A-KID and AF_ID | equal; neither is printed |
 | E03 | anonymous access through the NEF | 200 without `supi` and `gpsi` (cl. 6.2.2; TS 29.522 table 5.14.5.3.3-1 NOTE 3) |
-| E04 | no token | 401 (middleware of free5GC, without `ProblemDetails`: F12) |
-| E05 | token of another service (`naanf-akma`) | 401 |
+| E04 | no token | 401 with `ProblemDetails` (TS 29.500 cl. 6.7.3) |
+| E05 | a token of the NRF for `3gpp-akma`, asked by `seed` on the free5GC host | 401 `invalid_token`: with `allowNrfTokens: false`, only the tokens of the CCF count |
 | E06 | AF_ID outside the policy of the NEF | 403 without cause (cl. 6.3 step 2) |
-| E07 | AF_ID accepted by the NEF and not by the AAnF (`af3`, test entry of `nefcfg.yaml`) | 403 without cause, relayed |
+| E07 | AF_ID accepted by the NEF and the CCF and not by the AAnF (`af5`, test entry of `nefcfg.yaml` and `ccfcfg.yaml`) | 403 without cause, relayed |
 | E08 | unknown A-KID | 403 `K_AKMA_NOT_PRESENT`, relayed (TS 29.522 cl. 4.4.23.2); never 204 |
 | E09, E10 | malformed `afId`; `aKId` missing | 400 with `invalidParams` |
 | E11 | `Content-Type` `text/plain` | 415 (TS 29.122 table 5.2.6-1) |
-| E12 | the external AFs deregister from the NRF on shutdown | 2 deregistrations |
+| E12 | the external AFs offboard from the CCF on shutdown | 3 offboardings |
+| N01c | anonymous access directly at the AAnF (`anonInd`) | 200 without `supi` |
 
-### 5.5 Notes
+### 5.5 CAPIF
+
+`af/scripts/negative/capif_api.py` is a second API invoker, independent of the Go code of this repository. It sends raw HTTP/1.1 requests over TLS with the `ssl` module of Python to the CCF and to the NEF, and uses the OpenSSL command line for its key pair.
+
+| Check | Case | Expected |
+|---|---|---|
+| CP00 | the AF in CAPIF mode starts | onboarding, discovery, `OAUTH` and `check-authentication` in the log of the AF |
+| CP01 | onboarding of `capif_api.py` | `201` and `Location`; the certificate has the API invoker ID as CN and comes from the CA of the CCF (`openssl verify`) |
+| CP02 | discovery | `apiRoot` `https://nef.5gc.mnc093.mcc208.3gppnetwork.org:8000`, `aefId` `nef-aef`, `[OAUTH]` |
+| CP03, CP04 | security method; `check-authentication` at the NEF | `201` with `OAUTH`; `200` |
+| CP05 | token | `Bearer` and `no-store`; `iss` = `client_id` = API invoker ID; `scope`; `exp` = now + `expires_in` |
+| CP06, CP07 | K_AF through the NEF with the token of the CCF, normal and anonymous | the K_AF of the AAnF, without `supi` and `gpsi` |
+| CP08 | onboarding without a credential; with a tampered credential | `401` with `WWW-Authenticate: Bearer` |
+| CP09, CP10 | discovery without a certificate; with the `api-invoker-id` of the Go AF | `403` |
+| CP11 to CP13 | wrong secret; scope outside the profile; `grant_type=password` | `400` `invalid_client`, `invalid_scope`, `unsupported_grant_type` |
+| CP14, CP15 | NEF without a token; with a tampered token | `401` |
+| CP16, CP17 | AF_ID `af3`, outside the profile; AF_ID `af4`, outside the policy of the NEF | `403` without `cause` |
+| CP18 | offboarding; a token asked afterwards | `204`; the certificate, revoked at offboarding, is refused in the handshake |
+| CP19 | the AF in CAPIF mode offboards at the end (point B) | a line in the log of the AF |
+| CP20 | logs of free5GC (CCF and NEF) and of the AF | no token, credential, onboarding secret or private key |
+
+### 5.6 TLS of the SBI
+
+`af/scripts/negative/sbi_tls.py` uses only the `ssl` module of Python, without the Go code of this repository. The free5GC host runs it in step R1s on each port of the SBI: NRF, AMF, SMF, UDR, PCF, UDM, NSSF, AUSF, CHF, NEF, AAnF and the internal server of the CCF. The AF host runs it at point A, on the AAnF and the NEF. The names of the checks say the port and the host: `S02.nrf.free5gc`, `S02.nef.af`. `af/scripts/negative/sbi_token.py`, also in R1s, checks the tokens.
+
+| Check | Case | Expected |
+|---|---|---|
+| S01 | HTTP/1.1 and h2c in clear | refused in TLS: the `400` of Go to an HTTP/1.1 request, connection closed to h2c |
+| S02 | TLS without a client certificate | alert, no HTTP answer |
+| S03 | certificate `other-ca` | alert |
+| S04 | the server certificate, with the SNI of the name | the DNS-ID, the URI of the NF instance ID and the address of the entity; where the file exists, the installed certificate |
+| S05 | `make-sba-certs.sh check` | no refusal |
+| S06, S07 | certificate `revoked`; `no-crldp` | alert |
+| S08.name | `seed` against an `openssl s_server` with the certificate of the UDM, on the name of the AAnF | the client refuses by name |
+| S08.ca | the same, with a certificate of the name of the AAnF from another CA | the client refuses by CA |
+| S09 | the same, with the certificate of the AAnF | `s_server` logs the SNI with the name |
+| S10 | in `sbi_token.py`: a token with the NF instance ID, the type or the PLMN of another certificate; a registration with the UUID or the type of another certificate; a discovery with the type of another certificate | `400 invalid_client`, with `no-store`; `403` without cause |
+| S11 | a token of `seed-ausf` with the certificate `seed-af` at the AAnF | `403 ACCESS_TOKEN_CLAIM_MISMATCH` of `sub` |
+| S12 | a token for another producer at the AAnF | `403 ACCESS_TOKEN_CLAIM_MISMATCH` of `aud` |
+| S13 | header and claims of a token of the NRF | `ES256`, `kid`, `x5t#S256` of `nrf-token.pem`; `iss`, the UUID of the NRF |
+| S14 | the AUSF asks for `naanf-akma:applicationkeyget`; `retrieve` with a token of `naanf-akma` only | `400 invalid_scope`; `403 insufficient_scope` |
+| S15 | `retrieve` with the certificate `af2` and the AF_ID of `af1`; the same with `af1` | `403` without cause; `403 K_AKMA_NOT_PRESENT` |
+| S16 | at the NEF: the token of an invoker with the certificate of another; `check-authentication` of an invoker with the certificate of another; a token of the NRF; the certificate of an invoker on a group of the SBI | `401 invalid_token`; `403`; `401 invalid_token`; `403` without cause |
+| S17 | at the internal server of the CCF, in `sbi_token.py`: without a certificate; publication and invoker information with the certificate of another NF; invoker information with the certificate of the NEF | alert; `403`; `404`, the control case |
+| S18 | the certificate of an invoker that offboarded, at the NEF, after `invokerCrlMaxAge` | refused in TLS |
+| S19 | `*sslkey*` files written during the run; logs of both hosts | no file with content; no private key or TLS secret |
+
+### 5.7 Fixes of free5GC and of the AAnF
+
+| Check | Where | Case | Expected |
+|---|---|---|---|
+| G01, G01.kid | `sbi_token.py`, R1s | `retrieve-key` with the `x5t#S256` and with the `kid` of a token of the NRF (F28) | `200`, `multipart/related; type="application/json"`, `nrf-token.pem` in DER in the `application/pkix-cert` part |
+| G02 | same | a `kid` that is not the NRF's | `400 KEY_IDENTIFICATION_FAIL` |
+| G03 | same | an issuer that is not the NRF | `404 UNKNOWN_ISSUER` |
+| G04 | same | a body that is not JSON | `415` |
+| G05 | `e2e-remote.sh`, R1s | an old NEF profile without `3gpp-akma`, put before the real one in MongoDB (F27) | the token of `3gpp-akma` is issued |
+| G06.aanf, G06.nrf, G06.ccf | same | the AAnF, the NRF and the CCF with their configuration without the `fqdn` lines | the NF ends within 15 s with `sbi.fqdn is required with https` (the CCF, `fqdn is required with TLS`). The NFs of free5GC exit with status 0 even so: the check counts the exit and the message |
+| G07 | same, R4 | the heart-beat of the AAnF (F29) | `Heart-beat sent to the NRF` in the log within 70 s |
+| G08.ausf, G08.nef | same, R2n | the `User-Agent` of the requests to the AAnF, on the `SBI` line of the AAnF (F31) | `AUSF-<NF instance ID>` and `NEF-<NF instance ID>`, with `3gpp-Sbi-NF-Peer-Info srcinst=` |
+| G09 | same, R2n | the K_AF through the NEF, also of the anonymous AF | no `through the NEF at` line with `without the SUPI` |
+| G10 | `nef_api.py`, point A | a context with the RID `"0"`, made by `seed`, asked through the NEF | `200`, with the K_AF |
+| G11 | `e2e-remote.sh`, R2n | the repeated requests to the NEF | `(search result reused)` on a line of the NEF |
+| G12 | `aanf_api.py`, point A | an error answer of the AAnF to the certificate `af1` (F31) | `Server: AANF-<NF instance ID>` and `3gpp-Sbi-NF-Peer-Info: srcinst=<AAnF>; dstinst=<af1>` |
+
+### 5.8 Notes
 
 - **`sudo` password.** Asked once per run; the script does not touch `sudoers`.
 - **Fixed order.** A failure in the middle does not stop the run: the following checks run in whatever state is left and can fail in cascade. The first `FAIL` in the report is the one that matters.

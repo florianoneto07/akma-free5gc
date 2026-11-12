@@ -1,0 +1,405 @@
+diff --git a/go.mod b/go.mod
+index a85ff9a..0d297f9 100644
+--- a/go.mod
++++ b/go.mod
+@@ -80,3 +80,5 @@ require (
+ replace github.com/florianoneto07/akma-free5gc/shared/akma => ../../../akma-free5gc/shared/akma
+ 
+ replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi
++
++replace github.com/free5gc/util => ../../../akma-free5gc/free5gc/build/util
+diff --git a/internal/sbi/client_ca.go b/internal/sbi/client_ca.go
+new file mode 100644
+index 0000000..c53f426
+--- /dev/null
++++ b/internal/sbi/client_ca.go
+@@ -0,0 +1,36 @@
++package sbi
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/gin-gonic/gin"
++
++	"github.com/free5gc/nef/internal/sbi/processor"
++	"github.com/free5gc/nef/pkg/factory"
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
++)
++
++// capifRequest says whether a request is on CAPIF-2e: the APIs of the API
++// invokers, as API exposing function (3GPP TS 29.522 clause 7.1).
++func capifRequest(path string) bool {
++	return strings.HasPrefix(path, factory.AkmaResUriPrefix) ||
++		strings.HasPrefix(path, factory.AefSecurityResUriPrefix)
++}
++
++// checkClientCA keeps each client on its side of the NEF: a certificate of the
++// CA of the API invokers only on CAPIF-2e, and a certificate of the CA of the
++// operator only on the SBI. The server accepts both in the handshake, before
++// it knows the API. Without TLS, there is no certificate to check.
++func checkClientCA(c *gin.Context) {
++	if c.Request.TLS == nil || sbitls.IsExtraClient(c.Request.TLS) == capifRequest(c.Request.URL.Path) {
++		return
++	}
++	processor.WriteAkmaProblem(c, &models.ProblemDetails{
++		Title:  "Forbidden",
++		Status: http.StatusForbidden,
++		Detail: "client certificate of another CA for this API",
++	})
++	c.Abort()
++}
+diff --git a/internal/sbi/client_ca_test.go b/internal/sbi/client_ca_test.go
+new file mode 100644
+index 0000000..b7f6ebf
+--- /dev/null
++++ b/internal/sbi/client_ca_test.go
+@@ -0,0 +1,41 @@
++package sbi
++
++import (
++	"crypto/tls"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++)
++
++func TestCheckClientCA(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	cases := []struct {
++		name   string
++		path   string
++		tls    *tls.ConnectionState
++		status int
++	}{
++		{"http, CAPIF-2e", "/3gpp-akma/v1/retrieve", nil, http.StatusOK},
++		{"http, SBI", "/nnef-pfdmanagement/v1/x", nil, http.StatusOK},
++		{"operator certificate on the AKMA API", "/3gpp-akma/v1/retrieve", &tls.ConnectionState{}, http.StatusForbidden},
++		{"operator certificate on AEF_Security_API", "/aef-security/v1/check-authentication",
++			&tls.ConnectionState{}, http.StatusForbidden},
++		{"operator certificate on the SBI", "/nnef-pfdmanagement/v1/x", &tls.ConnectionState{}, http.StatusOK},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			router := gin.New()
++			router.Use(checkClientCA)
++			router.POST(c.path, func(gc *gin.Context) { gc.Status(http.StatusOK) })
++			req := httptest.NewRequest(http.MethodPost, c.path, nil)
++			req.TLS = c.tls
++			rec := httptest.NewRecorder()
++			router.ServeHTTP(rec, req)
++			if rec.Code != c.status {
++				t.Errorf("status %d, want %d", rec.Code, c.status)
++			}
++		})
++	}
++}
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+index 9615b34..70fec01 100644
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -4,8 +4,6 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"net/http"
+-	"net/url"
+-	"strconv"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -175,6 +173,7 @@ func (s *nnrfService) buildNfProfile() (
+ 	profile.NfStatus = models.NrfNfManagementNfStatus_REGISTERED
+ 
+ 	cfg := s.consumer.Config()
++	profile.Fqdn = cfg.SbiFqdn()
+ 	profile.Ipv4Addresses = append(profile.Ipv4Addresses, cfg.SbiRegisterIP())
+ 	nfServices := cfg.NFServices()
+ 	if len(nfServices) == 0 {
+@@ -279,51 +278,5 @@ func getProfileAndUri(resp *models.SearchResult, srvName models.ServiceName) (
+ func searchNFServiceUri(nfProfile models.NrfNfDiscoveryNfProfile, serviceName models.ServiceName,
+ 	nfServiceStatus models.NfServiceStatus,
+ ) string {
+-	if nfProfile.NfServices == nil {
+-		return ""
+-	}
+-
+-	nfUri := ""
+-	for _, service := range nfProfile.NfServices {
+-		if service.ServiceName == serviceName && service.NfServiceStatus == nfServiceStatus {
+-			if service.Fqdn != "" {
+-				nfUri = string(service.Scheme) + "://" + service.Fqdn
+-			} else if nfProfile.Fqdn != "" {
+-				nfUri = string(service.Scheme) + "://" + nfProfile.Fqdn
+-			} else if service.ApiPrefix != "" {
+-				u, err := url.Parse(service.ApiPrefix)
+-				if err != nil {
+-					return nfUri
+-				}
+-				nfUri = u.Scheme + "://" + u.Host
+-			} else if service.IpEndPoints != nil {
+-				point := (service.IpEndPoints)[0]
+-				if point.Ipv4Address != "" {
+-					nfUri = getUriFromIpEndPoint(service.Scheme, point.Ipv4Address, point.Port)
+-				} else if len(nfProfile.Ipv4Addresses) != 0 {
+-					nfUri = getUriFromIpEndPoint(service.Scheme, nfProfile.Ipv4Addresses[0], point.Port)
+-				}
+-			}
+-		}
+-		if nfUri != "" {
+-			break
+-		}
+-	}
+-
+-	return nfUri
+-}
+-
+-func getUriFromIpEndPoint(scheme models.UriScheme, ipv4Address string, port int32) string {
+-	uri := ""
+-	if port != 0 {
+-		uri = string(scheme) + "://" + ipv4Address + ":" + strconv.Itoa(int(port))
+-	} else {
+-		switch scheme {
+-		case models.UriScheme_HTTP:
+-			uri = string(scheme) + "://" + ipv4Address + ":80"
+-		case models.UriScheme_HTTPS:
+-			uri = string(scheme) + "://" + ipv4Address + ":443"
+-		}
+-	}
+-	return uri
++	return openapi.GetNFServiceUri(&nfProfile, serviceName)
+ }
+diff --git a/internal/sbi/processor/capif.go b/internal/sbi/processor/capif.go
+index 3615a16..08ffb6d 100644
+--- a/internal/sbi/processor/capif.go
++++ b/internal/sbi/processor/capif.go
+@@ -342,6 +342,7 @@ func akmaServiceAPI(cfg *factory.Capif) models.CapifServiceApiDescription {
+ 			SecurityMethods: methods,
+ 			InterfaceDescriptions: []models.CapifInterfaceDescription{{
+ 				Ipv4Addr:        cfg.Interface.Ipv4Addr,
++				Fqdn:            cfg.Interface.Fqdn,
+ 				Port:            int32(cfg.Interface.Port),
+ 				SecurityMethods: methods,
+ 			}},
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index 64139fd..c066003 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/free5gc/nef/pkg/app"
+ 	"github.com/free5gc/nef/pkg/factory"
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
+ 	"github.com/free5gc/util/httpwrapper"
+ 	logger_util "github.com/free5gc/util/logger"
+ 	"github.com/free5gc/util/metrics"
+@@ -46,6 +47,7 @@ func NewServer(nef nef, tlsKeyLogPath string) (*Server, error) {
+ 	s.router = logger_util.NewGinWithLogrus(logger.GinLog)
+ 
+ 	s.router.Use(metrics.InboundMetrics())
++	s.router.Use(checkClientCA)
+ 
+ 	// Callback endpoint: protected by OAuth2 middleware (callers must present
+ 	// a valid nnef-callback Bearer token issued by NRF).
+@@ -180,6 +182,7 @@ func (s *Server) startServer(wg *sync.WaitGroup) {
+ 		err = s.httpServer.ListenAndServe()
+ 	case "https":
+ 		// TODO: use config file to config path
++		sbitls.ConfigureServer(s.httpServer)
+ 		err = s.httpServer.ListenAndServeTLS(s.Config().GetCertPemPath(), s.Config().GetCertKeyPath())
+ 	default:
+ 		err = fmt.Errorf("scheme [%s] is not supported", scheme)
+diff --git a/internal/util/util.go b/internal/util/util.go
+index 96408a4..45723f7 100644
+--- a/internal/util/util.go
++++ b/internal/util/util.go
+@@ -1,11 +1,10 @@
+ package util
+ 
+ import (
+-	"net/http"
+-
+ 	nef_context "github.com/free5gc/nef/internal/context"
+ 	"github.com/free5gc/nef/internal/logger"
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/oauth"
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+@@ -26,9 +25,13 @@ func NewRouterAuthorizationCheck(serviceName models.ServiceName) *RouterAuthoriz
+ 
+ func (rac *RouterAuthorizationCheck) Check(c *gin.Context, nefCtx nef_context.NFContext) {
+ 	token := c.Request.Header.Get("Authorization")
+-	if err := nefCtx.AuthorizationCheck(token, rac.serviceName); err != nil {
++	err := nefCtx.AuthorizationCheck(token, rac.serviceName)
++	if err == nil {
++		err = oauth.CheckTokenPeer(token, c.Request.TLS)
++	}
++	if err != nil {
+ 		logger.UtilLog.Debugf("RouterAuthorizationCheck::Check Unauthorized: %s", err.Error())
+-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
++		oauth.WriteTokenError(c.Writer, c.Request, err)
+ 		c.Abort()
+ 		return
+ 	}
+diff --git a/pkg/factory/capif_test.go b/pkg/factory/capif_test.go
+index f69c494..32b0976 100644
+--- a/pkg/factory/capif_test.go
++++ b/pkg/factory/capif_test.go
+@@ -38,17 +38,19 @@ func TestCapifConfig(t *testing.T) {
+ 	require.Equal(t, NefCapifDefaultInvokerInfoLifetime, d)
+ 
+ 	for name, change := range map[string]func(*Capif){
+-		"ccfUri without host":      func(c *Capif) { c.CcfUri = "http://" },
+-		"ccfUri with a path":       func(c *Capif) { c.CcfUri = "http://127.0.0.1:8020/x" },
+-		"ccfUri of another scheme": func(c *Capif) { c.CcfUri = "ftp://127.0.0.1:8020" },
+-		"apfId with ':'":           func(c *Capif) { c.ApfId = "nef:apf" },
+-		"aefId with a space":       func(c *Capif) { c.AefId = "nef aef" },
+-		"no aefId":                 func(c *Capif) { c.AefId = "" },
+-		"interface 0.0.0.0":        func(c *Capif) { c.Interface.Ipv4Addr = "0.0.0.0" },
+-		"interface without port":   func(c *Capif) { c.Interface.Port = 0 },
+-		"no interface":             func(c *Capif) { c.Interface = nil },
+-		"no tokenPublicKey":        func(c *Capif) { c.TokenPublicKey = "" },
+-		"lifetime 500ms":           func(c *Capif) { c.InvokerInfoLifetime = "500ms" },
++		"ccfUri without host":          func(c *Capif) { c.CcfUri = "http://" },
++		"ccfUri with a path":           func(c *Capif) { c.CcfUri = "http://127.0.0.1:8020/x" },
++		"ccfUri of another scheme":     func(c *Capif) { c.CcfUri = "ftp://127.0.0.1:8020" },
++		"apfId with ':'":               func(c *Capif) { c.ApfId = "nef:apf" },
++		"aefId with a space":           func(c *Capif) { c.AefId = "nef aef" },
++		"no aefId":                     func(c *Capif) { c.AefId = "" },
++		"interface 0.0.0.0":            func(c *Capif) { c.Interface.Ipv4Addr = "0.0.0.0" },
++		"interface without address":    func(c *Capif) { c.Interface.Ipv4Addr = "" },
++		"interface with two addresses": func(c *Capif) { c.Interface.Fqdn = "nef.5gc.example.org" },
++		"interface without port":       func(c *Capif) { c.Interface.Port = 0 },
++		"no interface":                 func(c *Capif) { c.Interface = nil },
++		"no tokenPublicKey":            func(c *Capif) { c.TokenPublicKey = "" },
++		"lifetime 500ms":               func(c *Capif) { c.InvokerInfoLifetime = "500ms" },
+ 	} {
+ 		cfg := capifConfig(ServiceAkma)
+ 		change(cfg.Configuration.Capif)
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 22e43e8..4797ff0 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -155,13 +155,20 @@ type Capif struct {
+ 	// InvokerInfoLifetime is how long the NEF keeps the data of an API
+ 	// invoker, a Go duration ("10m").
+ 	InvokerInfoLifetime string `yaml:"invokerInfoLifetime,omitempty" valid:"optional"`
++	// InvokerCa is the PEM file of the CA of the API invokers, for the client
++	// certificates on CAPIF-2e (3GPP TS 33.122 clause 6.5.2.3 step 5).
++	InvokerCa string `yaml:"invokerCa,omitempty" valid:"optional"`
++	// InvokerCrl says that the certificates of the API invokers have a CRL
++	// distribution point.
++	InvokerCrl bool `yaml:"invokerCrl,omitempty" valid:"optional"`
+ 	// AllowNrfTokens keeps the AKMA API open to the access tokens of the NRF,
+ 	// as when CAPIF is not used (3GPP TS 29.522 clause 6).
+ 	AllowNrfTokens bool `yaml:"allowNrfTokens,omitempty" valid:"optional"`
+ }
+ 
+ type CapifInterface struct {
+-	Ipv4Addr string `yaml:"ipv4Addr" valid:"required,ipv4"`
++	Ipv4Addr string `yaml:"ipv4Addr,omitempty" valid:"optional,ipv4"`
++	Fqdn     string `yaml:"fqdn,omitempty" valid:"optional,dns"`
+ 	Port     int    `yaml:"port" valid:"required,port"`
+ }
+ 
+@@ -184,8 +191,8 @@ func (c *Capif) validate() error {
+ 	if !capifIdentifier(c.AefId) {
+ 		return errors.New("invalid capif.aefId")
+ 	}
+-	if c.Interface == nil || c.Interface.Ipv4Addr == "0.0.0.0" {
+-		return errors.New("invalid capif.interface: an address the AFs can reach is required")
++	if c.Interface == nil || c.Interface.Ipv4Addr == "0.0.0.0" || (c.Interface.Ipv4Addr == "") == (c.Interface.Fqdn == "") {
++		return errors.New("invalid capif.interface: one address the AFs can reach is required, ipv4Addr or fqdn")
+ 	}
+ 	if _, err := c.GetInvokerInfoLifetime(); err != nil {
+ 		return err
+@@ -307,6 +314,7 @@ type Sbi struct {
+ 	BindingIPv4 string `yaml:"bindingIPv4,omitempty" valid:"host,required"` // IP used to run the server in the node.
+ 	Port        int    `yaml:"port,omitempty" valid:"port,optional"`
+ 	Tls         *Tls   `yaml:"tls,omitempty" valid:"optional"`
++	Fqdn        string `yaml:"fqdn,omitempty" valid:"dns,optional"` // FQDN of the NF; without it, URIs by IP address
+ }
+ 
+ func (s *Sbi) validate() (bool, error) {
+@@ -328,6 +336,7 @@ type Service struct {
+ type Tls struct {
+ 	Pem string `yaml:"pem,omitempty" valid:"type(string),minstringlength(1),required"`
+ 	Key string `yaml:"key,omitempty" valid:"type(string),minstringlength(1),required"`
++	Ca  string `yaml:"ca,omitempty" valid:"optional"` // CA of the peers on the SBI
+ }
+ 
+ func (t *Tls) validate() (bool, error) {
+@@ -612,6 +621,9 @@ func (c *Config) SbiRegisterAddr() string {
+ }
+ 
+ func (c *Config) SbiUri() string {
++	if fqdn := c.SbiFqdn(); fqdn != "" {
++		return c.SbiScheme() + "://" + fqdn + ":" + strconv.Itoa(c.SbiPort())
++	}
+ 	return c.SbiScheme() + "://" + c.SbiRegisterAddr()
+ }
+ 
+@@ -733,3 +745,24 @@ func (c *Config) ServiceUri(name string) string {
+ 		return ""
+ 	}
+ }
++
++// GetCertCaPath returns the file with the CA of the peers on the SBI.
++func (c *Config) GetCertCaPath() string {
++	c.RLock()
++	defer c.RUnlock()
++	if c.Configuration.Sbi.Tls != nil {
++		return c.Configuration.Sbi.Tls.Ca
++	}
++	return ""
++}
++
++// SbiFqdn returns the FQDN of this NF (TS 29.510 cl. 6.1.6.2.2 NOTE 1),
++// empty when the URIs go by IP address.
++func (c *Config) SbiFqdn() string {
++	if c == nil || c.Configuration == nil || c.Configuration.Sbi == nil {
++		return ""
++	}
++	c.RLock()
++	defer c.RUnlock()
++	return c.Configuration.Sbi.Fqdn
++}
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+index 5763e8c..9393d12 100644
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -16,6 +16,7 @@ import (
+ 	"github.com/free5gc/nef/internal/sbi/processor"
+ 	"github.com/free5gc/nef/pkg/app"
+ 	"github.com/free5gc/nef/pkg/factory"
++	"github.com/free5gc/openapi/sbitls"
+ 	"github.com/free5gc/util/metrics"
+ 	"github.com/free5gc/util/metrics/utils"
+ 	"github.com/prometheus/client_golang/prometheus"
+@@ -58,6 +59,23 @@ func NewApp(
+ 	nef.SetLogLevel(cfg.GetLogLevel())
+ 	nef.SetReportCaller(cfg.GetLogReportCaller())
+ 
++	if cfg.SbiScheme() == "https" {
++		tlsConfig := sbitls.Config{
++			Certificate:  cfg.GetCertPemPath(),
++			Key:          cfg.GetCertKeyPath(),
++			CA:           cfg.GetCertCaPath(),
++			NfInstanceId: cfg.GetNfInstanceId(),
++			Logger:       logger.InitLog,
++		}
++		if capif := cfg.Capif(); capif != nil {
++			tlsConfig.ExtraClientCA = capif.InvokerCa
++			tlsConfig.ExtraClientCANoCrl = !capif.InvokerCrl
++		}
++		if err = sbitls.Init(tlsConfig); err != nil {
++			return nil, err
++		}
++	}
++
+ 	nef.ctx, nef.cancel = context.WithCancel(ctx)
+ 	if nef.nefCtx, err = nef_context.NewContext(nef); err != nil {
+ 		return nil, err

@@ -17,6 +17,7 @@ var (
 	CfgLog      *logrus.Entry
 	UaLog       *logrus.Entry
 	ConsumerLog *logrus.Entry
+	CapifLog    *logrus.Entry
 )
 
 func init() {
@@ -26,4 +27,5 @@ func init() {
 	CfgLog = nf.WithField(logger_util.FieldCategory, "CFG")
 	UaLog = nf.WithField(logger_util.FieldCategory, "UA")
 	ConsumerLog = nf.WithField(logger_util.FieldCategory, "Consumer")
+	CapifLog = nf.WithField(logger_util.FieldCategory, "CAPIF")
 }

@@ -1,0 +1,37 @@
+diff --git a/internal/sbi/consumer/aanf_service.go b/internal/sbi/consumer/aanf_service.go
+index a637618..07bbffc 100644
+--- a/internal/sbi/consumer/aanf_service.go
++++ b/internal/sbi/consumer/aanf_service.go
+@@ -10,6 +10,7 @@ import (
+ 	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
+ 	"github.com/free5gc/openapi/models"
+ 	"github.com/free5gc/openapi/nrf/NFDiscovery"
++	"github.com/free5gc/openapi/oauth"
+ 	sbi_metrics "github.com/free5gc/util/metrics/sbi"
+ )
+ 
+@@ -59,7 +60,10 @@ func (s *naanfService) AanfUri(rid string) (string, error) {
+ func (s *naanfService) GetAKMAAPPKeyMaterial(ctx context.Context, uri string, req models.AkmaAfKeyRequest) (
+ 	*Naanf_AKMA.GetAKMAAPPKeyMaterialResponse, error,
+ ) {
+-	tokenCtx, pd, err := s.consumer.Context().GetTokenCtx(models.ServiceName_NAANF_AKMA,
++	// The service and the scopes of K_AF and of the SUPI (3GPP TS 29.535
++	// table 5.1.9-1; TS 33.535 clause 6.3 step 4).
++	tokenCtx, pd, err := s.consumer.Context().GetTokenCtx(
++		models.ServiceName_NAANF_AKMA+" "+oauth.ScopeNaanfAkmaApplicationKey+" "+oauth.ScopeNaanfAkmaSupiAccess,
+ 		models.NrfNfManagementNfType_AANF)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("access token for naanf-akma: %w", err)
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+index 70fec01..c3c8c35 100644
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -186,7 +186,7 @@ func (s *nnrfService) buildNfProfile() (
+ func (s *nnrfService) DeregisterNFInstance() (problemDetails *models.ProblemDetails, err error) {
+ 	logger.ConsumerLog.Infof("DeregisterNFInstance")
+ 
+-	ctx, pd, err := s.consumer.Context().GetTokenCtx(models.ServiceName_NNRF_NFM, models.NrfNfManagementNfType_NEF)
++	ctx, pd, err := s.consumer.Context().GetTokenCtx(models.ServiceName_NNRF_NFM, models.NrfNfManagementNfType_NRF)
+ 	if err != nil {
+ 		return pd, err
+ 	}

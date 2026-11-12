@@ -1,0 +1,51 @@
+diff --git a/force_kill.sh b/force_kill.sh
+index 0f20640..2ca8669 100755
+--- a/force_kill.sh
++++ b/force_kill.sh
+@@ -21,7 +21,7 @@ if [ $# -ne 0 ]; then
+     done
+ fi
+ 
+-NF_LIST="nrf amf smf udr pcf udm nssf ausf bsf n3iwf upf chf nef tngf aanf ccf"
++NF_LIST="nrf amf smf udr pcf udm nssf ausf bsf n3iwf upf chf nef tngf aanf ccf crl"
+ 
+ for NF in ${NF_LIST}; do
+     sudo killall -9 ${NF}
+diff --git a/run.sh b/run.sh
+index db277b9..30bf3e0 100755
+--- a/run.sh
++++ b/run.sh
+@@ -9,6 +9,7 @@ TNGF_ENABLE=0
+ BSF_ENABLE=0
+ AANF_ENABLE=0
+ CCF_ENABLE=0
++CRL_ENABLE=0
+ 
+ PID_LIST=()
+ echo $$ > run.pid
+@@ -55,6 +56,9 @@ if [ $# -ne 0 ]; then
+             -ccf)
+                 CCF_ENABLE=1
+                 ;;
++            -crl)
++                CRL_ENABLE=1
++                ;;
+         esac
+         shift
+     done
+@@ -179,6 +183,15 @@ else
+     echo "CCF disabled - skipping CCF service"
+ fi
+ 
++# Add the service of the certificate revocation lists first, only if enabled:
++# the TLS peers of the SBI fetch their CRL when they start
++if [ $CRL_ENABLE -ne 0 ]; then
++    NF_LIST="crl $NF_LIST"
++    echo "CRL enabled - will start the CRL service first"
++else
++    echo "CRL disabled - skipping the CRL service"
++fi
++
+ export GIN_MODE=release
+ 
+ for NF in ${NF_LIST}; do

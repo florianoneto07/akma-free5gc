@@ -19,13 +19,14 @@ type nudmService struct {
 
 	mu     sync.Mutex
 	udmUri string // apiRoot of the UDM discovered at the NRF
+	udmId  string // its NF instance ID
 }
 
 // TriggerAuth asks the UDM for a primary (re-)authentication of supi with
 // Nudm_UECM_AuthTrigger (TS 29.503 cl. 5.3.2.16), which gives a new K_AKMA
 // (TS 33.535 cl. 6.4.4). It returns nil when the UDM accepted the request.
 func (s *nudmService) TriggerAuth(supi string) error {
-	uri, err := s.discoverUdm()
+	uri, udmId, err := s.discoverUdm()
 	if err != nil {
 		return err
 	}
@@ -34,10 +35,14 @@ func (s *nudmService) TriggerAuth(supi string) error {
 		return err
 	}
 
+	self := s.consumer.Context().NfId
 	cfg := Nudm_UEContextManagement.NewConfiguration()
 	cfg.SetBasePath(uri)
-	// TS 29.500 table 5.2.2.2-1: the NF type of the consumer first.
-	cfg.SetUserAgent("AANF-" + s.consumer.Context().NfId)
+	// TS 29.500 table 5.2.2.2-1 and cl. 5.2.3.2.21.
+	cfg.SetUserAgent(openapi.NfAgent(models.NrfNfManagementNfType_AANF, self))
+	if info := openapi.NfPeerInfo(self, udmId); info != "" {
+		cfg.AddDefaultHeader(openapi.HeaderNfPeerInfo, info)
+	}
 	client := Nudm_UEContextManagement.NewAPIClient(cfg)
 
 	var req Nudm_UEContextManagement.AuthTriggerRequest
@@ -48,7 +53,7 @@ func (s *nudmService) TriggerAuth(supi string) error {
 		if !errors.As(err, &apiError) {
 			// The UDM may have moved: discover it again next time.
 			s.mu.Lock()
-			s.udmUri = ""
+			s.udmUri, s.udmId = "", ""
 			s.mu.Unlock()
 			return fmt.Errorf("Nudm_UECM_AuthTrigger at %s: %w", uri, err)
 		}
@@ -60,21 +65,28 @@ func (s *nudmService) TriggerAuth(supi string) error {
 	return nil
 }
 
-// discoverUdm returns the apiRoot of a UDM that offers nudm-uecm, discovered
-// at the NRF (TS 29.510 cl. 5.3.2.2) once and then kept.
-func (s *nudmService) discoverUdm() (string, error) {
+// discoverUdm returns the apiRoot and the NF instance ID of a UDM that offers
+// nudm-uecm, discovered at the NRF (TS 29.510 cl. 5.3.2.2) once and then
+// kept.
+func (s *nudmService) discoverUdm() (string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.udmUri != "" {
-		return s.udmUri, nil
+		return s.udmUri, s.udmId, nil
 	}
 
 	ctx, err := s.tokenCtx(models.ServiceName_NNRF_DISC, models.NrfNfManagementNfType_NRF)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	self := s.consumer.Context().NfId
 	cfg := Nnrf_NFDiscovery.NewConfiguration()
 	cfg.SetBasePath(s.consumer.Context().NrfUri)
+	// TS 29.500 table 5.2.2.2-1 and cl. 5.2.3.2.21.
+	cfg.SetUserAgent(openapi.NfAgent(models.NrfNfManagementNfType_AANF, self))
+	if info := openapi.NfPeerInfo(self, ""); info != "" {
+		cfg.AddDefaultHeader(openapi.HeaderNfPeerInfo, info)
+	}
 	client := Nnrf_NFDiscovery.NewAPIClient(cfg)
 
 	target := models.NrfNfManagementNfType_UDM
@@ -86,15 +98,15 @@ func (s *nudmService) discoverUdm() (string, error) {
 	}
 	res, err := client.NFInstancesStoreApi.SearchNFInstances(ctx, &param)
 	if err != nil {
-		return "", fmt.Errorf("UDM discovery: %w", err)
+		return "", "", fmt.Errorf("UDM discovery: %w", err)
 	}
-	_, uri, err := openapi.GetServiceNfProfileAndUri(res.SearchResult.NfInstances, models.ServiceName_NUDM_UECM)
+	profile, uri, err := openapi.GetServiceNfProfileAndUri(res.SearchResult.NfInstances, models.ServiceName_NUDM_UECM)
 	if err != nil {
-		return "", fmt.Errorf("UDM discovery: %w", err)
+		return "", "", fmt.Errorf("UDM discovery: %w", err)
 	}
 	logger.AkmaLog.Infof("UDM for Nudm_UECM_AuthTrigger: %s (discovered at the NRF)", uri)
-	s.udmUri = uri
-	return uri, nil
+	s.udmUri, s.udmId = uri, profile.NfInstanceId
+	return uri, s.udmId, nil
 }
 
 // tokenCtx returns a context with an access token of the NRF for scope when

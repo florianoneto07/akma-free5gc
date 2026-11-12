@@ -9,17 +9,21 @@
 #   user@host  free5GC host; FREE5GC_HOST when absent
 #
 # Prerequisites: on the free5GC host, the repository at ~/akma-free5gc, the
-# free5GC and UERANSIM patches applied, the AAnF installed and the seed tool
-# at ~/akma-tools/seed; here, af/scripts/build-wolfssl.sh,
-# af/scripts/build-af.sh, af/scripts/make-test-ca.sh and
-# free5gc/scripts/build-aanf.sh run, and the AF configuration of
-# af/config/afcfg.yaml.
+# free5GC and UERANSIM patches applied, the AAnF, the service of the CRL and
+# the CAPIF core function (CCF, with the certificates of make-capif-certs.sh)
+# installed, the certificates of make-sba-certs.sh in ~/free5gc/cert/sba, the
+# names of the SBI in /etc/hosts and the seed tool at ~/akma-tools/seed; here,
+# af/scripts/build-wolfssl.sh, af/scripts/build-af.sh,
+# af/scripts/make-test-ca.sh and free5gc/scripts/build-aanf.sh run, the AF
+# configuration of af/config/afcfg.yaml, and the names of the AAnF and of the
+# NEF in /etc/hosts. The certificates of this machine are copied from the
+# free5GC host to af/build/sba.
 #
 # The AF runs the profiles of af/config/afcfg.yaml and, on port 8080, the
-# digest-http test profile. The AAnF address is the aanfUri of
-# af/config/afcfg.yaml, and the address of the extra AFs is the one of its
-# first listen; the AAnF of the free5GC host must listen on that aanfUri
-# (sbi.bindingIPv4 of ~/free5gc/config/aanfcfg.yaml).
+# digest-http test profile. The AAnF is the aanfUri of af/config/afcfg.yaml,
+# and the address of the extra AFs is the one of its first listen; the AAnF of
+# the free5GC host must have that name (sbi.fqdn of
+# ~/free5gc/config/aanfcfg.yaml).
 #
 # OPENSSL_DTLS13=<openssl binary with DTLS 1.3, such as OpenSSL 4.1> runs
 # check D03, PSK DTLS 1.3 with a UE independent of wolfSSL; without it, D03 is
@@ -49,11 +53,17 @@ ts="$(date +%Y%m%d-%H%M%S)"
 L="$here/build/e2e/$ts"
 R="akma-e2e/$ts" # relative to the home directory on the free5GC host
 afcfg="$here/config/afcfg.yaml"
-afcfg_ext="$here/config/afcfg-external.yaml"
-aanf="$(sed -n 's#^ *aanfUri: *https\{0,1\}://\([^/[:space:]]*\).*#\1#p' "$afcfg" | head -1)"
-nef="$(sed -n 's#^ *nefUri: *https\{0,1\}://\([^/[:space:]]*\).*#\1#p' "$afcfg_ext" | head -1)"
+afcfg_capif="$here/config/afcfg-capif.yaml"
+entities="$repo/free5gc/config/sba-entities.conf"
+sba="$here/build/sba"     # the certificates of the SBI on this machine
+capif="$here/build/capif" # the enrolment information of CAPIF on this machine
+# sbi_host <name>: <FQDN>:<port> of an NF
+sbi_host() { awk -v n="$1" '$1 == "nf" && $2 == n { print $4 ":" $6 }' "$entities"; }
+aanf="$(sed -n 's#^ *aanfUri: *https://\([^/[:space:]]*\).*#\1#p' "$afcfg" | head -1)"
+nef="$(sbi_host nef)"
+ccf="$(sed -n 's#^ *ccfUri: *https://\([^/[:space:]]*\).*#\1#p' "$afcfg_capif" | head -1)"
 af_ip="$(sed -n 's/^ *listen: *\([0-9.]*\):[0-9]*.*/\1/p' "$afcfg" | head -1)"
-nrf="http://127.0.0.10:8000"
+nrf="https://$(sbi_host nrf)"
 seed_local="$repo/free5gc/build/bin/seed"
 uaclient="$here/build/bin/uaclient"
 vectors="$repo/shared/akma/testdata/vectors.json"
@@ -76,7 +86,7 @@ state() { ssh_b "sed -n 's/^$1=//p' $R/state" | tail -1; }
 # retrieve <A-KID> [AF_ID]: "200 <expiry>" or the error of the AAnF; K_AF is not printed
 retrieve() {
     local out
-    out="$("$seed_local" retrieve --aanf "http://$aanf" --af-id "${2:-$af_id}" --akid "$1" 2>&1)"
+    out="$("$seed_local" retrieve --cert "$sba/af1.pem" --aanf "https://$aanf" --af-id "${2:-$af_id}" --akid "$1" 2>&1)"
     if grep -q '^expiry:' <<<"$out"; then echo "200 $(sed -n 's/^expiry: //p' <<<"$out")"; else sed -n 's/^seed: AAnF answered //p' <<<"$out"; fi
 }
 # kaf_of <vector> <Ua* id>: the K_AF of the K_AKMA of a vector for the AF_ID
@@ -88,23 +98,29 @@ p0 = sys.argv[3].encode() + bytes.fromhex(sys.argv[4])
 print(hmac.new(bytes.fromhex(v["k_akma"]), b"\x82" + p0 + len(p0).to_bytes(2, "big"), hashlib.sha256).hexdigest())' \
         "$vectors" "$1" "$fqdn" "$2"
 }
+# absolute_paths: the configuration in stdin with absolute paths to its files,
+# for a copy in the run directory
+absolute_paths() {
+    awk -v dir="$here/config" '
+        /^ *(certificate|key|ca|ccfCa|aefCa|credential): / && $2 !~ /^\// { sub(/: /, ": " dir "/") }
+        { print }'
+}
 # af_config <base> [digest-http listen]: the base configuration with absolute
-# certificate paths and, when given, the digest-http test profile
+# paths and, when given, the digest-http test profile
 af_config() {
-    awk -v dir="$here/config" -v dh="${2:-}" '
-        /^ *(certificate|key): / && $2 !~ /^\// { sub(/: /, ": " dir "/") }
+    absolute_paths <"$1" | awk -v dh="${2:-}" '
         { print }
-        /^  profiles:/ && dh != "" { print "    - type: digest-http"; print "      listen: " dh }' "$1"
+        /^  profiles:/ && dh != "" { print "    - type: digest-http"; print "      listen: " dh }'
 }
 # digest_http_only <base> <listen>: the base configuration with one
 # digest-http server at <listen> in place of its profiles
 digest_http_only() {
-    awk -v listen="$2" '
+    absolute_paths <"$1" | awk -v listen="$2" '
         /^  profiles:/ { skip = 1; print "  listen: " listen; next }
         skip && /^(  [^ #-]|[^ #])/ { skip = 0 }
         skip { next }
         /^  listen:/ { print "  listen: " listen; next }
-        { print }' "$1"
+        { print }'
 }
 af_instance() { # name listen clockOffset -> pid of an extra AF
     digest_http_only "$afcfg" "$2" | awk -v off="$3" '
@@ -123,6 +139,23 @@ af_variant() {
         /^  listen:/ && extra != "" { print "  " extra }' >"$L/afcfg-$1.yaml"
     "$here/build/bin/af" -c "$L/afcfg-$1.yaml" >"$L/af-$1.log" 2>&1 &
     echo $!
+}
+
+# capif_config <name>: the CAPIF configuration of an extra AF, in the run
+# directory: a state of its own, and offboarding when it stops.
+capif_config() {
+    sed -E \
+        -e "s#^(    state: ).*#\1$L/capif-state-$1.json#" \
+        -e "s#^(    offboardOnExit: ).*#\1true#" "$afcfg_capif" >"$L/capif-$1.yaml"
+    echo "$L/capif-$1.yaml"
+}
+# capif_variant <name> <listen> [line for the configuration] -> pid of an
+# extra AF as API invoker of CAPIF, with one digest-http server at <listen>.
+capif_variant() { af_variant "$1" "$(capif_config "$1")" "$2" "${3:-}"; }
+# capif_state <field>: a field of the state of the AF in CAPIF mode
+capif_state() {
+    python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' \
+        "$L/capif-state-capif.json" "$1" 2>/dev/null
 }
 
 # psk_variant <name> <listen> ["key: value"]... -> pid of an extra AF with one
@@ -159,34 +192,32 @@ wait_log() {
     return 1
 }
 extra_pids=()
-tunnel=""
-# stop_extra stops the AFs of the NEF group (they deregister from the NRF)
-# and the tunnel to the NRF.
+# stop_extra stops the AFs of the NEF and CAPIF groups (the API invokers
+# offboard from the CCF).
 stop_extra() {
     [ "${#extra_pids[@]}" -gt 0 ] && kill -INT "${extra_pids[@]}" 2>/dev/null && sleep 2
     extra_pids=()
-    [ -n "$tunnel" ] && kill "$tunnel" 2>/dev/null
-    tunnel=""
 }
 
 # ---------------------------------------------------------------- local checks
 group_A() { # system up, A_KID_1 registered
     local akid1 out k_ausf supi012 akid012 akid12 pid supi3 k_ausf3
     akid1="$(state A_KID_1)"
+    group_S
     echo "== A: AAnF API from the AF machine; A-KID $akid1"
-    python3 -I "$here/scripts/negative/aanf_api.py" "$aanf" "$akid1" >>"$results" 2>&1
+    python3 -I "$here/scripts/negative/aanf_api.py" "$aanf" "$akid1" "$sba" >>"$results" 2>&1
 
     # AkmaKeyInfo the AAnF must refuse (AUSF role, with an access token)
     k_ausf="$(vec rid-012 k_ausf)"
-    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf http://$aanf --supi imsi-208930000000099 --k-ausf $k_ausf --rid 0000 --mcc 208 --mnc 93 --gpsi msisdn-5511999990000" 2>&1)"
+    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf https://$aanf --supi imsi-208930000000099 --k-ausf $k_ausf --rid 0000 --mcc 208 --mnc 93 --gpsi msisdn-5511999990000" 2>&1)"
     expect N17 "AkmaKeyInfo with supi and gpsi: 400 OPTIONAL_IE_INCORRECT (TS 29.535 table 5.1.6.2.2-1)" "$out" "400 (OPTIONAL_IE_INCORRECT"
-    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf http://$aanf --supi imsi-208930000000099 --k-ausf $k_ausf --rid 0000 --mcc 208 --mnc 93 --k-akma 0123" 2>&1)"
+    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf https://$aanf --supi imsi-208930000000099 --k-ausf $k_ausf --rid 0000 --mcc 208 --mnc 93 --k-akma 0123" 2>&1)"
     expect N18 "kAkma outside the pattern: 400 MANDATORY_IE_INCORRECT" "$out" "400 (MANDATORY_IE_INCORRECT"
 
     # RID "012" and "12" are different A-KIDs (TS 23.003 cl. 2.2B)
     supi012="$(vec rid-012 supi)"
     akid012="$(vec rid-012 a_kid)"
-    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf http://$aanf --supi $supi012 --k-ausf $k_ausf --rid 012 --mcc 345 --mnc 12" 2>&1)"
+    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf https://$aanf --supi $supi012 --k-ausf $k_ausf --rid 012 --mcc 345 --mnc 12" 2>&1)"
     expect N19 "context with RID 012 registered with the A-KID of the oracle" "$out" "a-kid: $akid012"
     expect N20 "retrieve with RID 012: 200" "$(retrieve "$akid012")" "^200 "
     akid12="${akid012/rid012./rid12.}"
@@ -197,7 +228,7 @@ group_A() { # system up, A_KID_1 registered
     # af1.akma.example and whose SUPI is not the one of the UE.
     supi3="$(vec mnc-3-digits supi)"
     k_ausf3="$(vec mnc-3-digits k_ausf)"
-    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf http://$aanf --supi $supi3 --k-ausf $k_ausf3 --rid 7 --mcc 310 --mnc 410" 2>&1)"
+    out="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf https://$aanf --supi $supi3 --k-ausf $k_ausf3 --rid 7 --mcc 310 --mnc 410" 2>&1)"
     expect N22a "context of the vector mnc-3-digits registered" "$out" "a-kid: $(vec mnc-3-digits a_kid)"
     pid="$(af_instance plus2h "$af_ip:8081" 2h)"
     sleep 1
@@ -220,10 +251,30 @@ group_A() { # system up, A_KID_1 registered
     group_D "$akid1" "$akid12"
     group_O "$akid1" "$akid12"
 
-    out="$(ssh_b "~/akma-tools/seed remove --nrf $nrf --aanf http://$aanf --supi $supi012; ~/akma-tools/seed remove --nrf $nrf --aanf http://$aanf --supi $supi3" 2>&1)"
+    out="$(ssh_b "~/akma-tools/seed remove --nrf $nrf --aanf https://$aanf --supi $supi012; ~/akma-tools/seed remove --nrf $nrf --aanf https://$aanf --supi $supi3" 2>&1)"
     expect N26 "test contexts removed" "$(grep -c '^removed' <<<"$out")" "^2$"
 
-    group_nef "$akid1"
+    if capif_files; then
+        group_nef "$akid1"
+        group_cp "$akid1"
+    fi
+}
+
+# The mutual TLS of the SBI from this machine, at the two servers it reaches
+# (TS 33.501 cl. 13.1.0). The free5GC host checks every port in R1s.
+group_S() {
+    echo "== S: TLS of the SBI from the AF machine"
+    python3 -I "$here/scripts/negative/sbi_tls.py" "$entities" "$sba" af1 af aanf nef >>"$results" 2>&1
+}
+
+# capif_files: the enrolment information of this machine (TS 33.122 cl. 6.1
+# step 1), from the free5GC host: the CA of the CCF and the onboarding
+# credential.
+capif_files() {
+    mkdir -p "$capif"
+    scp -q -o BatchMode=yes "$host:$R/ccf-ca.pem" "$host:$R/af1-external.jwt" "$capif/" && return 0
+    fail CP00 "the CA of the CCF and the onboarding credential not copied from $host"
+    return 1
 }
 
 # The TLS profiles (TS 24.109 Annex K): what the AF saw of the sessions of
@@ -272,7 +323,7 @@ group_T() {
     # an AUSF) gives the AAnF a fresh K_AF, as a new primary authentication
     # would with a new A-KID.
     fresh_context() {
-        ssh_b "~/akma-tools/seed remove --nrf $nrf --aanf http://$aanf --supi $(vec mnc-3-digits supi); ~/akma-tools/seed register --nrf $nrf --aanf http://$aanf --supi $(vec mnc-3-digits supi) --k-ausf $(vec mnc-3-digits k_ausf) --rid 7 --mcc 310 --mnc 410" >/dev/null 2>&1
+        ssh_b "~/akma-tools/seed remove --nrf $nrf --aanf https://$aanf --supi $(vec mnc-3-digits supi); ~/akma-tools/seed register --nrf $nrf --aanf https://$aanf --supi $(vec mnc-3-digits supi) --k-ausf $(vec mnc-3-digits k_ausf) --rid 7 --mcc 310 --mnc 410" >/dev/null 2>&1
     }
     pid="$(psk_variant refetch "$af_ip:8447" "clockOffset: 3590s" "kafExpiry: refetch")"
     fresh_context
@@ -303,23 +354,49 @@ group_T() {
 }
 
 # The AF outside the operator network, through the NEF (TS 33.535 cl. 6.3),
-# and anonymous access (cl. 6.2.2). The extra AFs stay up for the Ua* of the
-# UE (R2n) and are stopped in group B. The NRF listens on a loopback address
-# of the free5GC host: the AFs reach it through an SSH tunnel.
+# as API invoker of CAPIF (TS 29.522 cl. 7.2), and anonymous access
+# (cl. 6.2.2). The extra AFs stay up for the Ua* of the UE (R2n) and are
+# stopped in group B. The access token of the NRF for 3gpp-akma, for E05, comes
+# from the seed tool on the free5GC host.
 group_nef() {
-    local akid1="$1" out
+    local akid1="$1" name
     echo "== A (NEF): AF outside the operator network and anonymous access"
-    ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L "${nrf#http://}:${nrf#http://}" "$host" &
-    tunnel=$!
-    sleep 2
-    extra_pids+=("$(af_variant nef "$afcfg_ext" "$af_ip:8083")")
-    extra_pids+=("$(af_variant nef-anon "$afcfg_ext" "$af_ip:8084" "anonymous: true")")
+    extra_pids+=("$(capif_variant nef "$af_ip:8083")")
+    extra_pids+=("$(capif_variant nef-anon "$af_ip:8084" "anonymous: true")")
     extra_pids+=("$(af_variant anon "$afcfg" "$af_ip:8085" "anonymous: true")")
-    extra_pids+=("$(PSK_BASE="$afcfg_ext" psk_variant nef-psk "$af_ip:8456")")
-    sleep 3
-    expect E00 "AFs outside the operator network registered at the NRF through the tunnel" \
-        "$(cat "$L/af-nef.log" "$L/af-nef-anon.log" | grep -c 'registered at the NRF')" "^2$"
-    python3 -I "$here/scripts/negative/nef_api.py" "${nrf#http://}" "$nef" "$aanf" "$af_ip" "$akid1" >>"$results" 2>&1
+    extra_pids+=("$(PSK_BASE="$(capif_config nef-psk)" psk_variant nef-psk "$af_ip:8456")")
+    for name in nef nef-anon nef-psk; do
+        wait_log "$L/af-$name.log" "The NEF has the authentication data of API invoker" 30
+    done
+    expect E00 "AFs outside the operator network onboarded at the CCF, with the NEF discovered there" \
+        "$(cat "$L/af-nef.log" "$L/af-nef-anon.log" "$L/af-nef-psk.log" | grep -ac 'The NEF has the authentication data')" "^3$"
+    (umask 077 && ssh_b "~/akma-tools/seed token --nrf $nrf --target NEF --scope 3gpp-akma" >"$L/.nrf-token" 2>/dev/null)
+    # A context with the default Routing Indicator, "0" (TS 23.003 cl. 2.2B),
+    # for G10.
+    local supi0="imsi-208930000000096" akid0
+    akid0="$(ssh_b "~/akma-tools/seed register --nrf $nrf --aanf https://$aanf --supi $supi0 --k-ausf $(vec rid-012 k_ausf) --rid 0 --mcc 208 --mnc 93" 2>&1 |
+        sed -n 's/^a-kid: //p')"
+    python3 -I "$here/scripts/negative/nef_api.py" "$ccf" "$capif/ccf-ca.pem" "$capif/af1-external.jwt" \
+        "$nef" "$aanf" "$akid1" "$sba" "$L/.nrf-token" "$akid0" >>"$results" 2>&1
+    rm -f "$L/.nrf-token"
+    ssh_b "~/akma-tools/seed remove --nrf $nrf --aanf https://$aanf --supi $supi0" >/dev/null 2>&1
+}
+
+# The AF outside the operator network as API invoker of CAPIF (TS 29.522
+# cl. 7.2) and a second API invoker in Python, independent of the Go code.
+# The AF stays up for the Ua* of the UE (R2c) and offboards in group B.
+capif_secret=""
+group_cp() {
+    local akid1="$1"
+    echo "== A (CAPIF): the AF as API invoker of the CCF"
+    extra_pids+=("$(capif_variant capif "$af_ip:8086")")
+    wait_log "$L/af-capif.log" "The NEF has the authentication data of API invoker" 30
+    expect CP00 "the AF in CAPIF mode starts: onboarding, discovery, OAUTH and check-authentication" \
+        "$(grep -acE 'Onboarded at the CCF|3gpp-akma discovered at|Security method OAUTH|The NEF has the authentication data' \
+            "$L/af-capif.log")" "^4$"
+    capif_secret="$(capif_state onboardingSecret)"
+    python3 -I "$here/scripts/negative/capif_api.py" "$ccf" "$capif/ccf-ca.pem" "$capif/af1-external.jwt" \
+        "$nef" "$aanf" "$akid1" "$(capif_state apiInvokerId)" "$sba" >>"$results" 2>&1
 }
 
 # The DTLS profiles (TS 33.535 Annex C): what the AF saw of the associations
@@ -419,8 +496,16 @@ group_B() { # after the new authentication
     akid1="$(state A_KID_1)"
     akid2="$(state A_KID_2)"
     stop_extra
-    expect E12 "AFs outside the operator network deregistered from the NRF" \
-        "$(cat "$L/af-nef.log" "$L/af-nef-anon.log" | grep -c 'Deregistered from the NRF')" "^2$"
+    expect E12 "AFs outside the operator network offboarded from the CCF (TS 33.122 cl. 6.8)" \
+        "$(cat "$L/af-nef.log" "$L/af-nef-anon.log" "$L/af-nef-psk.log" | grep -ac 'Offboarded from the CCF')" "^3$"
+    expect CP19 "the AF in CAPIF mode offboards when it stops (TS 33.122 cl. 6.8)" \
+        "$(grep -c 'Offboarded from the CCF' "$L/af-capif.log")" "^1$"
+    if grep -aqE 'eyJ[A-Za-z0-9_-]{8,}|PRIVATE KEY' "$L/af-capif.log" "$L"/af-nef*.log ||
+        { [ -n "$capif_secret" ] && grep -aqF -- "$capif_secret" "$L/af-capif.log"; }; then
+        fail CP20.af "no access token, onboarding credential, onboarding secret or private key in the log of the AF"
+    else
+        pass CP20.af "no access token, onboarding credential, onboarding secret or private key in the log of the AF"
+    fi
     echo "== B: A-KID after a new authentication"
     expect B1 "previous A-KID refused by the AAnF: 403 K_AKMA_NOT_PRESENT (TS 33.535 cl. 6.1 NOTE 1a)" "$(retrieve "$akid1")" "^403 (K_AKMA_NOT_PRESENT)"
     expect B2 "new A-KID: 200" "$(retrieve "$akid2")" "^200 "
@@ -449,22 +534,36 @@ worker() {
 
 # ---------------------------------------------------------------- preflight
 echo "== preflight"
+[ -n "$ccf" ] || { echo "ccfUri missing in $afcfg_capif" >&2; exit 1; }
 for f in "$here/build/bin/af" "$uaclient" "$seed_local"; do
     [ -x "$f" ] || { echo "$f missing: run af/scripts/build-af.sh and free5gc/scripts/build-aanf.sh" >&2; exit 1; }
 done
 [ -f "$ca" ] || { echo "$ca missing: run af/scripts/make-test-ca.sh" >&2; exit 1; }
 ssh_b true || { echo "cannot reach $host by SSH" >&2; exit 1; }
 for f in akma-free5gc/af/scripts/e2e-remote.sh akma-free5gc/af/scripts/ue-netns.sh akma-free5gc/af/build/bin/uaclient \
-    akma-tools/seed UERANSIM/build/nr-akma-selftest; do
+    akma-tools/seed UERANSIM/build/nr-akma-selftest free5gc/bin/ccf free5gc/config/ccfcfg.yaml free5gc/cert/ccf-ca.pem \
+    free5gc/bin/crl free5gc/config/crlcfg.yaml free5gc/cert/sba/sba-ca.pem; do
     ssh_b "test -e $f" || { echo "$host:$f missing (see the prerequisites in $0)" >&2; exit 1; }
 done
 [ -n "$aanf" ] && [ -n "$af_ip" ] || { echo "aanfUri or listen missing in $afcfg" >&2; exit 1; }
-bind="$(ssh_b "sed -n 's/^ *bindingIPv4: *\([0-9.]*\).*/\1/p' ~/free5gc/config/aanfcfg.yaml" | head -1)"
-[ "${aanf%:*}" = "$bind" ] ||
-    { echo "aanfUri of $afcfg ($aanf) is not the AAnF of $host (bindingIPv4 ${bind:-missing})" >&2; exit 1; }
+name="$(ssh_b "sed -n 's/^ *fqdn: *\([^ #]*\).*/\1/p' ~/free5gc/config/aanfcfg.yaml" | head -1)"
+[ "${aanf%:*}" = "$name" ] ||
+    { echo "aanfUri of $afcfg ($aanf) is not the AAnF of $host (sbi.fqdn ${name:-missing})" >&2; exit 1; }
+for name in "${aanf%:*}" "${nef%:*}"; do
+    getent hosts "$name" >/dev/null || { echo "$name not resolved here: add it to /etc/hosts" >&2; exit 1; }
+done
+# The certificates of this machine: the CA, the AF, and the certificates of the
+# negative tests; the public certificates of the two servers it reaches.
+files=(sba-ca.pem aanf.pem nef.pem)
+for name in af1 revoked no-crldp other-ca; do files+=("$name.pem" "$name.key"); done
+mkdir -p "$sba"
+scp -q -o BatchMode=yes "${files[@]/#/$host:free5gc/cert/sba/}" "$sba/" ||
+    { echo "the certificates of the SBI not copied from $host" >&2; exit 1; }
 {
     echo "commit $(git -C "$repo" describe --always --dirty 2>/dev/null)"
-    for nf in nrf udm ausf amf config run; do ssh_b "~/akma-free5gc/free5gc/scripts/patch-nf.sh $nf status | head -1"; done
+    for nf in nrf amf smf udr pcf udm nssf ausf chf nef bsf config run; do
+        ssh_b "~/akma-free5gc/free5gc/scripts/patch-nf.sh $nf status | head -1"
+    done
     ssh_b "~/akma-free5gc/af/scripts/patch-ueransim.sh status | head -1"
 } | tee "$L/preflight.txt"
 out="$(ssh_b "~/UERANSIM/build/nr-akma-selftest ~/akma-free5gc/shared/akma/testdata/vectors.json" 2>&1)"
@@ -497,6 +596,12 @@ if grep -aEq '[0-9a-fA-F]{64}' "$L/af.log" "$L"/af-*.log 2>/dev/null; then
 else
     pass L1 "no 64-hexadecimal string in the AF logs"
 fi
+if [ -n "$(find "$repo" -name '*sslkey*' -size +0 -newer "$L/preflight.txt" 2>/dev/null)" ] ||
+    grep -aqE 'PRIVATE KEY|_TRAFFIC_SECRET|CLIENT_RANDOM|EXPORTER_SECRET' "$L/af.log" "$L"/af-*.log; then
+    fail S19.af "no file of TLS secrets and no private key or TLS secret in the AF logs"
+else
+    pass S19.af "no file of TLS secrets and no private key or TLS secret in the AF logs"
+fi
 
 # ---------------------------------------------------------------- report
 all="$(cat "$L/remote/remote-results.txt" "$results" 2>/dev/null)"
@@ -516,7 +621,7 @@ nskip="$(grep -c '^SKIP' <<<"$all")"
     grep '^A_KID' "$L/remote/state" 2>/dev/null
     echo '```'
     echo
-    echo "## Free5GC host (R) and AF machine (S, N, T, D, O, B, C, L)"
+    echo "## Free5GC host (R, S) and AF machine (S, N, E, CP, T, D, O, B, C, L)"
     echo
     echo "| | Check | Result |"
     echo "|---|---|---|"

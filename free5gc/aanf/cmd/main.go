@@ -8,7 +8,6 @@ import (
 	"context"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/debug"
 	"syscall"
 
@@ -55,8 +54,7 @@ func main() {
 }
 
 func action(cliCtx *cli.Context) error {
-	tlsKeyLogPath, err := initLogFile(cliCtx.StringSlice("log"))
-	if err != nil {
+	if err := initLogFile(cliCtx.StringSlice("log")); err != nil {
 		return err
 	}
 
@@ -78,7 +76,7 @@ func action(cliCtx *cli.Context) error {
 	}
 	factory.AanfConfig = cfg
 
-	aanf, err := service.NewApp(ctx, cfg, tlsKeyLogPath)
+	aanf, err := service.NewApp(ctx, cfg)
 	if err != nil {
 		sigCh <- nil
 		return err
@@ -90,26 +88,11 @@ func action(cliCtx *cli.Context) error {
 	return nil
 }
 
-func initLogFile(logNfPath []string) (string, error) {
-	logTlsKeyPath := ""
-
+func initLogFile(logNfPath []string) error {
 	for _, path := range logNfPath {
 		if err := logger_util.LogFileHook(logger.Log, path); err != nil {
-			return "", err
+			return err
 		}
-
-		if logTlsKeyPath != "" {
-			continue
-		}
-
-		nfDir, _ := filepath.Split(path)
-		tmpDir := filepath.Join(nfDir, "key")
-		if err := os.MkdirAll(tmpDir, 0o775); err != nil {
-			logger.InitLog.Errorf("Make directory %s failed: %+v", tmpDir, err)
-			return "", err
-		}
-		logTlsKeyPath = filepath.Join(tmpDir, "aanf_sslkey.log")
 	}
-
-	return logTlsKeyPath, nil
+	return nil
 }

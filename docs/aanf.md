@@ -11,11 +11,12 @@ The AAnF here is a new NF with the layout of the free5GC v4.2.3 NFs (`cmd`, `pkg
 | `free5gc/aanf/pkg/service/init.go` | life cycle: context, SBI server, registration at the NRF and deregistration |
 | `free5gc/aanf/internal/context/context.go` | NF context, token checks, AF and NEF policies |
 | `free5gc/aanf/internal/context/akma_context.go` | storage of the AKMA contexts |
-| `free5gc/aanf/internal/sbi/` | h2c server, routes, protocol errors, the three operations, Nnrf_NFManagement |
+| `free5gc/aanf/internal/sbi/` | SBI server (mutual TLS, or h2c with `http`), routes, protocol errors, the headers of TS 29.500, the three operations, Nnrf_NFManagement with the heart-beat, the client of the UDM |
 | `free5gc/aanf/internal/util/problem.go` | `ProblemDetails` |
-| `free5gc/aanf/tools/seed/` | test tool that plays the AUSF, the AF and the OAM |
+| `free5gc/aanf/tools/seed/` | test tool that plays the AUSF, the AF and the OAM, as a TLS client with the certificate of each role |
 | `free5gc/config/aanfcfg.yaml` | example configuration |
 | `free5gc/scripts/{prepare-openapi,build-aanf,run-aanf,deploy}.sh` | preparation, build, run, deployment |
+| `free5gc/scripts/make-sba-certs.sh` | the certificate of the AAnF and of its consumers ([sbi-tls.md](sbi-tls.md)) |
 
 On the free5GC host:
 
@@ -24,24 +25,28 @@ On the free5GC host:
 | `~/free5gc/bin/aanf` | new file, static binary |
 | `~/free5gc/config/aanfcfg.yaml` | new file |
 | `~/free5gc/log/aanf/` | created by `run-aanf.sh` (log, output, pid). With `./run.sh -aanf` the log goes to the `free5gc.log` of the other NFs |
-| `~/free5gc/cert/aanf.pem`, `cert/aanf_<id>.pem` | created by the NRF when OAuth2 is on |
+| `~/free5gc/cert/sba/aanf.pem`, `aanf.key` | made by `make-sba-certs.sh`; the NRF no longer makes certificates |
 
-Dependencies: `free5gc/openapi` v1.2.4 with the Naanf_AKMA patches (`free5gc/patches/openapi/`), `free5gc/util` v1.3.2, `shared/akma`.
+Dependencies: `free5gc/openapi` v1.2.4 with the patches of `free5gc/patches/openapi/` (Naanf_AKMA, the TLS of the SBI, the checks of the access tokens, `retrieve-key`), `free5gc/util` v1.3.2, `shared/akma`.
 
 ## 1. Configuration
 
-On top of the fields that all free5GC NFs have (`sbi`, `serviceNameList`, `nrfUri`, `nrfCertPem`, `plmnSupportList`, `logger`). The SBI port is **8010**: the free5GC NFs use 8000, and none of them uses 8010.
+On top of the fields that all free5GC NFs have (`sbi`, `serviceNameList`, `nrfUri`, `nrfCertPem`, `plmnSupportList`, `logger`). The SBI port is **8010**: the free5GC NFs use 8000, and none of them uses 8010. `nrfUri` is the name of the NRF, `https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000`, and `nrfCertPem` its token signing certificate, `cert/sba/nrf-token.pem`.
 
 | Field | Example | Rule | Specification |
 |---|---|---|---|
-| `nfInstanceId` | fixed UUID v4 | optional; without it, a new one at each start. Keep it fixed: with OAuth2 on, each new ID makes the NRF write one more certificate | — |
+| `nfInstanceId` | fixed UUID v4 | the one of the certificate of the AAnF, in `sba-entities.conf`; without it, a new one at each start, which the NRF refuses with TLS | TS 33.310 cl. 6.1.3c.3 |
+| `sbi.scheme` | `https` | `https`, mutual TLS; `http` is h2c, without TLS | TS 33.501 cl. 13.1.0 |
+| `sbi.fqdn` | `aanf.5gc.mnc093.mcc208.3gppnetwork.org` | required with `https`: the AAnF does not start without it | TS 29.510 table 6.1.6.2.2-1 NOTE 1 |
+| `sbi.tls.pem`, `sbi.tls.key`, `sbi.tls.ca` | `cert/sba/aanf.pem`, `…/aanf.key`, `…/sba-ca.pem` | the certificate of the AAnF and the CA of the operator, which checks the peers | TS 33.310 cl. 6.1.3c |
+| `heartBeatTimer` | `60` | seconds, 0 to 3600; the interval proposed to the NRF at registration, whose answer prevails; 0 or absent, the default of 60 s (section 10) | TS 29.510 cl. 5.2.2.3.2 |
 | `serviceNameList` | `[naanf-akma]` | the only accepted value | TS 29.535 cl. 5.1.1 |
 | `routingIndicators` | `["0000"]` | strings of 1 to 4 digits; empty means any RID. `0000` without quotes is still read as `"0000"` | TS 29.510 `AanfInfo`; TS 23.003 cl. 2.2B |
 | `akma.kafLifetime` | `1h` | positive Go duration; default `1h` | operator policy, TS 33.535 cl. 5.2 |
 | `akma.kakmaRefresh` | `0` | Go duration; `0` or absent, the default, turns it off. With a value, a K_AF request for a K_AKMA registered longer ago makes the AAnF ask the UDM for a new primary authentication (section 8) | operator policy, TS 33.535 cl. 6.4.4 |
 | `akma.authorizedAfs[].afId` | `af1.akma.example.FF00000001` | transport form `<FQDN>.<10 hex digits>` | TS 29.522 `AfId` |
-| `akma.authorizedAfs[].sourceAddresses` | `[192.168.16.129]` | at least one IP address | local policy, section 4 |
-| `akma.authorizedNefs[].sourceAddresses` | `[192.168.16.130]` | at least one IP address: those of the NEF | local policy, section 5 |
+| `akma.authorizedAfs[].nfInstanceIds` | `[2170454b-…]` | at least one: the NF instance IDs of the client certificates of the AF | local policy, section 4; TS 33.501 cl. 13.1.0 |
+| `akma.authorizedNefs[].nfInstanceIds` | `[8e73ad07-…]` | at least one: the NF instance ID of the certificate of the NEF | section 5 |
 | `akma.authorizedNefs[].afIds` | `[af1.akma.example.FF00000001]` | at least one AF_ID in transport form: the external AFs accepted from that NEF | TS 33.535 cl. 6.3 step 3 |
 | `akma.roamingStatusSubscription` | `false` | `true` stops the start: not implemented | TS 33.535 cl. 6.2.1 step 5 |
 | `akma.aKid` | `atidEncoding`, `atidLabel`, `acceptLabels` | default: base64, writes `atid`, accepts `atid` and `akid` | see section 2.4 |
@@ -101,61 +106,52 @@ In memory (`internal/context/akma_context.go`), lost when the AAnF restarts. Ind
 
 ## 4. Authorization
 
-**`register-anchorkey` and `remove-context`: OAuth2.** TS 29.535 cl. 5.1.9: access *"may be authorized"* with OAuth2, by local configuration. The NRF tells the AAnF whether OAuth2 is on. The token is checked as TS 33.501 cl. 13.4.1.1.2 step 2 says:
+**Access tokens.** TS 29.535 cl. 5.1.9: access *"may be authorized"* with OAuth2, by local configuration; the NRF tells the AAnF whether OAuth2 is on. The token is checked as TS 33.501 cl. 13.4.1.1.2 step 2 says, with the checks of `openapi/0006` that every NF uses ([sbi-tls.md](sbi-tls.md), section 5): `ES256` with the signing certificate of the NRF, `kid` and `x5t#S256`, `iss`, `aud` (the `nfInstanceId` of the AAnF or `AANF`), `sub` equal to the client certificate of the session, `exp`, and the scopes of the operation (TS 29.535 table 5.1.9-1):
 
-| Check | Done by |
+| Operation | Scopes required |
 |---|---|
-| `Bearer` scheme | the AAnF |
-| RS512 signature with the NRF certificate | `oauth.VerifyOAuth` of free5GC |
-| `scope` contains `naanf-akma` | `oauth.VerifyOAuth`. The finer scopes of TS 29.535 table 5.1.9-1 are not required (TS 33.501 cl. 13.4.1.0 makes additional scopes optional) |
-| `exp` in the future | the AAnF; `VerifyOAuth` does not check it (F5) |
-| `aud` equal to the `nfInstanceId` of the AAnF or to `AANF`; missing or empty is refused | the AAnF. Needs the NRF fix F3 |
+| `register-anchorkey`, `remove-context` | `naanf-akma` and `naanf-akma:anchorkey` |
+| `retrieve-applicationkey` | `naanf-akma` and `naanf-akma:applicationkeyget`; the answer has `supi` only with `naanf-akma:applicationkeyget:supi-access` |
 
-A missing or invalid token gives 401 with `WWW-Authenticate: Bearer` (or `Bearer error="invalid_token"`, RFC 6750 cl. 3) and `ProblemDetails`.
+The AAnF registers the scopes of each NF type in `allowedOperationsPerNfType`, and the NRF only grants those (TS 29.510 table 6.1.6.2.3-1 NOTE 11): `naanf-akma:anchorkey` to the AUSF, `applicationkeyget` and `supi-access` to the NEF and to the AF. A missing or invalid token gives 401, with `WWW-Authenticate: Bearer` (or `error="invalid_token"`) and `ProblemDetails`; a token for another producer or of another client gives 403 `ACCESS_TOKEN_CLAIM_MISMATCH`; a missing scope gives 403 with `error="insufficient_scope"` (TS 29.500 cl. 6.7.3). `register-anchorkey` and `remove-context` always need the token when OAuth2 is on.
 
-**`retrieve-applicationkey`: local policy.** TS 33.535 cl. 6.2.1 step 2: the AAnF checks the request *"based on the configured local policy or based on the authorization information available in the signalling (i.e., Oauth2.0 token)"*. An AF inside the operator network does not need to reach the NRF, so the local policy applies:
+**`retrieve-applicationkey`: local policy by certificate.** TS 33.535 cl. 6.2.1 step 2: the AAnF checks the request *"based on the configured local policy or based on the authorization information available in the signalling (i.e., Oauth2.0 token)"*. An AF inside the operator network does not need to reach the NRF, so the request may come without a token, and the local policy applies. The identity of the consumer is the NF instance ID in the URI of its client certificate, and its type the `nfTypes` of the certificate (TS 33.310 cl. 6.1.3c.3; TS 33.501 cl. 13.1.0):
 
-- each authorized AF_ID is bound to the source addresses it may be requested from;
-- the address is that of the connection, never `X-Forwarded-For`;
+- each authorized AF_ID is bound to the NF instance IDs of the AF that may ask for it, and the certificate has to be of type `AF`;
+- the source address is only logged;
 - the FQDN is compared exactly, since it goes into the KDF.
 
-An AF outside the policy, or an AF_ID requested from another address, gets 403 without `cause`: no cause is defined for it.
+An AF outside the policy, or an AF_ID asked with the certificate of another AF, gets 403 without `cause`: no cause is defined for it. With `sbi.scheme: http`, as in the free5GC test bench, there is no certificate, and the policy is only the list of AF_IDs.
 
 ## 5. Requests relayed by a NEF
 
-TS 33.535 cl. 6.3 step 3: through the NEF, the AAnF handles the request as in cl. 6.2.1. The specification has no separate step for recognizing the NEF. TS 33.501 gives the general mechanisms between NFs:
-
-- cl. 13.3.2.1: without TLS, *"authentication between NFs within one PLMN may be implicit by NDS/IP or physical security"*;
-- cl. 13.3.0: without a token, the producer checks the consumer *"based on its local policy"*;
-- cl. 13.4.1.1.2: the token, which the NRF only issues after checking the consumer.
-
-The AAnF uses all three, with `akma.authorizedNefs`:
+TS 33.535 cl. 6.3 step 3: through the NEF, the AAnF handles the request as in cl. 6.2.1. The specification has no separate step for recognizing the NEF. The AAnF knows it by its certificate, with `akma.authorizedNefs`:
 
 ```yaml
 configuration:
   akma:
     authorizedNefs:
-      - sourceAddresses:
-          - 192.168.16.130
+      - nfInstanceIds:
+          - 8e73ad07-906c-4952-93ac-cd32bbb076ed # the certificate of the NEF
         afIds:
           - af1.akma.example.FF00000001
 ```
 
-1. If the request has `Authorization`, the token is checked as for `register-anchorkey` (section 4): scope `naanf-akma`, `exp`, `aud`. Invalid: 401.
-2. With a valid token and the source address in an `authorizedNefs` entry, the request is taken as coming from the NEF. The `afId` has to be in the `afIds` of that entry; otherwise 403 without `cause`.
-3. In every other case `authorizedAfs` applies: AF_ID bound to source addresses.
+1. If the request has `Authorization`, the token is checked as in section 4. Invalid: 401 or 403.
+2. When the certificate is of type `NEF` and its NF instance ID is in an `authorizedNefs` entry, with a valid token or with OAuth2 off, the request is taken as coming from the NEF. The `afId` has to be in the `afIds` of that entry; otherwise 403 without `cause`.
+3. In every other case `authorizedAfs` applies (section 4).
 
-Without `authorizedNefs` there is no NEF path. When the NEF and the AUSF run on the same host, another NF of that host with a `naanf-akma` token could pass for the NEF, but only for the AF_IDs of the list. TLS with NF certificates and per-type scopes (F4 in [free5gc-fixes.md](free5gc-fixes.md)) would close that.
+Without `authorizedNefs` there is no NEF path. The NEF asks with `Naanf_AKMA_ApplicationKey_Get`, also for an anonymous AF, and gets the SUPI, which it does not pass on (TS 33.535 cl. 6.3 steps 3 and 5).
 
 ## 6. Errors
 
-TS 29.535 cl. 5.1.7.1; TS 29.500 table 5.2.7.1-1 and cl. 5.2.7.2. Every error answer carries `ProblemDetails` in `application/problem+json`. Tests in `free5gc/aanf/internal/sbi/api_akma_test.go`, over h2c.
+TS 29.535 cl. 5.1.7.1; TS 29.500 table 5.2.7.1-1 and cl. 5.2.7.2. Every error answer carries `ProblemDetails` in `application/problem+json`, and the headers of section 10. Tests in `free5gc/aanf/internal/sbi/api_akma_test.go`.
 
 | Code | When | Cause |
 |---|---|---|
 | 400 | invalid JSON or wrong type; mandatory attribute missing or wrong; API version other than `v1` | `INVALID_MSG_FORMAT`, `MANDATORY_IE_MISSING`, `MANDATORY_IE_INCORRECT`, `OPTIONAL_IE_INCORRECT`, `INVALID_API` |
-| 401 | token missing or invalid (section 4) | — |
-| 403 | no K_AKMA; AF or NEF not authorized | `K_AKMA_NOT_PRESENT`; no cause |
+| 401 | token missing or invalid (section 4) | `ACCESS_TOKEN_CLAIM_MISSING` when a claim is missing |
+| 403 | no K_AKMA; AF or NEF not authorized; token of another producer or client; missing scope | `K_AKMA_NOT_PRESENT`; no cause; `ACCESS_TOKEN_CLAIM_MISMATCH`; no cause, with `insufficient_scope` |
 | 404 | no context to remove; unknown operation; path outside the API | `AKMA_CONTEXT_NOT_FOUND`; `RESOURCE_URI_STRUCTURE_NOT_FOUND`; no cause |
 | 411 | invalid `Content-Length`, or different from the body received | `INCORRECT_LENGTH` |
 | 413 | body above 16 000 000 octets (TS 29.501 cl. 6.2), declared or not | `MAX_JSON_SIZE_EXCEEDED` |
@@ -176,7 +172,10 @@ No key is logged, at any level. SUPI, A-KID and AF_ID are logged at `info`, unde
 | info | `K_AF of <SUPI> provided to AF_ID <AF_ID> for A-KID <A-KID>, expires <time>`, with `, through the NEF at <address>` when relayed |
 | info | `K_AKMA not present for A-KID <A-KID>, requested by AF_ID <AF_ID>` |
 | info | `AKMA context of <SUPI> removed`, or `... to remove not found` |
-| warn | `AF at <address> not authorized for AF_ID <AF_ID>`, `NEF at <address> not authorized for AF_ID <AF_ID>` |
+| warn | `NF <NF instance ID> at <address> not authorized for AF_ID <AF_ID>`, `NEF <NF instance ID> at <address> not authorized for AF_ID <AF_ID>` |
+| info | `K_AF … provided …` ends with `, without the SUPI` when the answer has none (anonymous access, or a token without `supi-access`) |
+| info | each request on an `SBI` line: `POST /naanf-akma/v1/<operation>, User-Agent <value>, 3gpp-Sbi-NF-Peer-Info <value>` |
+| info, warn | `Heart-beat sent to the NRF, next in <interval>`; `Heart-beat: the NRF does not have the profile (404); registering again`; `Heart-beat failed: <error>` |
 | info | with `kakmaRefresh`: `K_AKMA refresh requested from the UDM when a K_AF is asked for a K_AKMA older than <duration> (TS 33.535 cl. 6.4.4)` at start; `K_AKMA of <SUPI> registered <age> ago: refresh requested from the UDM (TS 33.535 cl. 6.4.4)`; `UDM for Nudm_UECM_AuthTrigger: <URI> (discovered at the NRF)`; `Refresh of K_AKMA of <SUPI> accepted by the UDM: new primary authentication requested` |
 | warn | `Refresh of K_AKMA of <SUPI> not accepted by the UDM: <status> <cause> (<detail>)` |
 
@@ -186,19 +185,28 @@ TS 33.535 cl. 6.4.1: *"KAKMA shall be re-keyed by running a successful primary a
 
 **Policy.** After it hands out a K_AF, the AAnF looks at the age of the K_AKMA of the context. When it was registered longer ago than `akma.kakmaRefresh`, the AAnF asks the UDM for a new primary authentication in the background; the answer to the AF does not wait. It asks once per K_AKMA, and asks again at the first K_AF request after 5 minutes if the K_AKMA did not change. The K_AF already handed out stays valid until it expires (cl. 6.4.2).
 
-**Request.** The AAnF discovers a UDM with `nudm-uecm` at the NRF once (`target-nf-type=UDM`, `requester-nf-type=AANF`) and keeps its address. With OAuth2 on, it asks the NRF for the `nnrf-disc` and `nudm-uecm` tokens. It sends `POST {apiRoot}/nudm-uecm/v1/{supi}/registrations/trigger-auth` with `{"supi": ...}` and `User-Agent: AANF-<nfInstanceId>` (TS 29.500 table 5.2.2.2-1). The method is POST, as table 6.2.3.13.4.1-1 of TS 29.503 says; the YAML of the API declares `get`. The UDM and the AMF need the patches `udm/0002` and `amf/0001` ([free5gc-fixes.md](free5gc-fixes.md), F17 to F19).
+**Request.** The AAnF discovers a UDM with `nudm-uecm` at the NRF once (`target-nf-type=UDM`, `requester-nf-type=AANF`) and keeps its URI. With OAuth2 on, it asks the NRF for the `nnrf-disc` and `nudm-uecm` tokens. It sends `POST {apiRoot}/nudm-uecm/v1/{supi}/registrations/trigger-auth` with `{"supi": ...}`, `User-Agent: AANF-<nfInstanceId>` and `3gpp-Sbi-NF-Peer-Info` (TS 29.500 table 5.2.2.2-1). The method is POST, as table 6.2.3.13.4.1-1 of TS 29.503 says; the YAML of the API declares `get`. The UDM and the AMF need the patches `udm/0002` and `amf/0001` ([free5gc-fixes.md](free5gc-fixes.md), F17 to F19).
 
 **Tool.** `seed trigger-auth` sends the same request without waiting for the policy:
 
 ```bash
-~/akma-tools/seed trigger-auth --nrf http://127.0.0.10:8000 --supi imsi-208930000000001
+~/akma-tools/seed trigger-auth --nrf https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 --supi imsi-208930000000001
 ```
 
-It prints `accepted (204)`, or `UDM answered <status> (<cause>; <detail>)`. With `--nrf`, it registers at the NRF as a temporary AF for the token. `--method` and `--body` send the request as given, for negative tests.
+It prints `accepted (204)`, or `UDM answered <status> (<cause>; <detail>)`. With `--nrf`, it registers at the NRF as a temporary NF, with the identity of its certificate `seed-af`, for the token. `--method` and `--body` send the request as given, for negative tests.
 
 ## 9. Limitations
 
-- No TLS on the SBI.
 - No roaming status subscription; no GPSI.
 - Contexts in memory, lost on restart; one AAnF only.
-- Needs the fixed NRF. Without `nrf/0003`, tokens come without `aud` and `register-anchorkey` and `remove-context` answer 401. Without `nrf/0001` and `nrf/0002`, the profile has no `aanfInfoList` and the AAnF cannot be discovered.
+- Needs the patched NRF. Without `nrf/0001` and `nrf/0002`, the profile has no `aanfInfoList` and the AAnF cannot be discovered; without `nrf/0003`, tokens come without `aud`; without `nrf/0005`, they are not `ES256` and carry no scopes per operation, and the AAnF refuses them.
+- The policies list NF instance IDs: a new certificate of an AF with another NF instance ID needs its entries changed.
+
+## 10. Heart-beat and the headers of TS 29.500
+
+**Heart-beat** (TS 29.510 cl. 5.2.2.3.2: *"Each NF that has previously registered in NRF shall contact the NRF periodically (heart-beat), by invoking the NFUpdate service operation"*). The AAnF proposes `heartBeatTimer` at registration and follows the interval of the answer of the NRF. At each interval it sends `PATCH /nnrf-nfm/v1/nf-instances/{nfInstanceID}` with `[{"op": "replace", "path": "/nfStatus", "value": "REGISTERED"}]`, without `If-Match`, and an `nnrf-nfm` token. The NRF answers 204, or 200 with the profile. The clause does not say what to do with 404: the NRF no longer has the profile, so the AAnF registers again.
+
+**Headers** (TS 29.500 table 5.2.2.2-1 and cl. 5.2.3.2.21; TS 29.535 cl. 5.1.2.3):
+
+- every answer of the AAnF, errors included, carries `Server: AANF-<nfInstanceId>` and `3gpp-Sbi-NF-Peer-Info: srcinst=<AAnF>; dstinst=<consumer>`, with the consumer taken from its client certificate or, without TLS, from the `srcinst` of the request;
+- every request of the AAnF, to the NRF and to the UDM, carries `User-Agent: AANF-<nfInstanceId>` and `3gpp-Sbi-NF-Peer-Info`.

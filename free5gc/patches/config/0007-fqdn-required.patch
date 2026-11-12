@@ -1,0 +1,143 @@
+diff --git a/amfcfg.yaml b/amfcfg.yaml
+index 3f5b53c..7c9b31c 100644
+--- a/amfcfg.yaml
++++ b/amfcfg.yaml
+@@ -12,7 +12,7 @@ configuration:
+   nfInstanceId: 63db01ad-fce2-4fde-8b78-3a62c60f3b8e # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi:
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: amf1.amf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: amf1.amf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.18 # IP used to register to NRF
+     bindingIPv4: 127.0.0.18  # IP used to bind the service
+     port: 8000 # port used to bind the service
+diff --git a/ausfcfg.yaml b/ausfcfg.yaml
+index c727130..f576f37 100644
+--- a/ausfcfg.yaml
++++ b/ausfcfg.yaml
+@@ -6,7 +6,7 @@ configuration:
+   nfInstanceId: 50188f39-0103-42de-9c96-08d90549a2c0 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: ausf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: ausf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.9 # IP used to register to NRF
+     bindingIPv4: 127.0.0.9  # IP used to bind the service
+     port: 8000 # Port used to bind the service
+diff --git a/bsfcfg.yaml b/bsfcfg.yaml
+index f7b3c45..818f9d8 100644
+--- a/bsfcfg.yaml
++++ b/bsfcfg.yaml
+@@ -7,7 +7,7 @@ configuration:
+   nfInstanceId: 19d6c78c-73ed-4add-b121-78f3581c2c66 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: bsf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: bsf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.15 # IP used to register to NRF
+     bindingIPv4: 127.0.0.15  # IP used to bind the service
+     port: 8000 # Port used to bind the service
+diff --git a/chfcfg.yaml b/chfcfg.yaml
+index e216cbe..8838114 100644
+--- a/chfcfg.yaml
++++ b/chfcfg.yaml
+@@ -7,7 +7,7 @@ configuration:
+   nfInstanceId: 58591ae4-e433-4544-913f-8184ec62ac1a # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: chf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: chf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.113 # IP used to register to NRF
+     bindingIPv4: 127.0.0.113 # IP used to bind the service
+     port: 8000 # port used to bind the service
+diff --git a/nefcfg.yaml b/nefcfg.yaml
+index 40018e4..58861a6 100644
+--- a/nefcfg.yaml
++++ b/nefcfg.yaml
+@@ -6,7 +6,7 @@ configuration:
+   nfInstanceId: 8e73ad07-906c-4952-93ac-cd32bbb076ed # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi:
+     scheme: https # The protocol for sbi (http or https)
+-    fqdn: nef.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: nef.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 192.168.16.130 # IP used to register to NRF; reachable from the external AF (AKMA, TS 33.535 cl. 6.3)
+     bindingIPv4: 192.168.16.130 # IP used to bind the service
+     port: 8000 # port used to bind the service
+diff --git a/nrfcfg.yaml b/nrfcfg.yaml
+index 955ec23..c7450cd 100644
+--- a/nrfcfg.yaml
++++ b/nrfcfg.yaml
+@@ -8,7 +8,7 @@ configuration:
+   nfInstanceId: cdee1983-45ab-41a6-8f5b-6f832d5206e8 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: nrf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: nrf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.10 # IP used to serve NFs or register to another NRF
+     bindingIPv4: 127.0.0.10  # IP used to bind the service
+     port: 8000 # port used to bind the service
+diff --git a/nssfcfg.yaml b/nssfcfg.yaml
+index 733fa86..9dddd07 100644
+--- a/nssfcfg.yaml
++++ b/nssfcfg.yaml
+@@ -7,7 +7,7 @@ configuration:
+   nfInstanceId: 230cf6b8-a555-44d2-951b-46c1f99c052c # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: nssf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: nssf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.31 # IP used to register to NRF
+     bindingIPv4: 127.0.0.31  # IP used to bind the service
+     port: 8000 # Port used to bind the service
+diff --git a/pcfcfg.yaml b/pcfcfg.yaml
+index a4e34c2..e6f79b3 100644
+--- a/pcfcfg.yaml
++++ b/pcfcfg.yaml
+@@ -7,7 +7,7 @@ configuration:
+   nfInstanceId: 0e663921-9c8d-4714-8ee2-9e95b935c339 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: pcf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: pcf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.7 # IP used to register to NRF
+     bindingIPv4: 127.0.0.7  # IP used to bind the service
+     port: 8000              # port used to bind the service
+diff --git a/smfcfg.yaml b/smfcfg.yaml
+index 25d02b4..d927cbe 100644
+--- a/smfcfg.yaml
++++ b/smfcfg.yaml
+@@ -9,7 +9,7 @@ configuration:
+   nfInstanceId: 5668c69e-db35-4954-9b51-8f7a477772a3 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi:
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: smf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: smf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.2 # IP used to register to NRF
+     bindingIPv4: 127.0.0.2 # IP used to bind the service
+     port: 8000 # Port used to bind the service
+diff --git a/udmcfg.yaml b/udmcfg.yaml
+index de8da5e..d426119 100644
+--- a/udmcfg.yaml
++++ b/udmcfg.yaml
+@@ -12,7 +12,7 @@ configuration:
+   nfInstanceId: 878d3e9f-16c2-4ba8-8587-e7a238604028 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: udm.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: udm.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.3 # IP used to register to NRF
+     bindingIPv4: 127.0.0.3  # IP used to bind the service
+     port: 8000 # Port used to bind the service
+diff --git a/udrcfg.yaml b/udrcfg.yaml
+index 579e06e..67cbccc 100644
+--- a/udrcfg.yaml
++++ b/udrcfg.yaml
+@@ -6,7 +6,7 @@ configuration:
+   nfInstanceId: 9a7ed375-75f5-450d-a524-ed1d813fb164 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+     scheme: https # the protocol for sbi (http or https)
+-    fqdn: udr.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
++    fqdn: udr.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
+     registerIPv4: 127.0.0.4 # IP used to register to NRF
+     bindingIPv4: 127.0.0.4  # IP used to bind the service
+     port: 8000 # port used to bind the service

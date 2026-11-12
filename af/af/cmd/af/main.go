@@ -20,6 +20,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/aanf"
+	"github.com/florianoneto07/akma-free5gc/af/af/internal/capif"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/config"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/logger"
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/nef"
@@ -28,6 +29,7 @@ import (
 	"github.com/florianoneto07/akma-free5gc/af/af/internal/server"
 	"github.com/florianoneto07/akma-free5gc/af/akmaoscore"
 	"github.com/florianoneto07/akma-free5gc/af/akmatls"
+	"github.com/free5gc/openapi/sbitls"
 	logger_util "github.com/free5gc/util/logger"
 )
 
@@ -67,11 +69,36 @@ func run(cfgPath, logPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The AF as NF of type AF, a TLS client of the SBI (TS 33.501 cl. 13.1.0).
+	// The nfInstanceId of the configuration is the one of the certificate.
+	if s.SbiTls != nil {
+		if err := sbitls.Init(sbitls.Config{
+			Certificate:  s.SbiTls.Certificate,
+			Key:          s.SbiTls.Key,
+			CA:           s.SbiTls.CA,
+			NfInstanceId: s.NfInstanceID,
+			Logger:       logger.MainLog,
+		}); err != nil {
+			return fmt.Errorf("sbiTls: %w", err)
+		}
+	}
+
 	var keys server.KeyProvider
-	if s.NefURI == "" {
+	switch {
+	case s.Capif != nil:
+		// The AF as API invoker of CAPIF (TS 29.522 cl. 7.2).
+		inv, err := capif.Start(ctx, *s.Capif, "AKMA AF "+s.FQDN)
+		if err != nil {
+			return fmt.Errorf("CAPIF: %w", err)
+		}
+		defer inv.Close(context.Background())
+		logger.MainLog.Infof("AF outside the operator network: K_AF through the NEF at %s, "+
+			"discovered at the CCF %s as API invoker %s", inv.APIRoot(), s.Capif.CcfURI, inv.ID())
+		keys = nef.New(inv.APIRoot(), s.Anonymous, inv)
+	case s.NefURI == "":
 		logger.MainLog.Infof("AF inside the operator network: K_AF from the AAnF at %s", s.AanfURI)
 		keys = aanf.New(s.AanfURI, s.Anonymous)
-	} else {
+	default:
 		host, _, _ := net.SplitHostPort(s.Profiles[0].Listen)
 		reg, err := nrf.Register(ctx, s.NrfURI, s.NfInstanceID, host)
 		if err != nil {

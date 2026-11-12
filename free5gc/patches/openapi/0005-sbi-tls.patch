@@ -1,0 +1,1451 @@
+diff --git a/client.go b/client.go
+index ed3309e..633077c 100644
+--- a/client.go
++++ b/client.go
+@@ -36,6 +36,8 @@ import (
+ 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+ 	"golang.org/x/net/http2"
+ 	"golang.org/x/oauth2"
++
++	"github.com/free5gc/openapi/sbitls"
+ )
+ 
+ const (
+@@ -47,9 +49,7 @@ const (
+ var (
+ 	innerHTTP2Client = &http.Client{
+ 		Transport: otelhttp.NewTransport(&http2.Transport{
+-			TLSClientConfig: &tls.Config{
+-				InsecureSkipVerify: true, // nolint:gosec
+-			},
++			DialTLSContext:  sbitls.DialTLSContext,
+ 			ReadIdleTimeout: ReadIdleTimeoutPeriod,
+ 			PingTimeout:     PingTimeoutPeriod,
+ 		}),
+diff --git a/oauth/peer.go b/oauth/peer.go
+new file mode 100644
+index 0000000..9529e86
+--- /dev/null
++++ b/oauth/peer.go
+@@ -0,0 +1,25 @@
++package oauth
++
++import (
++	"crypto/tls"
++	"encoding/json"
++	"net/http"
++)
++
++// CheckTokenPeer ties an access token to the TLS client of the request. Without
++// a token or without TLS, there is nothing to check.
++func CheckTokenPeer(authorization string, peer *tls.ConnectionState) error {
++	return nil
++}
++
++// WriteTokenError answers a request that the check of the access token refused.
++func WriteTokenError(w http.ResponseWriter, r *http.Request, err error) {
++	body, jsonErr := json.Marshal(map[string]string{"error": err.Error()})
++	if jsonErr != nil {
++		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
++		return
++	}
++	w.Header().Set("Content-Type", "application/json; charset=utf-8")
++	w.WriteHeader(http.StatusUnauthorized)
++	_, _ = w.Write(body)
++}
+diff --git a/sbitls/crl.go b/sbitls/crl.go
+new file mode 100644
+index 0000000..78ee9e1
+--- /dev/null
++++ b/sbitls/crl.go
+@@ -0,0 +1,155 @@
++package sbitls
++
++import (
++	"bytes"
++	"crypto/x509"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++	"sync"
++	"time"
++)
++
++const (
++	crlTimeout = 2 * time.Second
++	crlMaxSize = 1 << 20
++)
++
++// crlStore keeps the CRLs by the URI of the distribution point. A CRL is
++// fetched when it is not in memory and after its nextUpdate, one fetch per URI
++// at a time.
++type crlStore struct {
++	mu      sync.Mutex
++	entries map[string]*crlEntry
++	client  *http.Client
++	log     Logger
++}
++
++type crlEntry struct {
++	mu   sync.Mutex
++	list *x509.RevocationList
++}
++
++func newCrlStore(log Logger) *crlStore {
++	return &crlStore{
++		entries: make(map[string]*crlEntry),
++		log:     log,
++		client: &http.Client{
++			Timeout:   crlTimeout,
++			Transport: &http.Transport{DisableKeepAlives: true},
++			CheckRedirect: func(*http.Request, []*http.Request) error {
++				return http.ErrUseLastResponse
++			},
++		},
++	}
++}
++
++// distributionPoint is the HTTP URI of the CRL distribution point of a
++// certificate; only HTTP is supported (TS 33.310 cl. 6.1a).
++func distributionPoint(cert *x509.Certificate) string {
++	for _, uri := range cert.CRLDistributionPoints {
++		if strings.HasPrefix(uri, "http://") {
++			return uri
++		}
++	}
++	return ""
++}
++
++// check refuses a certificate without a distribution point, without a valid
++// CRL, or revoked (TS 33.310 cl. 6.3.1).
++func (s *crlStore) check(cert, issuer *x509.Certificate) error {
++	uri := distributionPoint(cert)
++	if uri == "" {
++		return errors.New("certificate without an HTTP CRL distribution point")
++	}
++	list, err := s.get(uri, []*x509.Certificate{issuer})
++	if err != nil {
++		return fmt.Errorf("CRL %s not available: %w", uri, err)
++	}
++	for _, revoked := range list.RevokedCertificateEntries {
++		if revoked.SerialNumber.Cmp(cert.SerialNumber) == 0 {
++			return fmt.Errorf("certificate %s revoked", cert.SerialNumber.Text(16))
++		}
++	}
++	return nil
++}
++
++func (s *crlStore) prefetch(uri string, issuers []*x509.Certificate) error {
++	_, err := s.get(uri, issuers)
++	return err
++}
++
++func (s *crlStore) get(uri string, issuers []*x509.Certificate) (*x509.RevocationList, error) {
++	s.mu.Lock()
++	entry := s.entries[uri]
++	if entry == nil {
++		entry = &crlEntry{}
++		s.entries[uri] = entry
++	}
++	s.mu.Unlock()
++
++	entry.mu.Lock()
++	defer entry.mu.Unlock()
++	now := time.Now()
++	if entry.list != nil && now.Before(entry.list.NextUpdate) && issuedByOneOf(entry.list, issuers) == nil {
++		return entry.list, nil
++	}
++	list, err := s.fetch(uri, issuers, now)
++	if err != nil {
++		return nil, err
++	}
++	entry.list = list
++	s.log.Infof("CRL %s loaded: %d revoked, next update %s", uri, len(list.RevokedCertificateEntries),
++		list.NextUpdate.UTC().Format(time.RFC3339))
++	return list, nil
++}
++
++func (s *crlStore) fetch(uri string, issuers []*x509.Certificate, now time.Time) (*x509.RevocationList, error) {
++	resp, err := s.client.Get(uri)
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close() //nolint:errcheck
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("status %d", resp.StatusCode)
++	}
++	der, err := io.ReadAll(io.LimitReader(resp.Body, crlMaxSize+1))
++	if err != nil {
++		return nil, err
++	}
++	if len(der) > crlMaxSize {
++		return nil, fmt.Errorf("larger than %d octets", crlMaxSize)
++	}
++	list, err := x509.ParseRevocationList(der)
++	if err != nil {
++		return nil, err
++	}
++	// A CRL of version 2 has the CRL number (RFC 5280 cl. 5.2.3).
++	if list.Number == nil {
++		return nil, errors.New("not a v2 CRL (TS 33.310 cl. 6.1a)")
++	}
++	if err = issuedByOneOf(list, issuers); err != nil {
++		return nil, err
++	}
++	if now.Before(list.ThisUpdate) || !now.Before(list.NextUpdate) {
++		return nil, fmt.Errorf("out of date: this update %s, next update %s",
++			list.ThisUpdate.UTC().Format(time.RFC3339), list.NextUpdate.UTC().Format(time.RFC3339))
++	}
++	return list, nil
++}
++
++func issuedByOneOf(list *x509.RevocationList, issuers []*x509.Certificate) error {
++	err := errors.New("no issuer")
++	for _, issuer := range issuers {
++		if !bytes.Equal(list.RawIssuer, issuer.RawSubject) {
++			err = errors.New("issuer of the CRL differs from the issuer of the certificate")
++			continue
++		}
++		if err = list.CheckSignatureFrom(issuer); err == nil {
++			return nil
++		}
++	}
++	return err
++}
+diff --git a/sbitls/identity.go b/sbitls/identity.go
+new file mode 100644
+index 0000000..3351bea
+--- /dev/null
++++ b/sbitls/identity.go
+@@ -0,0 +1,60 @@
++package sbitls
++
++import (
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/asn1"
++	"errors"
++	"strings"
++)
++
++// oidNfTypes is id-pe-nftype (RFC 9310 cl. 3).
++var oidNfTypes = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 34}
++
++// NfInstanceId returns the NF instance ID of a certificate: the URI-ID
++// "urn:uuid:<id>" of the subjectAltName (TS 33.310 cl. 6.1.3c.3). A certificate
++// with more than one is refused: it has no single identity.
++func NfInstanceId(cert *x509.Certificate) (string, error) {
++	id := ""
++	for _, uri := range cert.URIs {
++		if uri.Scheme != "urn" || !strings.HasPrefix(uri.Opaque, "uuid:") {
++			continue
++		}
++		if id != "" {
++			return "", errors.New("certificate with more than one NF instance ID")
++		}
++		id = strings.ToLower(strings.TrimPrefix(uri.Opaque, "uuid:"))
++	}
++	if id == "" {
++		return "", errors.New("certificate without an NF instance ID")
++	}
++	return id, nil
++}
++
++// NfTypes returns the NFTypes extension of a certificate (RFC 9310 cl. 3).
++func NfTypes(cert *x509.Certificate) ([]string, error) {
++	for _, ext := range cert.Extensions {
++		if !ext.Id.Equal(oidNfTypes) {
++			continue
++		}
++		var types []string
++		rest, err := asn1.Unmarshal(ext.Value, &types)
++		if err != nil {
++			return nil, err
++		}
++		if len(rest) != 0 || len(types) == 0 {
++			return nil, errors.New("malformed NFTypes extension")
++		}
++		return types, nil
++	}
++	return nil, errors.New("certificate without the NFTypes extension")
++}
++
++// PeerCertificate returns the certificate of the other end of a connection, nil
++// without TLS.
++func PeerCertificate(state *tls.ConnectionState) *x509.Certificate {
++	if state == nil || len(state.PeerCertificates) == 0 {
++		return nil
++	}
++	return state.PeerCertificates[0]
++}
+diff --git a/sbitls/sbitls.go b/sbitls/sbitls.go
+new file mode 100644
+index 0000000..bed3691
+--- /dev/null
++++ b/sbitls/sbitls.go
+@@ -0,0 +1,353 @@
++// Package sbitls is the TLS of the service-based interfaces: mutually
++// authenticated, with the certificates of the SBA profile of TS 33.310
++// cl. 6.1.3c and the TLS profile of TS 33.210 cl. 6.2, restricted by RFC 9113
++// (TS 33.501 cl. 13.1.0). crypto/tls checks the chain, the validity and the
++// name of the peer; this package adds the check of the CRL (TS 33.310
++// cl. 6.3.1) and reads the NF instance ID and the NF types of a certificate.
++package sbitls
++
++import (
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"log"
++	"net"
++	"net/http"
++	"os"
++	"regexp"
++	"strings"
++	"sync/atomic"
++	"time"
++)
++
++// ErrNotConfigured is the error of an https request before Init: there is no
++// fallback to a client that does not check the server.
++var ErrNotConfigured = errors.New("SBI TLS not configured")
++
++// Logger is what the package needs of a logger; a logrus entry fits it.
++type Logger interface {
++	Infof(format string, args ...interface{})
++	Warnf(format string, args ...interface{})
++}
++
++type discard struct{}
++
++func (discard) Infof(string, ...interface{}) {}
++func (discard) Warnf(string, ...interface{}) {}
++
++// Config is the TLS configuration of one network function.
++type Config struct {
++	// Certificate and Key are the PEM files of the client and server
++	// certificate of the NF (TS 33.310 cl. 6.1.3c.3).
++	Certificate string
++	Key         string
++	// KeyPair replaces Certificate and Key for a certificate that is not in
++	// a file and that CA did not sign, such as the one of an API invoker.
++	KeyPair *tls.Certificate
++	// CA is the PEM file with the CA certificates of the peers.
++	CA string
++	// NfInstanceId, when not empty, has to be the NF instance ID of the
++	// certificate.
++	NfInstanceId string
++	// ExtraClientCA is a PEM file with another CA for client certificates,
++	// such as the CA of the API invokers at the NEF.
++	ExtraClientCA string
++	// ExtraClientCANoCrl says that the certificates of ExtraClientCA have no
++	// CRL distribution point.
++	ExtraClientCANoCrl bool
++	Logger             Logger
++}
++
++// Context holds the certificate, the CAs and the CRLs of a network function.
++type Context struct {
++	keyPair      tls.Certificate
++	leaf         *x509.Certificate
++	roots        *x509.CertPool
++	clientCAs    *x509.CertPool
++	extraIssuers []*x509.Certificate
++	extraNoCrl   bool
++	crls         *crlStore
++	log          Logger
++}
++
++var current atomic.Pointer[Context]
++
++func readCAs(path string) ([]*x509.Certificate, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	var cas []*x509.Certificate
++	for {
++		var block *pem.Block
++		block, data = pem.Decode(data)
++		if block == nil {
++			break
++		}
++		if block.Type != "CERTIFICATE" {
++			continue
++		}
++		ca, parseErr := x509.ParseCertificate(block.Bytes)
++		if parseErr != nil {
++			return nil, fmt.Errorf("%s: %w", path, parseErr)
++		}
++		cas = append(cas, ca)
++	}
++	if len(cas) == 0 {
++		return nil, fmt.Errorf("%s: no certificate", path)
++	}
++	return cas, nil
++}
++
++// New reads the configuration and checks that the certificate is the one of
++// this NF. A CRL that cannot be fetched now is only reported: the check of a
++// peer tries again and fails closed.
++func New(cfg Config) (*Context, error) {
++	c := &Context{log: cfg.Logger, extraNoCrl: cfg.ExtraClientCANoCrl}
++	if c.log == nil {
++		c.log = discard{}
++	}
++	if cfg.CA == "" {
++		return nil, errors.New("no CA for https: sbi.tls.ca")
++	}
++	cas, err := readCAs(cfg.CA)
++	if err != nil {
++		return nil, err
++	}
++	c.roots = x509.NewCertPool()
++	c.clientCAs = x509.NewCertPool()
++	for _, ca := range cas {
++		c.roots.AddCert(ca)
++		c.clientCAs.AddCert(ca)
++	}
++	if cfg.ExtraClientCA != "" {
++		if c.extraIssuers, err = readCAs(cfg.ExtraClientCA); err != nil {
++			return nil, err
++		}
++		for _, ca := range c.extraIssuers {
++			c.clientCAs.AddCert(ca)
++		}
++	}
++
++	if cfg.KeyPair != nil {
++		c.keyPair = *cfg.KeyPair
++	} else if c.keyPair, err = tls.LoadX509KeyPair(cfg.Certificate, cfg.Key); err != nil {
++		return nil, err
++	}
++	if c.leaf, err = x509.ParseCertificate(c.keyPair.Certificate[0]); err != nil {
++		return nil, err
++	}
++	c.keyPair.Leaf = c.leaf
++	if cfg.KeyPair == nil {
++		if _, err = c.leaf.Verify(x509.VerifyOptions{
++			Roots:     c.roots,
++			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
++		}); err != nil {
++			return nil, fmt.Errorf("own certificate %s: %w", cfg.Certificate, err)
++		}
++	}
++	if cfg.NfInstanceId != "" {
++		id, idErr := NfInstanceId(c.leaf)
++		if idErr != nil {
++			return nil, fmt.Errorf("own certificate %s: %w", cfg.Certificate, idErr)
++		}
++		if !strings.EqualFold(id, cfg.NfInstanceId) {
++			return nil, fmt.Errorf("own certificate %s is of NF instance %s, not of %s",
++				cfg.Certificate, id, cfg.NfInstanceId)
++		}
++	}
++
++	c.crls = newCrlStore(c.log)
++	if uri := distributionPoint(c.leaf); uri != "" && cfg.KeyPair == nil {
++		if err = c.crls.prefetch(uri, cas); err != nil {
++			c.log.Warnf("CRL %s not available: %v", uri, err)
++		}
++	}
++	return c, nil
++}
++
++// Init makes the configuration the one of the process: of the client of the
++// openapi package, of the servers of ConfigureServer, and of the default HTTP
++// transport, that some consumers of the NFs use.
++func Init(cfg Config) error {
++	c, err := New(cfg)
++	if err != nil {
++		return err
++	}
++	current.Store(c)
++	if t, ok := http.DefaultTransport.(*http.Transport); ok {
++		t.TLSClientConfig = c.ClientTLSConfig()
++	}
++	c.log.Infof("SBI TLS: certificate of %s, NF instance %s, type %s, issued by %s, valid until %s",
++		c.subjectName(), c.NfInstanceId(), strings.Join(c.NfTypes(), ","), c.leaf.Issuer.CommonName,
++		c.leaf.NotAfter.UTC().Format(time.RFC3339))
++	return nil
++}
++
++// Current returns the configuration of the process, nil before Init.
++func Current() *Context {
++	return current.Load()
++}
++
++func (c *Context) subjectName() string {
++	if len(c.leaf.DNSNames) > 0 {
++		return c.leaf.DNSNames[0]
++	}
++	return c.leaf.Subject.CommonName
++}
++
++// NfInstanceId returns the NF instance ID of the certificate of this NF, empty
++// when it has none.
++func (c *Context) NfInstanceId() string {
++	id, err := NfInstanceId(c.leaf)
++	if err != nil {
++		return ""
++	}
++	return id
++}
++
++// NfTypes returns the NF types of the certificate of this NF.
++func (c *Context) NfTypes() []string {
++	types, err := NfTypes(c.leaf)
++	if err != nil {
++		return nil
++	}
++	return types
++}
++
++// profile is the TLS profile of both ends (TS 33.210 cl. 6.2): TLS 1.3 and
++// 1.2, and in TLS 1.2 only ECDHE with AEAD. The list has the suites that
++// RFC 9113 cl. 9.2.2 requires. No OCSP stapling: revocation is by CRL.
++func profile() *tls.Config {
++	return &tls.Config{
++		MinVersion: tls.VersionTLS12,
++		CipherSuites: []uint16{
++			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
++			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
++			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
++			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
++			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
++			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
++		},
++		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384},
++	}
++}
++
++// ClientTLSConfig is the configuration of a TLS client: the certificate of the
++// NF, the check of the server by the CAs and by the name of the URI, the SNI
++// when the URI has a name, and the check of the CRL.
++func (c *Context) ClientTLSConfig() *tls.Config {
++	cfg := profile()
++	cfg.Certificates = []tls.Certificate{c.keyPair}
++	cfg.RootCAs = c.roots
++	cfg.VerifyConnection = c.verifyPeer
++	return cfg
++}
++
++// ServerTLSConfig is the configuration of a TLS server: the client certificate
++// is required in the handshake (TS 33.210 cl. 6.2.2: HTTP/2 servers do not ask
++// for it later) and checked by the CAs and the CRL.
++func (c *Context) ServerTLSConfig() *tls.Config {
++	cfg := profile()
++	cfg.Certificates = []tls.Certificate{c.keyPair}
++	cfg.ClientAuth = tls.RequireAndVerifyClientCert
++	cfg.ClientCAs = c.clientCAs
++	cfg.VerifyConnection = c.verifyPeer
++	return cfg
++}
++
++// verifyPeer runs in every handshake, also a resumed one, after crypto/tls has
++// checked the chain: the result is not kept beyond the connection
++// (TS 33.310 cl. 6.3.1).
++func (c *Context) verifyPeer(state tls.ConnectionState) error {
++	if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) < 2 {
++		return errors.New("peer certificate without a verified chain")
++	}
++	peer, issuer := state.VerifiedChains[0][0], state.VerifiedChains[0][1]
++	if c.extraNoCrl {
++		for _, ca := range c.extraIssuers {
++			if ca.Equal(issuer) {
++				return nil
++			}
++		}
++	}
++	return c.crls.check(peer, issuer)
++}
++
++// IsExtraClient reports whether the client of a connection came with a
++// certificate of Config.ExtraClientCA.
++func IsExtraClient(state *tls.ConnectionState) bool {
++	c := current.Load()
++	if c == nil || state == nil || len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) < 2 {
++		return false
++	}
++	for _, ca := range c.extraIssuers {
++		if ca.Equal(state.VerifiedChains[0][1]) {
++			return true
++		}
++	}
++	return false
++}
++
++// DialTLSContext dials for an HTTP/2 transport, with the configuration of the
++// process. base has the name of the URI and the protocols of the transport.
++func DialTLSContext(ctx context.Context, network, addr string, base *tls.Config) (net.Conn, error) {
++	c := current.Load()
++	if c == nil {
++		return nil, ErrNotConfigured
++	}
++	return c.DialTLSContext(ctx, network, addr, base)
++}
++
++// DialTLSContext dials with this configuration.
++func (c *Context) DialTLSContext(ctx context.Context, network, addr string, base *tls.Config) (net.Conn, error) {
++	cfg := c.ClientTLSConfig()
++	if base != nil {
++		cfg.ServerName = base.ServerName
++		cfg.NextProtos = base.NextProtos
++	}
++	raw, err := (&net.Dialer{}).DialContext(ctx, network, addr)
++	if err != nil {
++		return nil, err
++	}
++	conn := tls.Client(raw, cfg)
++	if err = conn.HandshakeContext(ctx); err != nil {
++		_ = raw.Close()
++		c.log.Warnf("TLS handshake with %s refused: %v", addr, err)
++		return nil, err
++	}
++	return conn, nil
++}
++
++// ConfigureServer gives a server the TLS of the process, and the refused
++// handshakes to the log of the NF. Without Init, it leaves the server as it is.
++func ConfigureServer(server *http.Server) {
++	if c := current.Load(); c != nil {
++		c.ConfigureServer(server)
++	}
++}
++
++// ConfigureServer gives a server this configuration.
++func (c *Context) ConfigureServer(server *http.Server) {
++	server.TLSConfig = c.ServerTLSConfig()
++	server.ErrorLog = log.New(handshakeLog{c.log}, "", 0)
++}
++
++var handshakeError = regexp.MustCompile(`^http: TLS handshake error from (\S+): (.*)$`)
++
++type handshakeLog struct {
++	log Logger
++}
++
++func (h handshakeLog) Write(p []byte) (int, error) {
++	line := strings.TrimSpace(string(p))
++	if m := handshakeError.FindStringSubmatch(line); m != nil {
++		h.log.Warnf("TLS handshake with %s refused: %s", m[1], m[2])
++	} else {
++		h.log.Warnf("%s", line)
++	}
++	return len(p), nil
++}
+diff --git a/sbitls/sbitls_test.go b/sbitls/sbitls_test.go
+new file mode 100644
+index 0000000..e6ecea9
+--- /dev/null
++++ b/sbitls/sbitls_test.go
+@@ -0,0 +1,666 @@
++package sbitls
++
++import (
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"io"
++	"math/big"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type testCA struct {
++	cert *x509.Certificate
++	key  *ecdsa.PrivateKey
++	file string
++}
++
++func newCA(t *testing.T, name string) *testCA {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	template := &x509.Certificate{
++		SerialNumber:          big.NewInt(1),
++		Subject:               pkix.Name{CommonName: name},
++		NotBefore:             time.Now().Add(-time.Hour),
++		NotAfter:              time.Now().Add(time.Hour),
++		IsCA:                  true,
++		BasicConstraintsValid: true,
++		MaxPathLenZero:        true,
++		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	file := filepath.Join(t.TempDir(), "ca.pem")
++	writePem(t, file, "CERTIFICATE", der)
++	return &testCA{cert: cert, key: key, file: file}
++}
++
++func writePem(t *testing.T, file, kind string, der []byte) {
++	t.Helper()
++	if err := os.WriteFile(file, pem.EncodeToMemory(&pem.Block{Type: kind, Bytes: der}), 0o600); err != nil {
++		t.Fatal(err)
++	}
++}
++
++type leafOptions struct {
++	serial  int64
++	id      string
++	ids     []string
++	crl     string
++	dns     string
++	types   []string
++	expired bool
++}
++
++type leaf struct {
++	certFile, keyFile string
++	cert              *x509.Certificate
++}
++
++func nfTypesExtension(types []string) pkix.Extension {
++	var items []byte
++	for _, nfType := range types {
++		items = append(items, 0x16, byte(len(nfType)))
++		items = append(items, nfType...)
++	}
++	return pkix.Extension{Id: oidNfTypes, Value: append([]byte{0x30, byte(len(items))}, items...)}
++}
++
++func (ca *testCA) issue(t *testing.T, o leafOptions) leaf {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if o.serial == 0 {
++		o.serial = 100
++	}
++	notAfter := time.Now().Add(time.Hour)
++	if o.expired {
++		notAfter = time.Now().Add(-time.Minute)
++	}
++	template := &x509.Certificate{
++		SerialNumber: big.NewInt(o.serial),
++		Subject:      pkix.Name{CommonName: "nf"},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     notAfter,
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
++		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
++	}
++	if o.dns != "" {
++		template.DNSNames = []string{o.dns}
++	}
++	if o.crl != "" {
++		template.CRLDistributionPoints = []string{o.crl}
++	}
++	for _, id := range append([]string{o.id}, o.ids...) {
++		if id != "" {
++			template.URIs = append(template.URIs, &url.URL{Scheme: "urn", Opaque: "uuid:" + id})
++		}
++	}
++	if len(o.types) > 0 {
++		template.ExtraExtensions = []pkix.Extension{nfTypesExtension(o.types)}
++	}
++	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	dir := t.TempDir()
++	l := leaf{certFile: filepath.Join(dir, "c.pem"), keyFile: filepath.Join(dir, "k.pem"), cert: cert}
++	writePem(t, l.certFile, "CERTIFICATE", der)
++	keyDer, err := x509.MarshalECPrivateKey(key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	writePem(t, l.keyFile, "EC PRIVATE KEY", keyDer)
++	return l
++}
++
++func (ca *testCA) crl(t *testing.T, thisUpdate, nextUpdate time.Time, revoked ...*x509.Certificate) []byte {
++	t.Helper()
++	list := &x509.RevocationList{
++		Number:     big.NewInt(1),
++		ThisUpdate: thisUpdate,
++		NextUpdate: nextUpdate,
++	}
++	for _, r := range revoked {
++		list.RevokedCertificateEntries = append(list.RevokedCertificateEntries, x509.RevocationListEntry{
++			SerialNumber:   r.SerialNumber,
++			RevocationTime: thisUpdate,
++		})
++	}
++	der, err := x509.CreateRevocationList(rand.Reader, list, ca.cert, ca.key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return der
++}
++
++// crlServer serves a CRL and counts the fetches.
++type crlServer struct {
++	*httptest.Server
++	body atomic.Value
++	hits atomic.Int32
++}
++
++func newCrlServer(t *testing.T, der []byte) *crlServer {
++	t.Helper()
++	s := &crlServer{}
++	s.body.Store(der)
++	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		s.hits.Add(1)
++		_, _ = w.Write(s.body.Load().([]byte))
++	}))
++	t.Cleanup(s.Close)
++	return s
++}
++
++const (
++	serverId = "c84792af-f99f-4eca-a17c-ed0c9699e225"
++	clientId = "1b4f7a6e-9b4e-4f6f-8f39-6c0d7b1c2a11"
++	testName = "nf.5gc.example.org"
++)
++
++type lab struct {
++	ca  *testCA
++	crl *crlServer
++}
++
++func newLab(t *testing.T) *lab {
++	t.Helper()
++	ca := newCA(t, "CA")
++	return &lab{ca: ca, crl: newCrlServer(t, ca.crl(t, time.Now().Add(-time.Minute), time.Now().Add(time.Hour)))}
++}
++
++func (l *lab) context(t *testing.T, id string, serial int64) *Context {
++	t.Helper()
++	cert := l.ca.issue(t, leafOptions{serial: serial, id: id, crl: l.crl.URL + "/ca.crl", dns: testName, types: []string{"AMF"}})
++	c, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file, NfInstanceId: id})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return c
++}
++
++// serve starts a TLS server that answers with the NF instance ID of the client.
++func serve(t *testing.T, c *Context, seenName *atomic.Value) *httptest.Server {
++	t.Helper()
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		id, err := NfInstanceId(PeerCertificate(r.TLS))
++		if err != nil {
++			t.Error(err)
++		}
++		_, _ = io.WriteString(w, id)
++	}))
++	server.TLS = c.ServerTLSConfig()
++	server.TLS.NextProtos = []string{"http/1.1"}
++	if seenName != nil {
++		server.TLS.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
++			seenName.Store(hello.ServerName)
++			return nil, nil
++		}
++	}
++	server.Config.ErrorLog = nil
++	server.StartTLS()
++	t.Cleanup(server.Close)
++	return server
++}
++
++// call dials addr with the name of the URI.
++func call(c *Context, addr, name string) (string, error) {
++	transport := &http.Transport{
++		DialTLSContext: func(ctx context.Context, network, a string) (net.Conn, error) {
++			return c.DialTLSContext(ctx, network, a, &tls.Config{ServerName: name})
++		},
++		DisableKeepAlives: true,
++	}
++	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
++	resp, err := client.Get("https://" + addr + "/")
++	if err != nil {
++		return "", err
++	}
++	defer resp.Body.Close() //nolint:errcheck
++	body, err := io.ReadAll(resp.Body)
++	return string(body), err
++}
++
++func TestMutualTLS(t *testing.T) {
++	l := newLab(t)
++	server := serve(t, l.context(t, serverId, 1), nil)
++	client := l.context(t, clientId, 2)
++	id, err := call(client, server.Listener.Addr().String(), testName)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if id != clientId {
++		t.Errorf("the server saw %q", id)
++	}
++}
++
++func TestProfile(t *testing.T) {
++	l := newLab(t)
++	c := l.context(t, serverId, 1)
++	for name, cfg := range map[string]*tls.Config{"client": c.ClientTLSConfig(), "server": c.ServerTLSConfig()} {
++		if cfg.MinVersion != tls.VersionTLS12 {
++			t.Errorf("%s: minimum version %x", name, cfg.MinVersion)
++		}
++		for _, suite := range cfg.CipherSuites {
++			text := tls.CipherSuiteName(suite)
++			if !strings.Contains(text, "ECDHE") || !(strings.Contains(text, "GCM") || strings.Contains(text, "CHACHA20")) {
++				t.Errorf("%s: %s is not ECDHE with AEAD", name, text)
++			}
++		}
++		if len(cfg.CurvePreferences) != 3 {
++			t.Errorf("%s: groups %v", name, cfg.CurvePreferences)
++		}
++		if cfg.InsecureSkipVerify {
++			t.Errorf("%s: InsecureSkipVerify", name)
++		}
++	}
++	if c.ServerTLSConfig().ClientAuth != tls.RequireAndVerifyClientCert {
++		t.Error("the server does not require the client certificate")
++	}
++	for _, version := range []uint16{tls.VersionTLS12, tls.VersionTLS13} {
++		server := serve(t, c, nil)
++		cfg := l.context(t, clientId, 2).ClientTLSConfig()
++		cfg.MaxVersion = version
++		cfg.ServerName = testName
++		conn, err := tls.Dial("tcp", server.Listener.Addr().String(), cfg)
++		if err != nil {
++			t.Fatalf("version %x: %v", version, err)
++		}
++		if conn.ConnectionState().Version != version {
++			t.Errorf("version %x negotiated", conn.ConnectionState().Version)
++		}
++		_ = conn.Close()
++	}
++}
++
++func TestClientRefusals(t *testing.T) {
++	l := newLab(t)
++	server := serve(t, l.context(t, serverId, 1), nil)
++	addr := server.Listener.Addr().String()
++
++	cases := map[string]func() *tls.Config{
++		"no client certificate": func() *tls.Config {
++			return &tls.Config{RootCAs: l.context(t, clientId, 2).roots, ServerName: testName}
++		},
++		"client of another CA": func() *tls.Config {
++			other := newCA(t, "other")
++			cert := other.issue(t, leafOptions{id: clientId})
++			pair, err := tls.LoadX509KeyPair(cert.certFile, cert.keyFile)
++			if err != nil {
++				t.Fatal(err)
++			}
++			return &tls.Config{RootCAs: l.context(t, clientId, 2).roots, ServerName: testName, Certificates: []tls.Certificate{pair}}
++		},
++	}
++	for name, config := range cases {
++		t.Run(name, func(t *testing.T) {
++			conn, err := tls.Dial("tcp", addr, config())
++			if err == nil {
++				// In TLS 1.3 the client sees the refusal in the first read.
++				_, err = conn.Read(make([]byte, 1))
++				_ = conn.Close()
++			}
++			if err == nil {
++				t.Fatal("handshake accepted")
++			}
++		})
++	}
++}
++
++func TestServerName(t *testing.T) {
++	l := newLab(t)
++	var seen atomic.Value
++	server := serve(t, l.context(t, serverId, 1), &seen)
++	client := l.context(t, clientId, 2)
++	addr := server.Listener.Addr().String()
++
++	if _, err := call(client, addr, testName); err != nil {
++		t.Fatal(err)
++	}
++	if seen.Load() != testName {
++		t.Errorf("SNI %v, want %s", seen.Load(), testName)
++	}
++	host, _, err := net.SplitHostPort(addr)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = call(client, addr, host); err != nil {
++		t.Fatal(err)
++	}
++	if seen.Load() != "" {
++		t.Errorf("SNI %v with an IP address", seen.Load())
++	}
++	if _, err = call(client, addr, "other.5gc.example.org"); err == nil {
++		t.Error("server with another name accepted")
++	}
++}
++
++func TestServerOfAnotherCA(t *testing.T) {
++	l := newLab(t)
++	other := newLab(t)
++	server := serve(t, other.context(t, serverId, 1), nil)
++	if _, err := call(l.context(t, clientId, 2), server.Listener.Addr().String(), testName); err == nil {
++		t.Error("server of another CA accepted")
++	}
++}
++
++func TestRevocation(t *testing.T) {
++	l := newLab(t)
++	server := serve(t, l.context(t, serverId, 1), nil)
++	addr := server.Listener.Addr().String()
++	hour := time.Now().Add(time.Hour)
++	past := time.Now().Add(-time.Minute)
++
++	t.Run("revoked client", func(t *testing.T) {
++		l := newLab(t)
++		bad := l.ca.issue(t, leafOptions{serial: 7, id: clientId, crl: l.crl.URL + "/ca.crl", dns: testName})
++		l.crl.body.Store(l.ca.crl(t, past, hour, bad.cert))
++		server := serve(t, l.context(t, serverId, 1), nil)
++		client, err := New(Config{Certificate: bad.certFile, Key: bad.keyFile, CA: l.ca.file})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if _, err = call(client, server.Listener.Addr().String(), testName); err == nil {
++			t.Error("revoked client accepted")
++		}
++	})
++
++	t.Run("revoked server", func(t *testing.T) {
++		l := newLab(t)
++		bad := l.ca.issue(t, leafOptions{serial: 8, id: serverId, crl: l.crl.URL + "/ca.crl", dns: testName})
++		srv, err := New(Config{Certificate: bad.certFile, Key: bad.keyFile, CA: l.ca.file})
++		if err != nil {
++			t.Fatal(err)
++		}
++		server := serve(t, srv, nil)
++		l.crl.body.Store(l.ca.crl(t, past, hour, bad.cert))
++		client := l.context(t, clientId, 2)
++		if _, err = call(client, server.Listener.Addr().String(), testName); err == nil {
++			t.Error("revoked server accepted")
++		}
++	})
++
++	t.Run("no distribution point", func(t *testing.T) {
++		cert := l.ca.issue(t, leafOptions{serial: 9, id: clientId, dns: testName})
++		client, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if _, err = call(client, addr, testName); err == nil {
++			t.Error("client without a distribution point accepted")
++		}
++	})
++
++	badCrls := map[string]func(*testing.T, *lab) []byte{
++		"out of date": func(t *testing.T, l *lab) []byte {
++			return l.ca.crl(t, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
++		},
++		"of another CA": func(t *testing.T, l *lab) []byte {
++			return newCA(t, "other").crl(t, past, hour)
++		},
++		"of another key": func(t *testing.T, l *lab) []byte {
++			return newCA(t, "CA").crl(t, past, hour)
++		},
++		"too large": func(t *testing.T, l *lab) []byte {
++			return make([]byte, crlMaxSize+1)
++		},
++		"not a CRL": func(t *testing.T, l *lab) []byte {
++			return []byte("not a CRL")
++		},
++	}
++	for name, bad := range badCrls {
++		t.Run(name, func(t *testing.T) {
++			l := newLab(t)
++			client := l.ca.issue(t, leafOptions{serial: 10, id: clientId, crl: l.crl.URL + "/ca.crl", dns: testName})
++			c, err := New(Config{Certificate: client.certFile, Key: client.keyFile, CA: l.ca.file})
++			if err != nil {
++				t.Fatal(err)
++			}
++			server := serve(t, l.context(t, serverId, 1), nil)
++			// The store of each end keeps the good CRL it fetched at start.
++			l.crl.body.Store(bad(t, l))
++			c.crls = newCrlStore(discard{})
++			if _, err = call(c, server.Listener.Addr().String(), testName); err == nil {
++				t.Error("handshake without a valid CRL accepted")
++			}
++		})
++	}
++
++	t.Run("not reachable", func(t *testing.T) {
++		l := newLab(t)
++		client := l.context(t, clientId, 2)
++		server := serve(t, l.context(t, serverId, 1), nil)
++		l.crl.Close()
++		client.crls = newCrlStore(discard{})
++		if _, err := call(client, server.Listener.Addr().String(), testName); err == nil {
++			t.Error("handshake without the CRL service accepted")
++		}
++	})
++
++	t.Run("after next update", func(t *testing.T) {
++		l := newLab(t)
++		l.crl.body.Store(l.ca.crl(t, past, time.Now().Add(1500*time.Millisecond)))
++		c := l.context(t, clientId, 2)
++		server := serve(t, l.context(t, serverId, 1), nil)
++		before := l.crl.hits.Load()
++		if _, err := call(c, server.Listener.Addr().String(), testName); err != nil {
++			t.Fatal(err)
++		}
++		time.Sleep(1600 * time.Millisecond)
++		l.crl.body.Store(l.ca.crl(t, past, hour))
++		if _, err := call(c, server.Listener.Addr().String(), testName); err != nil {
++			t.Fatal(err)
++		}
++		if l.crl.hits.Load() == before {
++			t.Error("the CRL was not fetched after its next update")
++		}
++	})
++}
++
++func TestCrlFetchedOncePerUri(t *testing.T) {
++	l := newLab(t)
++	server := serve(t, l.context(t, serverId, 1), nil)
++	client := l.context(t, clientId, 2)
++	before := l.crl.hits.Load()
++	done := make(chan error, 8)
++	for range 8 {
++		go func() {
++			_, err := call(client, server.Listener.Addr().String(), testName)
++			done <- err
++		}()
++	}
++	for range 8 {
++		if err := <-done; err != nil {
++			t.Fatal(err)
++		}
++	}
++	if got := l.crl.hits.Load() - before; got != 0 {
++		t.Errorf("%d more fetches of a CRL in memory", got)
++	}
++}
++
++func TestOwnCertificate(t *testing.T) {
++	l := newLab(t)
++	cert := l.ca.issue(t, leafOptions{id: serverId, crl: l.crl.URL + "/ca.crl"})
++	if _, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file, NfInstanceId: clientId}); err == nil {
++		t.Error("certificate of another NF instance accepted")
++	}
++	if _, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile}); err == nil {
++		t.Error("no CA accepted")
++	}
++	other := newCA(t, "other")
++	if _, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: other.file}); err == nil {
++		t.Error("own certificate of another CA accepted")
++	}
++	noId := l.ca.issue(t, leafOptions{})
++	if _, err := New(Config{Certificate: noId.certFile, Key: noId.keyFile, CA: l.ca.file, NfInstanceId: serverId}); err == nil {
++		t.Error("certificate without NF instance ID accepted")
++	}
++	// A CRL service that is down does not stop the start.
++	l.crl.Close()
++	if _, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file, NfInstanceId: serverId}); err != nil {
++		t.Errorf("start without the CRL service: %v", err)
++	}
++}
++
++func TestIdentity(t *testing.T) {
++	ca := newCA(t, "CA")
++	cert := ca.issue(t, leafOptions{id: strings.ToUpper(serverId), types: []string{"AMF", "SMF"}})
++	id, err := NfInstanceId(cert.cert)
++	if err != nil || id != serverId {
++		t.Errorf("NF instance ID %q, %v", id, err)
++	}
++	types, err := NfTypes(cert.cert)
++	if err != nil || fmt.Sprint(types) != "[AMF SMF]" {
++		t.Errorf("NF types %v, %v", types, err)
++	}
++	two := ca.issue(t, leafOptions{id: serverId, ids: []string{clientId}})
++	if _, err = NfInstanceId(two.cert); err == nil {
++		t.Error("two NF instance IDs accepted")
++	}
++	none := ca.issue(t, leafOptions{})
++	if _, err = NfInstanceId(none.cert); err == nil {
++		t.Error("no NF instance ID accepted")
++	}
++	if _, err = NfTypes(none.cert); err == nil {
++		t.Error("no NFTypes accepted")
++	}
++	if PeerCertificate(nil) != nil {
++		t.Error("peer without TLS")
++	}
++}
++
++func TestExtraClientCA(t *testing.T) {
++	l := newLab(t)
++	invokers := newCA(t, "invokers")
++	cert := l.ca.issue(t, leafOptions{serial: 1, id: serverId, crl: l.crl.URL + "/ca.crl", dns: testName})
++	nef, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file,
++		ExtraClientCA: invokers.file, ExtraClientCANoCrl: true})
++	if err != nil {
++		t.Fatal(err)
++	}
++	current.Store(nef)
++	defer current.Store(nil)
++	seen := make(chan bool, 2)
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
++		seen <- IsExtraClient(r.TLS)
++	}))
++	server.TLS = nef.ServerTLSConfig()
++	server.StartTLS()
++	defer server.Close()
++	invoker := invokers.issue(t, leafOptions{id: clientId})
++	pair, err := tls.LoadX509KeyPair(invoker.certFile, invoker.keyFile)
++	if err != nil {
++		t.Fatal(err)
++	}
++	client, err := New(Config{KeyPair: &pair, CA: l.ca.file})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = call(client, server.Listener.Addr().String(), testName); err != nil {
++		t.Errorf("API invoker refused: %v", err)
++	}
++	if !<-seen {
++		t.Error("the certificate of an API invoker not recognized")
++	}
++	if _, err = call(l.context(t, clientId, 2), server.Listener.Addr().String(), testName); err != nil {
++		t.Errorf("NF refused: %v", err)
++	}
++	if <-seen {
++		t.Error("the certificate of an NF taken for an API invoker")
++	}
++	// With the CRL required, the same certificate has no distribution point.
++	strict, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file, ExtraClientCA: invokers.file})
++	if err != nil {
++		t.Fatal(err)
++	}
++	strictServer := serve(t, strict, nil)
++	if _, err = call(client, strictServer.Listener.Addr().String(), testName); err == nil {
++		t.Error("API invoker without a distribution point accepted")
++	}
++}
++
++func TestNotConfigured(t *testing.T) {
++	current.Store(nil)
++	if _, err := DialTLSContext(context.Background(), "tcp", "127.0.0.1:1", nil); !errors.Is(err, ErrNotConfigured) {
++		t.Errorf("error %v", err)
++	}
++	server := &http.Server{}
++	ConfigureServer(server)
++	if server.TLSConfig != nil {
++		t.Error("server configured without Init")
++	}
++}
++
++func TestInit(t *testing.T) {
++	l := newLab(t)
++	cert := l.ca.issue(t, leafOptions{id: serverId, crl: l.crl.URL + "/ca.crl", dns: testName, types: []string{"AMF"}})
++	saved := http.DefaultTransport.(*http.Transport).TLSClientConfig
++	defer func() {
++		http.DefaultTransport.(*http.Transport).TLSClientConfig = saved
++		current.Store(nil)
++	}()
++	if err := Init(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file, NfInstanceId: serverId}); err != nil {
++		t.Fatal(err)
++	}
++	if Current() == nil {
++		t.Fatal("no current configuration")
++	}
++	if http.DefaultTransport.(*http.Transport).TLSClientConfig == nil {
++		t.Error("the default transport has no TLS configuration")
++	}
++	server := &http.Server{}
++	ConfigureServer(server)
++	if server.TLSConfig == nil || server.TLSConfig.ClientAuth != tls.RequireAndVerifyClientCert {
++		t.Error("server not configured")
++	}
++}
++
++func TestHandshakeLog(t *testing.T) {
++	var lines []string
++	log := handshakeLog{recorder(func(s string) { lines = append(lines, s) })}
++	_, _ = log.Write([]byte("http: TLS handshake error from 127.0.0.1:5000: tls: client didn't provide a certificate\n"))
++	_, _ = log.Write([]byte("other line\n"))
++	want := []string{"TLS handshake with 127.0.0.1:5000 refused: tls: client didn't provide a certificate", "other line"}
++	if fmt.Sprint(lines) != fmt.Sprint(want) {
++		t.Errorf("lines %q", lines)
++	}
++}
++
++type recorder func(string)
++
++func (r recorder) Infof(format string, args ...interface{}) { r(fmt.Sprintf(format, args...)) }
++func (r recorder) Warnf(format string, args ...interface{}) { r(fmt.Sprintf(format, args...)) }
+diff --git a/udr/ImsDataRepository/client.go b/udr/ImsDataRepository/client.go
+index 010a250..24fa627 100644
+--- a/udr/ImsDataRepository/client.go
++++ b/udr/ImsDataRepository/client.go
+@@ -13,10 +13,11 @@
+ package ImsDataRepository
+ 
+ import (
+-	"crypto/tls"
+ 	"net/http"
+ 
+ 	"golang.org/x/net/http2"
++
++	"github.com/free5gc/openapi/sbitls"
+ )
+ 
+ // APIClient manages communication with the Nudr_DataRepository API OpenAPI file API v2.3.0-alpha.4
+@@ -41,10 +42,9 @@ type service struct {
+ // optionally a custom http.Client to allow for advanced features such as caching.
+ func NewAPIClient(cfg *Configuration) *APIClient {
+ 	if cfg.httpClient == nil {
+-		cfg.httpClient = http.DefaultClient
+-		cfg.httpClient.Transport = &http2.Transport{
+-			TLSClientConfig: &tls.Config{
+-				InsecureSkipVerify: true, // nolint:gosec
++		cfg.httpClient = &http.Client{
++			Transport: &http2.Transport{
++				DialTLSContext: sbitls.DialTLSContext,
+ 			},
+ 		}
+ 	}
+diff --git a/util.go b/util.go
+index 02fb96e..9f0a692 100644
+--- a/util.go
++++ b/util.go
+@@ -379,12 +379,14 @@ func GetNFServiceUri(
+ 	for _, srv := range nfProf.NfServices {
+ 		if srv.ServiceName == srvName &&
+ 			srv.NfServiceStatus == models.NfServiceStatus_REGISTERED {
+-			if srv.ApiPrefix != "" {
++			fqdn := srv.Fqdn
++			if fqdn == "" {
++				fqdn = nfProf.Fqdn
++			}
++			if fqdn != "" {
++				nfUri = getUriFromFqdn(srv.Scheme, fqdn, srv.IpEndPoints, srv.ApiPrefix)
++			} else if srv.ApiPrefix != "" {
+ 				nfUri = srv.ApiPrefix
+-			} else if srv.Fqdn != "" {
+-				nfUri = string(srv.Scheme) + "://" + srv.Fqdn
+-			} else if nfProf.Fqdn != "" {
+-				nfUri = string(srv.Scheme) + "://" + nfProf.Fqdn
+ 			} else if len(srv.IpEndPoints) != 0 {
+ 				// Select the first IpEndPoint
+ 				// TODO: select others when failure
+@@ -403,6 +405,26 @@ func GetNFServiceUri(
+ 	return nfUri
+ }
+ 
++// getUriFromFqdn builds the apiRoot of a service registered with an FQDN: the
++// port of the ipEndPoints goes with the FQDN, and the API prefix is a path; the
++// absolute apiPrefix that the NFs of free5GC register is left out
++// (TS 29.510 table 6.1.6.2.3-1 NOTE 1, table 6.1.6.2.5-1 NOTES 2 to 4;
++// TS 29.501 cl. 4.4.1).
++func getUriFromFqdn(scheme models.UriScheme, fqdn string, points []models.IpEndPoint, apiPrefix string) string {
++	var port int32
++	for _, point := range points {
++		if point.Port != 0 {
++			port = point.Port
++			break
++		}
++	}
++	uri := getUriFromIpEndPoint(scheme, fqdn, port)
++	if strings.HasPrefix(apiPrefix, "/") {
++		uri += apiPrefix
++	}
++	return uri
++}
++
+ func getUriFromIpEndPoint(scheme models.UriScheme, ipv4Address string, port int32) string {
+ 	uri := ""
+ 	if port != 0 {
+diff --git a/util_test.go b/util_test.go
+index 60ac896..ac00c75 100644
+--- a/util_test.go
++++ b/util_test.go
+@@ -219,3 +219,51 @@ func TestPlmnIdJsonToModels(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestGetNFServiceUri(t *testing.T) {
++	endpoint := []models.IpEndPoint{{Ipv4Address: "127.0.0.10", Port: 8000}}
++	noPort := []models.IpEndPoint{{Ipv4Address: "127.0.0.10"}}
++	cases := []struct {
++		name    string
++		profile string
++		service models.NrfNfDiscoveryNfService
++		want    string
++	}{
++		{"FQDN of the profile, port of ipEndPoints", "nrf.example.org",
++			models.NrfNfDiscoveryNfService{Scheme: models.UriScheme_HTTPS, IpEndPoints: endpoint},
++			"https://nrf.example.org:8000"},
++		{"FQDN of the service first", "nrf.example.org",
++			models.NrfNfDiscoveryNfService{Scheme: models.UriScheme_HTTPS, Fqdn: "svc.example.org", IpEndPoints: endpoint},
++			"https://svc.example.org:8000"},
++		{"FQDN without port: 443", "nrf.example.org",
++			models.NrfNfDiscoveryNfService{Scheme: models.UriScheme_HTTPS, IpEndPoints: noPort},
++			"https://nrf.example.org:443"},
++		{"API prefix as a path", "nrf.example.org",
++			models.NrfNfDiscoveryNfService{Scheme: models.UriScheme_HTTPS, IpEndPoints: endpoint, ApiPrefix: "/a/b"},
++			"https://nrf.example.org:8000/a/b"},
++		{"absolute apiPrefix left out with an FQDN", "nrf.example.org",
++			models.NrfNfDiscoveryNfService{
++				Scheme: models.UriScheme_HTTPS, IpEndPoints: endpoint, ApiPrefix: "https://nrf.example.org:8000",
++			},
++			"https://nrf.example.org:8000"},
++		{"absolute apiPrefix without an FQDN", "",
++			models.NrfNfDiscoveryNfService{
++				Scheme: models.UriScheme_HTTP, IpEndPoints: endpoint, ApiPrefix: "http://127.0.0.10:8000",
++			},
++			"http://127.0.0.10:8000"},
++		{"only the IP", "",
++			models.NrfNfDiscoveryNfService{Scheme: models.UriScheme_HTTP, IpEndPoints: endpoint},
++			"http://127.0.0.10:8000"},
++	}
++	for _, c := range cases {
++		c.service.ServiceName = models.ServiceName_NNRF_NFM
++		c.service.NfServiceStatus = models.NfServiceStatus_REGISTERED
++		profile := &models.NrfNfDiscoveryNfProfile{
++			Fqdn:       c.profile,
++			NfServices: []models.NrfNfDiscoveryNfService{c.service},
++		}
++		if got := GetNFServiceUri(profile, models.ServiceName_NNRF_NFM); got != c.want {
++			t.Errorf("%s: %q, want %q", c.name, got, c.want)
++		}
++	}
++}

@@ -16,6 +16,9 @@ import (
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/internal/sbi/consumer"
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/internal/sbi/processor"
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/pkg/app"
+	"github.com/free5gc/openapi"
+	"github.com/free5gc/openapi/models"
+	"github.com/free5gc/openapi/sbitls"
 	"github.com/free5gc/util/httpwrapper"
 	logger_util "github.com/free5gc/util/logger"
 )
@@ -34,7 +37,7 @@ type Server struct {
 	router     *gin.Engine
 }
 
-func NewServer(aanf ServerAanf, tlsKeyLogPath string) (*Server, error) {
+func NewServer(aanf ServerAanf) (*Server, error) {
 	s := &Server{
 		ServerAanf: aanf,
 	}
@@ -45,7 +48,7 @@ func NewServer(aanf ServerAanf, tlsKeyLogPath string) (*Server, error) {
 	bindAddr := cfg.GetSbiBindingAddr()
 	logger.SBILog.Infof("Binding addr: [%s]", bindAddr)
 	var err error
-	if s.httpServer, err = httpwrapper.NewHttp2Server(bindAddr, tlsKeyLogPath, s.router); err != nil {
+	if s.httpServer, err = httpwrapper.NewHttp2Server(bindAddr, "", s.router); err != nil {
 		logger.InitLog.Errorf("Initialize HTTP server failed: %v", err)
 		return nil, err
 	}
@@ -69,7 +72,7 @@ func newRouter(s *Server) *gin.Engine {
 	// No proxy is trusted: the client address logged is the address of the
 	// connection, as used by the AF policy.
 	_ = router.SetTrustedProxies(nil)
-	router.Use(recoverWithProblem())
+	router.Use(s.sbiHeaders, recoverWithProblem())
 	router.NoRoute(noRoute)
 
 	s.applyAkmaRoutes(router)
@@ -81,12 +84,51 @@ func (s *Server) Run(ctx context.Context, wg *sync.WaitGroup) error {
 	_, s.Context().NfId, err = s.Consumer().RegisterNFInstance(ctx)
 	if err != nil {
 		logger.InitLog.Errorf("AANF register to NRF Error[%s]", err.Error())
+	} else {
+		// TS 29.510 cl. 5.2.2.3.2 (F29).
+		go s.Consumer().RunHeartBeat(ctx)
 	}
 
 	wg.Add(1)
 	go s.startServer(wg)
 
 	return nil
+}
+
+// sbiHeaders puts in every response the headers of TS 29.500 that identify
+// the AAnF: Server, which table 5.2.2.2-1 asks of the originator of an error
+// response and allows in the others, and 3gpp-Sbi-NF-Peer-Info (cl.
+// 5.2.3.2.21), with the NF instance of the consumer when known: the one of
+// its client certificate or, without TLS, the one of the header of the
+// request.
+func (s *Server) sbiHeaders(c *gin.Context) {
+	self := s.Context().NfId
+	c.Header(openapi.HeaderServer, openapi.NfAgent(models.NrfNfManagementNfType_AANF, self))
+	if info := openapi.NfPeerInfo(self, consumerInstance(c.Request)); info != "" {
+		c.Header(openapi.HeaderNfPeerInfo, info)
+	}
+	// The NF type of the consumer, as it says (TS 29.500 table 5.2.2.2-1).
+	logger.SBILog.Infof("%s %s, User-Agent %s, 3gpp-Sbi-NF-Peer-Info %s", c.Request.Method, c.Request.URL.Path,
+		orNone(c.Request.UserAgent()), orNone(c.Request.Header.Get(openapi.HeaderNfPeerInfo)))
+	c.Next()
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// consumerInstance returns the NF instance ID of the consumer of a request,
+// empty when unknown.
+func consumerInstance(r *http.Request) string {
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		if id, err := sbitls.NfInstanceId(r.TLS.PeerCertificates[0]); err == nil {
+			return id
+		}
+	}
+	return openapi.PeerInfoSource(r.Header.Get(openapi.HeaderNfPeerInfo))
 }
 
 func (s *Server) Shutdown() {
@@ -125,6 +167,7 @@ func (s *Server) startServer(wg *sync.WaitGroup) {
 	case "http":
 		err = s.httpServer.ListenAndServe()
 	case "https":
+		sbitls.ConfigureServer(s.httpServer)
 		err = s.httpServer.ListenAndServeTLS(
 			cfg.GetCertPemPath(),
 			cfg.GetCertKeyPath())

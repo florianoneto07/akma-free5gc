@@ -1,0 +1,313 @@
+diff --git a/go.mod b/go.mod
+index a5bcf79..7a03d39 100644
+--- a/go.mod
++++ b/go.mod
+@@ -81,3 +81,7 @@ require (
+ 	google.golang.org/protobuf v1.36.1 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ )
++
++replace github.com/free5gc/openapi => ../../../akma-free5gc/free5gc/build/openapi
++
++replace github.com/free5gc/util => ../../../akma-free5gc/free5gc/build/util
+diff --git a/internal/context/context.go b/internal/context/context.go
+index 1f075c6..7ef2e00 100644
+--- a/internal/context/context.go
++++ b/internal/context/context.go
+@@ -323,3 +323,12 @@ func (c *SMFContext) AuthorizationCheck(token string, serviceName models.Service
+ 	}
+ 	return oauth.VerifyOAuth(token, string(serviceName), c.NrfCertPem)
+ }
++
++// SbiUri returns the URI of this SMF, by its FQDN when it has one.
++func (c *SMFContext) SbiUri() string {
++	host := c.RegisterIPv4
++	if fqdn := factory.SmfConfig.GetSbiFqdn(); fqdn != "" {
++		host = fqdn
++	}
++	return fmt.Sprintf("%s://%s:%d", c.URIScheme, host, c.SBIPort)
++}
+diff --git a/internal/context/nf_profile.go b/internal/context/nf_profile.go
+index 568dca4..3e15cba 100644
+--- a/internal/context/nf_profile.go
++++ b/internal/context/nf_profile.go
+@@ -1,7 +1,6 @@
+ package context
+ 
+ import (
+-	"fmt"
+ 	"time"
+ 
+ 	"github.com/free5gc/openapi/models"
+@@ -37,7 +36,7 @@ func (c *SMFContext) SetupNFProfile(nfProfileconfig *factory.Config) {
+ 			Versions:          *c.NfProfile.NFServiceVersion,
+ 			Scheme:            GetSelf().URIScheme,
+ 			NfServiceStatus:   models.NfServiceStatus_REGISTERED,
+-			ApiPrefix:         fmt.Sprintf("%s://%s:%d", GetSelf().URIScheme, GetSelf().RegisterIPv4, GetSelf().SBIPort),
++			ApiPrefix:         GetSelf().SbiUri(),
+ 			IpEndPoints: []models.IpEndPoint{
+ 				{
+ 					Ipv4Address: GetSelf().RegisterIPv4,
+diff --git a/internal/pfcp/handler/handler.go b/internal/pfcp/handler/handler.go
+index 5ce3914..2b8297e 100644
+--- a/internal/pfcp/handler/handler.go
++++ b/internal/pfcp/handler/handler.go
+@@ -1,8 +1,6 @@
+ package handler
+ 
+ import (
+-	"fmt"
+-
+ 	"github.com/free5gc/openapi/models"
+ 	"github.com/free5gc/pfcp"
+ 	"github.com/free5gc/pfcp/pfcpType"
+@@ -173,10 +171,7 @@ func HandlePfcpSessionReportRequest(msg *pfcpUdp.Message) {
+ 				PduSessionId: smContext.PDUSessionID,
+ 				// Temporarily assign SMF itself,
+ 				// TODO: TS 23.502 4.2.3.3 5. Namf_Communication_N1N2TransferFailureNotification
+-				N1n2FailureTxfNotifURI: fmt.Sprintf("%s://%s:%d",
+-					smf_context.GetSelf().URIScheme,
+-					smf_context.GetSelf().RegisterIPv4,
+-					smf_context.GetSelf().SBIPort),
++				N1n2FailureTxfNotifURI: smf_context.GetSelf().SbiUri(),
+ 				N2InfoContainer: &models.N2InfoContainer{
+ 					N2InformationClass: models.N2InformationClass_SM,
+ 					SmInfo: &models.N2SmInformation{
+diff --git a/internal/sbi/consumer/chf_service.go b/internal/sbi/consumer/chf_service.go
+index dddcf88..9326daa 100644
+--- a/internal/sbi/consumer/chf_service.go
++++ b/internal/sbi/consumer/chf_service.go
+@@ -92,10 +92,8 @@ func (s *nchfService) buildConvergedChargingRequest(smContext *smf_context.SMCon
+ 				DnnId: smContext.Dnn,
+ 			},
+ 		},
+-		NotifyUri: fmt.Sprintf("%s://%s:%d/nsmf-callback/v1/notify_%s",
+-			smfContext.URIScheme,
+-			smfContext.RegisterIPv4,
+-			smfContext.SBIPort,
++		NotifyUri: fmt.Sprintf("%s/nsmf-callback/v1/notify_%s",
++			smfContext.SbiUri(),
+ 			smContext.Ref,
+ 		),
+ 		MultipleUnitUsage: multipleUnitUsage,
+diff --git a/internal/sbi/consumer/nrf_service.go b/internal/sbi/consumer/nrf_service.go
+index 7b6fc45..798086f 100644
+--- a/internal/sbi/consumer/nrf_service.go
++++ b/internal/sbi/consumer/nrf_service.go
+@@ -16,6 +16,7 @@ import (
+ 	"github.com/free5gc/openapi/udm/SubscriberDataManagement"
+ 	smf_context "github.com/free5gc/smf/internal/context"
+ 	"github.com/free5gc/smf/internal/logger"
++	"github.com/free5gc/smf/pkg/factory"
+ 	sbi_metrics "github.com/free5gc/util/metrics/sbi"
+ )
+ 
+@@ -148,6 +149,7 @@ func (s *nnrfService) buildNfProfile(smfContext *smf_context.SMFContext) (
+ 	// set nfProfile
+ 	profile = models.NrfNfManagementNfProfile{
+ 		NfInstanceId:  smfContext.NfInstanceID,
++		Fqdn:          factory.SmfConfig.GetSbiFqdn(),
+ 		NfType:        models.NrfNfManagementNfType_SMF,
+ 		NfStatus:      models.NrfNfManagementNfStatus_REGISTERED,
+ 		Ipv4Addresses: []string{smfContext.RegisterIPv4},
+diff --git a/internal/sbi/consumer/pcf_service.go b/internal/sbi/consumer/pcf_service.go
+index f14923f..6fedd1f 100644
+--- a/internal/sbi/consumer/pcf_service.go
++++ b/internal/sbi/consumer/pcf_service.go
+@@ -71,10 +71,8 @@ func (s *npcfService) SendSMPolicyAssociationCreate(smContext *smf_context.SMCon
+ 
+ 	smPolicyData.Supi = smContext.Supi
+ 	smPolicyData.PduSessionId = smContext.PDUSessionID
+-	smPolicyData.NotificationUri = fmt.Sprintf("%s://%s:%d/nsmf-callback/v1/sm-policies/%s",
+-		smf_context.GetSelf().URIScheme,
+-		smf_context.GetSelf().RegisterIPv4,
+-		smf_context.GetSelf().SBIPort,
++	smPolicyData.NotificationUri = fmt.Sprintf("%s/nsmf-callback/v1/sm-policies/%s",
++		smf_context.GetSelf().SbiUri(),
+ 		smContext.Ref,
+ 	)
+ 	smPolicyData.Dnn = smContext.Dnn
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index ef96413..8cd431f 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/gin-gonic/gin"
+ 
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
+ 	smf_context "github.com/free5gc/smf/internal/context"
+ 	"github.com/free5gc/smf/internal/logger"
+ 	"github.com/free5gc/smf/internal/sbi/consumer"
+@@ -172,6 +173,7 @@ func (s *Server) startServer(wg *sync.WaitGroup) {
+ 	case "http":
+ 		err = s.httpServer.ListenAndServe()
+ 	case "https":
++		sbitls.ConfigureServer(s.httpServer)
+ 		err = s.httpServer.ListenAndServeTLS(
+ 			cfg.GetCertPemPath(),
+ 			cfg.GetCertKeyPath())
+diff --git a/internal/util/oauth/router_auth_check.go b/internal/util/oauth/router_auth_check.go
+index d9db11f..12463b9 100644
+--- a/internal/util/oauth/router_auth_check.go
++++ b/internal/util/oauth/router_auth_check.go
+@@ -1,11 +1,10 @@
+ package util_oauth
+ 
+ import (
+-	"net/http"
+-
+ 	"github.com/gin-gonic/gin"
+ 
+ 	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/oauth"
+ 	smf_context "github.com/free5gc/smf/internal/context"
+ 	"github.com/free5gc/smf/internal/logger"
+ )
+@@ -23,9 +22,12 @@ func NewRouterAuthorizationCheck(serviceName models.ServiceName) *RouterAuthoriz
+ func (rac *RouterAuthorizationCheck) Check(c *gin.Context, smfContext smf_context.NFContext) {
+ 	token := c.Request.Header.Get("Authorization")
+ 	err := smfContext.AuthorizationCheck(token, rac.serviceName)
++	if err == nil {
++		err = oauth.CheckTokenPeer(token, c.Request.TLS)
++	}
+ 	if err != nil {
+ 		logger.UtilLog.Debugf("RouterAuthorizationCheck: Check Unauthorized: %s", err.Error())
+-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
++		oauth.WriteTokenError(c.Writer, c.Request, err)
+ 		c.Abort()
+ 		return
+ 	}
+diff --git a/internal/util/search_nf_service.go b/internal/util/search_nf_service.go
+index 4147386..02bc171 100644
+--- a/internal/util/search_nf_service.go
++++ b/internal/util/search_nf_service.go
+@@ -1,50 +1,12 @@
+ package util
+ 
+ import (
+-	"fmt"
+-
++	"github.com/free5gc/openapi"
+ 	"github.com/free5gc/openapi/models"
+ )
+ 
+ func SearchNFServiceUri(nfProfile *models.NrfNfDiscoveryNfProfile, serviceName models.ServiceName,
+ 	nfServiceStatus models.NfServiceStatus,
+ ) (nfUri string) {
+-	if nfProfile.NfServices != nil {
+-		for _, service := range nfProfile.NfServices {
+-			if service.ServiceName == serviceName && service.NfServiceStatus == nfServiceStatus {
+-				if nfProfile.Fqdn != "" {
+-					nfUri = nfProfile.Fqdn
+-				} else if service.Fqdn != "" {
+-					nfUri = service.Fqdn
+-				} else if service.ApiPrefix != "" {
+-					nfUri = service.ApiPrefix
+-				} else if service.IpEndPoints != nil {
+-					point := service.IpEndPoints[0]
+-					if point.Ipv4Address != "" {
+-						nfUri = getSbiUri(service.Scheme, point.Ipv4Address, point.Port)
+-					} else if len(nfProfile.Ipv4Addresses) != 0 {
+-						nfUri = getSbiUri(service.Scheme, nfProfile.Ipv4Addresses[0], point.Port)
+-					}
+-				}
+-			}
+-			if nfUri != "" {
+-				break
+-			}
+-		}
+-	}
+-	return
+-}
+-
+-func getSbiUri(scheme models.UriScheme, ipv4Address string, port int32) (uri string) {
+-	if port != 0 {
+-		uri = fmt.Sprintf("%s://%s:%d", scheme, ipv4Address, port)
+-	} else {
+-		switch scheme {
+-		case models.UriScheme_HTTP:
+-			uri = fmt.Sprintf("%s://%s:80", scheme, ipv4Address)
+-		case models.UriScheme_HTTPS:
+-			uri = fmt.Sprintf("%s://%s:443", scheme, ipv4Address)
+-		}
+-	}
+-	return
++	return openapi.GetNFServiceUri(nfProfile, serviceName)
+ }
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 20e9be3..a4e5be0 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -306,6 +306,7 @@ type Sbi struct {
+ 	// IPv6Addr string `yaml:"ipv6Addr,omitempty"`
+ 	BindingIPv4 string `yaml:"bindingIPv4,omitempty" valid:"host,required"` // IP used to run the server in the node.
+ 	Port        int    `yaml:"port,omitempty" valid:"port,optional"`
++	Fqdn        string `yaml:"fqdn,omitempty" valid:"dns,optional"` // FQDN of the NF; without it, URIs by IP address
+ }
+ 
+ func (s *Sbi) validate() (bool, error) {
+@@ -326,6 +327,7 @@ func (s *Sbi) validate() (bool, error) {
+ type Tls struct {
+ 	Pem string `yaml:"pem,omitempty" valid:"type(string),minstringlength(1),required"`
+ 	Key string `yaml:"key,omitempty" valid:"type(string),minstringlength(1),required"`
++	Ca  string `yaml:"ca,omitempty" valid:"optional"` // CA of the peers on the SBI
+ }
+ 
+ func (t *Tls) validate() (bool, error) {
+@@ -973,3 +975,24 @@ func (c *Config) GetCertKeyPath() string {
+ 	defer c.RUnlock()
+ 	return c.Configuration.Sbi.Tls.Key
+ }
++
++// GetCertCaPath returns the file with the CA of the peers on the SBI.
++func (c *Config) GetCertCaPath() string {
++	c.RLock()
++	defer c.RUnlock()
++	if c.Configuration.Sbi.Tls != nil {
++		return c.Configuration.Sbi.Tls.Ca
++	}
++	return ""
++}
++
++// GetSbiFqdn returns the FQDN of this NF (TS 29.510 cl. 6.1.6.2.2 NOTE 1),
++// empty when the URIs go by IP address.
++func (c *Config) GetSbiFqdn() string {
++	if c == nil || c.Configuration == nil || c.Configuration.Sbi == nil {
++		return ""
++	}
++	c.RLock()
++	defer c.RUnlock()
++	return c.Configuration.Sbi.Fqdn
++}
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+index a0b1fa4..61e775e 100644
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -12,6 +12,7 @@ import (
+ 
+ 	"github.com/free5gc/openapi"
+ 	"github.com/free5gc/openapi/nrf/NFManagement"
++	"github.com/free5gc/openapi/sbitls"
+ 	smf_context "github.com/free5gc/smf/internal/context"
+ 	"github.com/free5gc/smf/internal/logger"
+ 	"github.com/free5gc/smf/internal/sbi"
+@@ -70,6 +71,18 @@ func NewApp(
+ 	smf.SetLogLevel(cfg.GetLogLevel())
+ 	smf.SetReportCaller(cfg.GetLogReportCaller())
+ 
++	if cfg.GetSbiScheme() == "https" {
++		if err := sbitls.Init(sbitls.Config{
++			Certificate:  cfg.GetCertPemPath(),
++			Key:          cfg.GetCertKeyPath(),
++			CA:           cfg.GetCertCaPath(),
++			NfInstanceId: cfg.GetNfInstanceId(),
++			Logger:       logger.InitLog,
++		}); err != nil {
++			return nil, err
++		}
++	}
++
+ 	// Initialize consumer
+ 	consumer, err := consumer.NewConsumer(smf)
+ 	if err != nil {

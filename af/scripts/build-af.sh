@@ -3,8 +3,8 @@
 #
 # Usage: af/scripts/build-af.sh
 #   Output: af/build/bin/af and af/build/bin/uaclient (static binaries).
-#   Prepares the patched free5gc/openapi first when it is missing: the AF
-#   uses its Naanf_AKMA client.
+#   Prepares the patched free5gc/openapi first when it is missing or lacks
+#   the TLS of the SBI: the AF uses its Naanf_AKMA client and sbitls.
 #
 #   With the wolfSSL library of af/scripts/build-wolfssl.sh, both binaries
 #   have the PSK profiles (psk-tls13, psk-tls12, psk-dtls13, psk-dtls12) and,
@@ -19,7 +19,8 @@ lib="$here/build/wolfssl/install/lib/libwolfssl.a"
 
 command -v go >/dev/null || { echo "go not found in PATH" >&2; exit 1; }
 
-if [ ! -f "$repo/free5gc/build/openapi/aanf/AKMA/client.go" ]; then
+if [ ! -f "$repo/free5gc/build/openapi/aanf/AKMA/client.go" ] ||
+    [ ! -f "$repo/free5gc/build/openapi/sbitls/sbitls.go" ]; then
     "$repo/free5gc/scripts/prepare-openapi.sh"
 fi
 

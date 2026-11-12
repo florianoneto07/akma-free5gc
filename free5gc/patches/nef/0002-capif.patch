@@ -1,0 +1,1869 @@
+diff --git a/go.mod b/go.mod
+index 315ec84..a85ff9a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -39,7 +39,7 @@ require (
+ 	github.com/go-playground/universal-translator v0.18.1 // indirect
+ 	github.com/go-playground/validator/v10 v10.20.0 // indirect
+ 	github.com/goccy/go-json v0.10.2 // indirect
+-	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
++	github.com/golang-jwt/jwt/v5 v5.2.2
+ 	github.com/h2non/gock v1.2.0 // indirect
+ 	github.com/h2non/parth v0.0.0-20190131123155-b4df798d6542 // indirect
+ 	github.com/json-iterator/go v1.1.12 // indirect
+diff --git a/internal/context/akma.go b/internal/context/akma.go
+index 7d52f6f..d91857e 100644
+--- a/internal/context/akma.go
++++ b/internal/context/akma.go
+@@ -52,6 +52,17 @@ func (p *AkmaAfPolicy) AfIds() []string {
+ 	return ids
+ }
+ 
++// KnownSource reports whether remote is a source address of an AF of the
++// policy, whatever its AF_ID.
++func (p *AkmaAfPolicy) KnownSource(remote netip.Addr) bool {
++	for _, set := range p.sources {
++		if _, ok := set[remote.Unmap()]; ok {
++			return true
++		}
++	}
++	return false
++}
++
+ // Authorize reports whether the AF at remote may obtain K_AF for id.
+ func (p *AkmaAfPolicy) Authorize(id afid.AfID, remote netip.Addr) bool {
+ 	set, ok := p.sources[id.Transport()]
+diff --git a/internal/context/capif.go b/internal/context/capif.go
+new file mode 100644
+index 0000000..71f4a7f
+--- /dev/null
++++ b/internal/context/capif.go
+@@ -0,0 +1,165 @@
++package context
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/sha256"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"os"
++	"sync"
++	"time"
++
++	"github.com/free5gc/nef/pkg/factory"
++)
++
++// CapifInvoker is what the NEF keeps of an API invoker: the answer of the
++// CAPIF core function to Obtain_API_Invoker_Info (3GPP TS 29.222
++// clause 5.6.2.4; TS 23.222 clause 8.16.3 step 2a).
++type CapifInvoker struct {
++	Id string
++	// AkmaAfIds are the AF_IDs, in transport form, that the API invoker may
++	// present: its authorization information.
++	AkmaAfIds map[string]struct{}
++	// AuthenticationInfo is the certificate of the CA that issues the client
++	// certificate of the API invoker (3GPP TS 33.122 clause 6.5.2.3 step 5),
++	// for TLS on CAPIF-2e.
++	AuthenticationInfo string
++
++	fetched time.Time
++}
++
++// Capif is the state of the NEF as API publishing function and API exposing
++// function of CAPIF (3GPP TS 29.522 clause 7).
++type Capif struct {
++	// TokenKey checks the access tokens of the CAPIF core function (ES256),
++	// and TokenKid is its JWK thumbprint, the "kid" of the tokens
++	// (3GPP TS 33.210 clause 6.3.3.1; RFC 7638).
++	TokenKey *ecdsa.PublicKey
++	TokenKid string
++
++	invokerInfoLifetime time.Duration
++
++	mu       sync.Mutex
++	invokers map[string]CapifInvoker
++	apiId    string
++
++	// Now returns the current time; tests replace it.
++	Now func() time.Time
++}
++
++// NewCapif loads the public key of the access tokens of the CAPIF core
++// function.
++func NewCapif(cfg *factory.Capif) (*Capif, error) {
++	key, err := loadES256PublicKey(cfg.TokenPublicKey)
++	if err != nil {
++		return nil, fmt.Errorf("capif.tokenPublicKey: %w", err)
++	}
++	lifetime, err := cfg.GetInvokerInfoLifetime()
++	if err != nil {
++		return nil, err
++	}
++	return NewCapifWithKey(key, lifetime)
++}
++
++// NewCapifWithKey builds the state with the public key of the access tokens.
++func NewCapifWithKey(key *ecdsa.PublicKey, invokerInfoLifetime time.Duration) (*Capif, error) {
++	kid, err := Thumbprint(key)
++	if err != nil {
++		return nil, err
++	}
++	return &Capif{
++		TokenKey:            key,
++		TokenKid:            kid,
++		invokerInfoLifetime: invokerInfoLifetime,
++		invokers:            make(map[string]CapifInvoker),
++		Now:                 time.Now,
++	}, nil
++}
++
++// loadES256PublicKey reads a PEM "PUBLIC KEY" with an ECDSA P-256 key.
++func loadES256PublicKey(path string) (*ecdsa.PublicKey, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	block, _ := pem.Decode(data)
++	if block == nil || block.Type != "PUBLIC KEY" {
++		return nil, errors.New("expected a PEM \"PUBLIC KEY\" block")
++	}
++	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
++	if err != nil {
++		return nil, err
++	}
++	key, ok := pub.(*ecdsa.PublicKey)
++	if !ok || key.Curve != elliptic.P256() {
++		return nil, errors.New("an ECDSA P-256 key is required (ES256)")
++	}
++	return key, nil
++}
++
++// Thumbprint returns the JWK thumbprint of a P-256 public key (RFC 7638
++// clause 3): the base64url SHA-256 of its required members (RFC 7518
++// clause 6.2.1) in lexicographic order, without white space.
++func Thumbprint(pub *ecdsa.PublicKey) (string, error) {
++	if pub == nil || pub.Curve != elliptic.P256() {
++		return "", errors.New("an ECDSA P-256 key is required")
++	}
++	point, err := pub.Bytes()
++	if err != nil {
++		return "", err
++	}
++	// point is 0x04 || x || y, each coordinate in 32 octets.
++	enc := base64.RawURLEncoding
++	jwk := fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":"%s","y":"%s"}`,
++		enc.EncodeToString(point[1:33]), enc.EncodeToString(point[33:65]))
++	sum := sha256.Sum256([]byte(jwk))
++	return enc.EncodeToString(sum[:]), nil
++}
++
++// Invoker returns the data of an API invoker, when the NEF has kept it for
++// less than the configured lifetime.
++func (c *Capif) Invoker(id string) (CapifInvoker, bool) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	inv, ok := c.invokers[id]
++	if !ok || c.Now().Sub(inv.fetched) >= c.invokerInfoLifetime {
++		return CapifInvoker{}, false
++	}
++	return inv, true
++}
++
++// SetInvoker keeps the data of an API invoker, obtained now.
++func (c *Capif) SetInvoker(inv CapifInvoker) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	inv.fetched = c.Now()
++	c.invokers[inv.Id] = inv
++}
++
++// ForgetInvoker drops the data of an API invoker.
++func (c *Capif) ForgetInvoker(id string) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	delete(c.invokers, id)
++}
++
++// SetApiId keeps the API identifier that the CAPIF core function assigned
++// to the AKMA API at its publication.
++func (c *Capif) SetApiId(apiId string) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.apiId = apiId
++}
++
++// TakeApiId returns the API identifier of the publication and forgets it.
++func (c *Capif) TakeApiId() string {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	apiId := c.apiId
++	c.apiId = ""
++	return apiId
++}
+diff --git a/internal/context/capif_test.go b/internal/context/capif_test.go
+new file mode 100644
+index 0000000..5956c85
+--- /dev/null
++++ b/internal/context/capif_test.go
+@@ -0,0 +1,84 @@
++package context
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/pem"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/free5gc/nef/pkg/factory"
++	"github.com/stretchr/testify/require"
++)
++
++// TestThumbprint checks the JWK thumbprint (RFC 7638) of the P-256 key of
++// RFC 7517 Appendix A.1 against a value computed apart.
++func TestThumbprint(t *testing.T) {
++	x, _ := base64.RawURLEncoding.DecodeString("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4")
++	y, _ := base64.RawURLEncoding.DecodeString("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM")
++	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, x...), y...))
++	require.NoError(t, err)
++	kid, err := Thumbprint(pub)
++	require.NoError(t, err)
++	require.Equal(t, "cn-I_WNMClehiVp51i_0VpOENW1upEerA8sEam5hn-s", kid)
++}
++
++func writePublicKey(t *testing.T, pub any) string {
++	t.Helper()
++	der, err := x509.MarshalPKIXPublicKey(pub)
++	require.NoError(t, err)
++	path := filepath.Join(t.TempDir(), "ccf-token.pub.pem")
++	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600))
++	return path
++}
++
++func TestNewCapif(t *testing.T) {
++	p256, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
++	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
++
++	capif, err := NewCapif(&factory.Capif{TokenPublicKey: writePublicKey(t, &p256.PublicKey)})
++	require.NoError(t, err)
++	require.True(t, capif.TokenKey.Equal(&p256.PublicKey))
++	kid, _ := Thumbprint(&p256.PublicKey)
++	require.Equal(t, kid, capif.TokenKid)
++
++	for name, pub := range map[string]any{"P-384": &p384.PublicKey, "RSA": &rsaKey.PublicKey} {
++		_, err := NewCapif(&factory.Capif{TokenPublicKey: writePublicKey(t, pub)})
++		require.Error(t, err, name)
++	}
++	_, err = NewCapif(&factory.Capif{TokenPublicKey: filepath.Join(t.TempDir(), "none.pem")})
++	require.Error(t, err)
++}
++
++// TestCapifInvokers covers the lifetime of the data of an API invoker.
++func TestCapifInvokers(t *testing.T) {
++	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	capif, err := NewCapifWithKey(&key.PublicKey, time.Minute)
++	require.NoError(t, err)
++	now := time.Now()
++	capif.Now = func() time.Time { return now }
++
++	capif.SetInvoker(CapifInvoker{Id: "a", AkmaAfIds: map[string]struct{}{"af1.akma.example.FF00000001": {}}})
++	inv, ok := capif.Invoker("a")
++	require.True(t, ok)
++	require.Contains(t, inv.AkmaAfIds, "af1.akma.example.FF00000001")
++	now = now.Add(time.Minute)
++	_, ok = capif.Invoker("a")
++	require.False(t, ok, "kept beyond its lifetime")
++
++	capif.SetInvoker(CapifInvoker{Id: "b"})
++	capif.ForgetInvoker("b")
++	_, ok = capif.Invoker("b")
++	require.False(t, ok)
++
++	capif.SetApiId("api-1")
++	require.Equal(t, "api-1", capif.TakeApiId())
++	require.Empty(t, capif.TakeApiId())
++}
+diff --git a/internal/context/nef_context.go b/internal/context/nef_context.go
+index 02b5898..25a706e 100644
+--- a/internal/context/nef_context.go
++++ b/internal/context/nef_context.go
+@@ -33,7 +33,10 @@ type NefContext struct {
+ 	afs            map[string]*AfData
+ 	// AkmaAfs is the local policy of the AKMA API (3GPP TS 33.535 clause 6.3).
+ 	AkmaAfs *AkmaAfPolicy
+-	mu      sync.RWMutex
++	// Capif is the state of the NEF as API publishing and exposing function
++	// of CAPIF (3GPP TS 29.522 clause 7); nil when CAPIF is not used.
++	Capif *Capif
++	mu    sync.RWMutex
+ }
+ 
+ func NewContext(nef nef) (*NefContext, error) {
+@@ -47,6 +50,11 @@ func NewContext(nef nef) (*NefContext, error) {
+ 		return nil, err
+ 	}
+ 	c.AkmaAfs = akmaAfs
++	if cfg := nef.Config().Capif(); cfg != nil {
++		if c.Capif, err = NewCapif(cfg); err != nil {
++			return nil, err
++		}
++	}
+ 	logger.CtxLog.Infof("New nfInstID: [%s]", c.nfInstID)
+ 	return c, nil
+ }
+diff --git a/internal/logger/logger.go b/internal/logger/logger.go
+index 5ca3f47..979a297 100644
+--- a/internal/logger/logger.go
++++ b/internal/logger/logger.go
+@@ -23,6 +23,7 @@ var (
+ 	PFDFLog      *logrus.Entry
+ 	OamLog       *logrus.Entry
+ 	AkmaLog      *logrus.Entry
++	CapifLog     *logrus.Entry
+ )
+ 
+ const (
+@@ -56,4 +57,5 @@ func init() {
+ 	PFDFLog = NfLog.WithField(logger_util.FieldCategory, "PFDF")
+ 	OamLog = NfLog.WithField(logger_util.FieldCategory, "OAM")
+ 	AkmaLog = NfLog.WithField(logger_util.FieldCategory, "AKMA")
++	CapifLog = NfLog.WithField(logger_util.FieldCategory, "CAPIF")
+ }
+diff --git a/internal/sbi/api_capif.go b/internal/sbi/api_capif.go
+new file mode 100644
+index 0000000..91e93ee
+--- /dev/null
++++ b/internal/sbi/api_capif.go
+@@ -0,0 +1,59 @@
++package sbi
++
++import (
++	"mime"
++	"net/http"
++	"net/netip"
++
++	"github.com/free5gc/nef/internal/logger"
++	"github.com/free5gc/nef/internal/sbi/processor"
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	"github.com/gin-gonic/gin"
++)
++
++// getAefSecurityRoutes returns the custom operation of AEF_Security_API that
++// the NEF serves as API exposing function (3GPP TS 29.222 clause 9.1).
++func (s *Server) getAefSecurityRoutes() []Route {
++	return []Route{
++		{
++			Method:  http.MethodPost,
++			Pattern: "/check-authentication",
++			APIFunc: s.apiPostCheckAuthentication,
++		},
++	}
++}
++
++func (s *Server) apiPostCheckAuthentication(gc *gin.Context) {
++	// 3GPP TS 29.122 table 5.2.6-1: 415 for a body format the server does
++	// not support.
++	mediaType, _, err := mime.ParseMediaType(gc.GetHeader("Content-Type"))
++	if err != nil || mediaType != "application/json" {
++		processor.WriteAkmaProblem(gc, &models.ProblemDetails{
++			Title:  "Unsupported Media Type",
++			Status: http.StatusUnsupportedMediaType,
++			Detail: "the request body must be application/json",
++		})
++		return
++	}
++	reqBody, err := gc.GetRawData()
++	if err != nil {
++		logger.SBILog.Errorf("Get Request Body error: %+v", err)
++		processor.WriteAkmaProblem(gc, openapi.ProblemDetailsSystemFailure(err.Error()))
++		return
++	}
++	var req models.CapifCheckAuthenticationReq
++	if err = openapi.Deserialize(&req, reqBody, "application/json"); err != nil {
++		logger.SBILog.Errorf("Deserialize Request Body error: %+v", err)
++		processor.WriteAkmaProblem(gc, openapi.ProblemDetailsMalformedReqSyntax(err.Error()))
++		return
++	}
++	// The source address is taken from the connection, never from
++	// forwarding headers.
++	ap, err := netip.ParseAddrPort(gc.Request.RemoteAddr)
++	if err != nil {
++		processor.WriteAkmaProblem(gc, openapi.ProblemDetailsSystemFailure("source address of the request"))
++		return
++	}
++	s.Processor().CheckAuthentication(gc, &req, ap.Addr().Unmap())
++}
+diff --git a/internal/sbi/consumer/ccf_service.go b/internal/sbi/consumer/ccf_service.go
+new file mode 100644
+index 0000000..ad458e3
+--- /dev/null
++++ b/internal/sbi/consumer/ccf_service.go
+@@ -0,0 +1,105 @@
++package consumer
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"sync"
++
++	"github.com/free5gc/openapi/capif/PublishService"
++	"github.com/free5gc/openapi/capif/Security"
++	"github.com/free5gc/openapi/models"
++	sbi_metrics "github.com/free5gc/util/metrics/sbi"
++)
++
++// ccfService is the client of the CAPIF core function on CAPIF-3 and
++// CAPIF-4 (3GPP TS 23.222 clauses 6.4.6 and 6.4.7).
++type ccfService struct {
++	consumer *Consumer
++
++	mu              sync.RWMutex
++	publishClients  map[string]*PublishService.APIClient
++	securityClients map[string]*Security.APIClient
++}
++
++func (s *ccfService) publishClient(uri string) *PublishService.APIClient {
++	s.mu.RLock()
++	client, ok := s.publishClients[uri]
++	s.mu.RUnlock()
++	if ok {
++		return client
++	}
++	cfg := PublishService.NewConfiguration()
++	cfg.SetBasePath(uri)
++	cfg.SetMetrics(sbi_metrics.SbiMetricHook)
++	cfg.SetHTTPClient(http.DefaultClient)
++	client = PublishService.NewAPIClient(cfg)
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.publishClients[uri] = client
++	return client
++}
++
++func (s *ccfService) securityClient(uri string) *Security.APIClient {
++	s.mu.RLock()
++	client, ok := s.securityClients[uri]
++	s.mu.RUnlock()
++	if ok {
++		return client
++	}
++	cfg := Security.NewConfiguration()
++	cfg.SetBasePath(uri)
++	cfg.SetMetrics(sbi_metrics.SbiMetricHook)
++	cfg.SetHTTPClient(http.DefaultClient)
++	client = Security.NewAPIClient(cfg)
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.securityClients[uri] = client
++	return client
++}
++
++// PublishServiceAPI publishes d for the API publishing function apfId at
++// the CAPIF core function at uri (Publish_Service_API, 3GPP TS 29.222
++// clause 5.3.2.2) and returns the API identifier it assigned.
++func (s *ccfService) PublishServiceAPI(ctx context.Context, uri, apfId string,
++	d models.CapifServiceApiDescription,
++) (string, error) {
++	rsp, err := s.publishClient(uri).APFPublishedAPIsCollectionApi.CreateAPFPubAPIs(ctx,
++		&PublishService.CreateAPFPubAPIsRequest{ApfId: &apfId, ServiceAPIDescription: &d})
++	if err != nil {
++		return "", err
++	}
++	if rsp.ServiceAPIDescription.ApiId == "" {
++		return "", errors.New("no apiId in the answer of the CAPIF core function")
++	}
++	return rsp.ServiceAPIDescription.ApiId, nil
++}
++
++// UnpublishServiceAPI withdraws the service API apiId of apfId
++// (Unpublish_Service_API, 3GPP TS 29.222 clause 5.3.2.3).
++func (s *ccfService) UnpublishServiceAPI(ctx context.Context, uri, apfId, apiId string) error {
++	_, err := s.publishClient(uri).IndividualAPFPublishedAPIDocumentApi.DeleteIndAPFPubAPI(ctx,
++		&PublishService.IndAPFPubAPIRequest{ApfId: &apfId, ServiceApiId: &apiId})
++	return err
++}
++
++// ObtainApiInvokerInfo asks the CAPIF core function for the security
++// information of an API invoker, with its authentication and authorization
++// information (Obtain_API_Invoker_Info, 3GPP TS 29.222 clause 5.6.2.4).
++func (s *ccfService) ObtainApiInvokerInfo(ctx context.Context, uri, apiInvokerId string) (
++	models.CapifServiceSecurity, error,
++) {
++	yes := true
++	rsp, err := s.securityClient(uri).IndividualTrustedAPIInvokerStoreApi.GetSecIndTrustedAPIInv(ctx,
++		&Security.GetSecIndTrustedAPIInvRequest{
++			ApiInvokerId:       &apiInvokerId,
++			AuthenticationInfo: &yes,
++			AuthorizationInfo:  &yes,
++		})
++	if err != nil {
++		return models.CapifServiceSecurity{}, err
++	}
++	return rsp.ServiceSecurity, nil
++}
+diff --git a/internal/sbi/consumer/consumer.go b/internal/sbi/consumer/consumer.go
+index 77e4efb..08d0056 100644
+--- a/internal/sbi/consumer/consumer.go
++++ b/internal/sbi/consumer/consumer.go
+@@ -5,6 +5,8 @@ import (
+ 	"github.com/free5gc/nef/pkg/app"
+ 	"github.com/free5gc/openapi"
+ 	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
++	"github.com/free5gc/openapi/capif/PublishService"
++	"github.com/free5gc/openapi/capif/Security"
+ 	"github.com/free5gc/openapi/nrf/NFDiscovery"
+ 	"github.com/free5gc/openapi/nrf/NFManagement"
+ 	"github.com/free5gc/openapi/pcf/PolicyAuthorization"
+@@ -23,6 +25,7 @@ type Consumer struct {
+ 	*npcfService
+ 	*nudrService
+ 	*naanfService
++	*ccfService
+ }
+ 
+ func NewConsumer(nef nef) (*Consumer, error) {
+@@ -50,6 +53,12 @@ func NewConsumer(nef nef) (*Consumer, error) {
+ 		consumer: c,
+ 		clients:  make(map[string]*Naanf_AKMA.APIClient),
+ 	}
++
++	c.ccfService = &ccfService{
++		consumer:        c,
++		publishClients:  make(map[string]*PublishService.APIClient),
++		securityClients: make(map[string]*Security.APIClient),
++	}
+ 	return c, nil
+ }
+ 
+diff --git a/internal/sbi/processor/akma.go b/internal/sbi/processor/akma.go
+index 0f5e6dd..2ede564 100644
+--- a/internal/sbi/processor/akma.go
++++ b/internal/sbi/processor/akma.go
+@@ -48,7 +48,19 @@ func (p *Processor) RetrieveAkmaApplicationKey(c *gin.Context, req *models.AkmaA
+ 
+ 	// TS 33.535 clause 6.3 step 2: the NEF authorizes the AF, including the
+ 	// verification of the AF_ID. No cause is defined for the refusal
+-	// (TS 29.522 table 5.14.7.3-1): 403 without cause.
++	// (TS 29.522 table 5.14.7.3-1): 403 without cause. With CAPIF, the AF_ID
++	// shall also be one of those that the CAPIF core function gave for the
++	// API invoker of the access token (TS 29.522 clause 7.2).
++	inv, capif := capifInvokerOf(c)
++	if _, ok := inv.AkmaAfIds[af.Transport()]; capif && !ok {
++		logger.CapifLog.Warnf("AF_ID %s outside the profile of API invoker %s", af.Transport(), inv.Id)
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Detail: "AF_ID not authorized for the API invoker",
++		})
++		return
++	}
+ 	if !p.Context().AkmaAfs.Authorize(af, remote) {
+ 		logger.AkmaLog.Warnf("AF at %s not authorized for AF_ID %s", remote, af.Transport())
+ 		WriteAkmaProblem(c, &models.ProblemDetails{
+@@ -58,6 +70,9 @@ func (p *Processor) RetrieveAkmaApplicationKey(c *gin.Context, req *models.AkmaA
+ 		})
+ 		return
+ 	}
++	if capif {
++		logger.CapifLog.Infof("Access token of API invoker %s accepted for AF_ID %s", inv.Id, af.Transport())
++	}
+ 
+ 	// TS 33.535 clause 6.3 step 2 and clause 6.7: AAnF selection with the
+ 	// Routing Indicator of the A-KID.
+diff --git a/internal/sbi/processor/capif.go b/internal/sbi/processor/capif.go
+new file mode 100644
+index 0000000..3615a16
+--- /dev/null
++++ b/internal/sbi/processor/capif.go
+@@ -0,0 +1,401 @@
++package processor
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/netip"
++	"regexp"
++	"strings"
++	"time"
++
++	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
++	nef_context "github.com/free5gc/nef/internal/context"
++	"github.com/free5gc/nef/internal/logger"
++	"github.com/free5gc/nef/pkg/factory"
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++	"github.com/gin-gonic/gin"
++	"github.com/golang-jwt/jwt/v5"
++)
++
++const (
++	// capifLeeway is the clock skew accepted on the exp of an access token
++	// of the CAPIF core function (3GPP TS 33.122 Annex C.2.2: no more than
++	// 30 seconds).
++	capifLeeway = 30 * time.Second
++	// capifAlg is the JWS algorithm of the access tokens (3GPP TS 33.210
++	// clause 6.3.3.1).
++	capifAlg = "ES256"
++	// capifInvokerKey keeps, in the gin context, the API invoker of an
++	// accepted access token of the CAPIF core function.
++	capifInvokerKey = "capifInvoker"
++)
++
++// capifRetryInterval is the wait between two attempts to publish the AKMA
++// API at the CAPIF core function.
++var capifRetryInterval = 5 * time.Second
++
++// errCapifUnknownInvoker is the answer 404 of the CAPIF core function to
++// Obtain_API_Invoker_Info: the API invoker was offboarded, or the CAPIF core
++// function was restarted.
++var errCapifUnknownInvoker = errors.New("API invoker unknown at the CAPIF core function")
++
++// supportedFeaturesPattern is the SupportedFeatures type of 3GPP TS 29.571.
++var supportedFeaturesPattern = regexp.MustCompile(`^[A-Fa-f0-9]*$`)
++
++type capifResult int
++
++const (
++	// capifNotUsed: the request carries no access token of the CAPIF core
++	// function.
++	capifNotUsed capifResult = iota
++	capifAccepted
++	// capifRefused: the response is written.
++	capifRefused
++)
++
++// AkmaAuthorization authorizes a request of the AKMA API. With CAPIF, an
++// access token of the CAPIF core function is checked as 3GPP TS 29.522
++// clause 7.2 asks; any other request goes to nrfCheck, the access tokens of
++// the NRF of CAPIF not used (clause 6), when the configuration allows them.
++func (p *Processor) AkmaAuthorization(c *gin.Context, nrfCheck func(*gin.Context)) {
++	if p.Context().Capif == nil {
++		nrfCheck(c)
++		return
++	}
++	raw := bearerToken(c.GetHeader("Authorization"))
++	switch p.capifAuthorize(c, raw) {
++	case capifAccepted:
++		return
++	case capifRefused:
++		c.Abort()
++		return
++	}
++	if p.Config().Capif().AllowNrfTokens {
++		nrfCheck(c)
++		return
++	}
++	// RFC 6750 clause 3 and 3.1.
++	if raw == "" {
++		writeBearerChallenge(c, http.StatusUnauthorized, "Bearer", "no access token")
++	} else {
++		writeBearerChallenge(c, http.StatusUnauthorized, `Bearer error="invalid_token"`,
++			"not an access token of the CAPIF core function")
++	}
++	c.Abort()
++}
++
++// bearerToken returns the access token of an Authorization header value
++// (RFC 6750 clause 2.1), or "".
++func bearerToken(header string) string {
++	scheme, value, ok := strings.Cut(strings.TrimSpace(header), " ")
++	if !ok || !strings.EqualFold(scheme, "Bearer") {
++		return ""
++	}
++	return strings.TrimSpace(value)
++}
++
++// capifAuthorize checks an access token of the CAPIF core function
++// (3GPP TS 29.522 clause 7.2; TS 33.122 clause 6.5.2.3 step 7 and Annex C):
++// the ES256 signature with the key of the CAPIF core function and its "kid"
++// (TS 33.210 clause 6.3.3.1), exp, iss and client_id, the scope, and the API
++// invoker at the CAPIF core function. A token not signed by the CAPIF core
++// function is not used here.
++func (p *Processor) capifAuthorize(c *gin.Context, raw string) capifResult {
++	capif := p.Context().Capif
++	if raw == "" {
++		return capifNotUsed
++	}
++	var claims models.CapifAccessTokenClaims
++	parser := jwt.NewParser(jwt.WithValidMethods([]string{capifAlg}), jwt.WithoutClaimsValidation())
++	if _, err := parser.ParseWithClaims(raw, &claims, func(t *jwt.Token) (any, error) {
++		// RFC 7515 clause 4.1.11: no extension is understood.
++		if _, ok := t.Header["crit"]; ok {
++			return nil, errors.New("crit is not supported")
++		}
++		if v, ok := t.Header["kid"]; ok {
++			if kid, _ := v.(string); kid != capif.TokenKid {
++				return nil, errors.New("unknown kid")
++			}
++		}
++		return capif.TokenKey, nil
++	}); err != nil {
++		return capifNotUsed
++	}
++
++	// TS 33.122 Annex C.6: "If the current time is beyond the time specified
++	// by the "exp" parameter, the associated token shall no longer be
++	// considered valid".
++	switch {
++	case claims.Exp == 0:
++		return capifInvalidToken(c, claims.ClientId, "no exp")
++	case capif.Now().After(time.Unix(claims.Exp, 0).Add(capifLeeway)):
++		return capifInvalidToken(c, claims.ClientId, "expired")
++	case claims.ClientId == "" || claims.Iss != claims.ClientId:
++		return capifInvalidToken(c, claims.ClientId, "iss and client_id are not the same API invoker")
++	}
++
++	cfg := p.Config().Capif()
++	if !scopeGrants(claims.Scope, cfg.AefId, factory.ServiceAkma) {
++		logger.CapifLog.Warnf("Access token of API invoker %s refused: scope %q does not grant %s at %s",
++			claims.ClientId, claims.Scope, factory.ServiceAkma, cfg.AefId)
++		writeBearerChallenge(c, http.StatusForbidden, fmt.Sprintf(`Bearer error="insufficient_scope", scope="3gpp#%s:%s"`,
++			cfg.AefId, factory.ServiceAkma), "the scope does not grant this API")
++		return capifRefused
++	}
++
++	inv, err := p.capifInvoker(c.Request.Context(), claims.ClientId)
++	switch {
++	case errors.Is(err, errCapifUnknownInvoker):
++		return capifInvalidToken(c, claims.ClientId, "unknown at the CAPIF core function")
++	case err != nil:
++		logger.CapifLog.Warnf("CAPIF core function not reachable: %v", err)
++		WriteAkmaProblem(c, serviceUnavailable("CAPIF core function not reachable"))
++		return capifRefused
++	}
++	c.Set(capifInvokerKey, inv)
++	return capifAccepted
++}
++
++func capifInvalidToken(c *gin.Context, invoker, reason string) capifResult {
++	logger.CapifLog.Warnf("Access token of API invoker %q refused: %s", invoker, reason)
++	writeBearerChallenge(c, http.StatusUnauthorized, `Bearer error="invalid_token"`, "access token "+reason)
++	return capifRefused
++}
++
++// scopeGrants reports whether a scope of CAPIF,
++// "3gpp#<aefId>:<API name>[,<API name>]...[;<aefId>:...]" (3GPP TS 29.222
++// table 8.5.4.2.6-1), grants api at aefId.
++func scopeGrants(scope, aefId, api string) bool {
++	rest, ok := strings.CutPrefix(scope, "3gpp#")
++	if !ok {
++		return false
++	}
++	for _, item := range strings.Split(rest, ";") {
++		aef, apis, ok := strings.Cut(item, ":")
++		if !ok || aef != aefId {
++			continue
++		}
++		for _, a := range strings.Split(apis, ",") {
++			if a == api {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++// capifInvoker returns the data of an API invoker: kept by the NEF, or
++// obtained from the CAPIF core function (Obtain_API_Invoker_Info,
++// 3GPP TS 29.222 clause 5.6.2.4; TS 23.222 clause 8.16.3 step 2a).
++func (p *Processor) capifInvoker(ctx context.Context, id string) (nef_context.CapifInvoker, error) {
++	capif := p.Context().Capif
++	if inv, ok := capif.Invoker(id); ok {
++		return inv, nil
++	}
++	cfg := p.Config().Capif()
++	sec, err := p.Consumer().ObtainApiInvokerInfo(ctx, cfg.CcfUri, id)
++	if err != nil {
++		var apiErr openapi.GenericOpenAPIError
++		if errors.As(err, &apiErr) && apiErr.ErrorStatus == http.StatusNotFound {
++			capif.ForgetInvoker(id)
++			return nef_context.CapifInvoker{}, errCapifUnknownInvoker
++		}
++		return nef_context.CapifInvoker{}, err
++	}
++	inv := nef_context.CapifInvoker{Id: id, AkmaAfIds: make(map[string]struct{})}
++	for _, item := range sec.SecurityInfo {
++		// The item of this AEF, with the access token as security method
++		// (3GPP TS 33.122 clause 6.5.2.3).
++		if item.AefId != cfg.AefId || item.SelSecurityMethod != models.CapifSecurityMethod_OAUTH {
++			continue
++		}
++		inv.AuthenticationInfo = item.AuthenticationInfo
++		if item.AuthorizationInfo == "" {
++			continue
++		}
++		var authz struct {
++			AkmaAfIds []string `json:"akmaAfIds"`
++		}
++		if err := json.Unmarshal([]byte(item.AuthorizationInfo), &authz); err != nil {
++			return nef_context.CapifInvoker{}, fmt.Errorf("authorizationInfo of API invoker %s: %w", id, err)
++		}
++		for _, s := range authz.AkmaAfIds {
++			af, err := afid.Parse(s)
++			if err != nil {
++				logger.CapifLog.Warnf("AF_ID %q of API invoker %s ignored: %v", s, id, err)
++				continue
++			}
++			inv.AkmaAfIds[af.Transport()] = struct{}{}
++		}
++	}
++	capif.SetInvoker(inv)
++	return inv, nil
++}
++
++// capifInvokerOf returns the API invoker of an accepted access token of the
++// CAPIF core function, if the request carried one.
++func capifInvokerOf(c *gin.Context) (nef_context.CapifInvoker, bool) {
++	v, ok := c.Get(capifInvokerKey)
++	if !ok {
++		return nef_context.CapifInvoker{}, false
++	}
++	inv, ok := v.(nef_context.CapifInvoker)
++	return inv, ok
++}
++
++// CheckAuthentication serves the check-authentication custom operation of
++// AEF_Security_API (3GPP TS 29.222 clauses 6.2.2.2 and 9.1): the API invoker
++// asks the API exposing function to obtain its authentication information
++// from the CAPIF core function (TS 33.122 clause 6.5.2.3 step 5). remote is
++// the source address of the request.
++func (p *Processor) CheckAuthentication(c *gin.Context, req *models.CapifCheckAuthenticationReq, remote netip.Addr) {
++	// Table 9.1.4.2.2-1: both attributes are mandatory.
++	switch {
++	case req.ApiInvokerId == "":
++		WriteAkmaProblem(c, capifBadRequest("MANDATORY_IE_MISSING", "/apiInvokerId", "required"))
++		return
++	case req.SupportedFeatures == "":
++		WriteAkmaProblem(c, capifBadRequest("MANDATORY_IE_MISSING", "/supportedFeatures", "required"))
++		return
++	case !supportedFeaturesPattern.MatchString(req.SupportedFeatures):
++		WriteAkmaProblem(c, capifBadRequest("MANDATORY_IE_INCORRECT", "/supportedFeatures",
++			"not a SupportedFeatures string"))
++		return
++	}
++	// Without TLS on CAPIF-2e, the operation is accepted only from the
++	// source addresses of the AFs of the AKMA policy.
++	if !p.Context().AkmaAfs.KnownSource(remote) {
++		logger.CapifLog.Warnf("check-authentication from %s refused: not an address of an authorized AF", remote)
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Detail: "source address not authorized",
++		})
++		return
++	}
++	inv, err := p.capifInvoker(c.Request.Context(), req.ApiInvokerId)
++	switch {
++	case errors.Is(err, errCapifUnknownInvoker):
++		logger.CapifLog.Warnf("check-authentication of API invoker %s refused: unknown at the CCF", req.ApiInvokerId)
++		WriteAkmaProblem(c, &models.ProblemDetails{
++			Title:  "Forbidden",
++			Status: http.StatusForbidden,
++			Detail: "API invoker unknown at the CAPIF core function",
++		})
++		return
++	case err != nil:
++		logger.CapifLog.Warnf("CAPIF core function not reachable: %v", err)
++		WriteAkmaProblem(c, serviceUnavailable("CAPIF core function not reachable"))
++		return
++	}
++	logger.CapifLog.Infof("check-authentication of API invoker %s: %d AF_IDs from the CCF", inv.Id, len(inv.AkmaAfIds))
++	// The NEF supports none of the features of table 9.1.6-1.
++	c.JSON(http.StatusOK, models.CapifCheckAuthenticationRsp{SupportedFeatures: "0"})
++}
++
++func capifBadRequest(cause, param, reason string) *models.ProblemDetails {
++	return &models.ProblemDetails{
++		Title:         "Bad Request",
++		Status:        http.StatusBadRequest,
++		Cause:         cause,
++		InvalidParams: []models.InvalidParam{{Param: param, Reason: reason}},
++	}
++}
++
++// writeBearerChallenge answers a refused access token with a ProblemDetails
++// and the WWW-Authenticate header (RFC 6750 clause 3; 3GPP TS 29.122
++// table 5.2.6-1).
++func writeBearerChallenge(c *gin.Context, status int, challenge, detail string) {
++	c.Header("WWW-Authenticate", challenge)
++	WriteAkmaProblem(c, &models.ProblemDetails{
++		Title:  http.StatusText(status),
++		Status: int32(status),
++		Detail: detail,
++	})
++}
++
++// akmaServiceAPI is the AKMA API as the NEF publishes it at the CAPIF core
++// function (3GPP TS 29.222 tables 8.2.4.2.2-1 to 8.2.4.2.4-1; TS 29.522
++// clause 5.14.1 and table 5.14.3.1-1).
++func akmaServiceAPI(cfg *factory.Capif) models.CapifServiceApiDescription {
++	methods := []models.CapifSecurityMethod{models.CapifSecurityMethod_OAUTH}
++	return models.CapifServiceApiDescription{
++		ApiName:           factory.ServiceAkma,
++		Description:       "AKMA API of the NEF (3GPP TS 29.522 clause 5.14)",
++		SupportedFeatures: "0",
++		AefProfiles: []models.CapifAefProfile{{
++			AefId: cfg.AefId,
++			Versions: []models.CapifVersion{{
++				ApiVersion: "v1",
++				CustOperations: []models.CapifCustomOperation{{
++					CommType:   models.CapifCommunicationType_REQUEST_RESPONSE,
++					CustOpName: "retrieve",
++					Operations: []models.CapifOperation{models.CapifOperation_POST},
++				}},
++			}},
++			Protocol:        models.CapifProtocol_HTTP_1_1,
++			DataFormat:      models.CapifDataFormat_JSON,
++			SecurityMethods: methods,
++			InterfaceDescriptions: []models.CapifInterfaceDescription{{
++				Ipv4Addr:        cfg.Interface.Ipv4Addr,
++				Port:            int32(cfg.Interface.Port),
++				SecurityMethods: methods,
++			}},
++		}},
++	}
++}
++
++// RunCapifPublication publishes the AKMA API at the CAPIF core function
++// (Publish_Service_API, 3GPP TS 29.222 clause 5.3.2.2), trying again every
++// capifRetryInterval until it succeeds or ctx ends.
++func (p *Processor) RunCapifPublication(ctx context.Context) {
++	cfg := p.Config().Capif()
++	if cfg == nil {
++		return
++	}
++	d := akmaServiceAPI(cfg)
++	for attempt := 1; ; attempt++ {
++		apiId, err := p.Consumer().PublishServiceAPI(ctx, cfg.CcfUri, cfg.ApfId, d)
++		if err == nil {
++			p.Context().Capif.SetApiId(apiId)
++			logger.CapifLog.Infof("%s published at the CCF as %s", factory.ServiceAkma, apiId)
++			return
++		}
++		if attempt == 1 {
++			logger.CapifLog.Warnf("Publication of %s at the CCF failed, trying again every %s: %v",
++				factory.ServiceAkma, capifRetryInterval, err)
++		} else {
++			logger.CapifLog.Debugf("Publication of %s at the CCF failed: %v", factory.ServiceAkma, err)
++		}
++		select {
++		case <-ctx.Done():
++			return
++		case <-time.After(capifRetryInterval):
++		}
++	}
++}
++
++// CapifUnpublish withdraws the AKMA API from the CAPIF core function
++// (Unpublish_Service_API, 3GPP TS 29.222 clause 5.3.2.3).
++func (p *Processor) CapifUnpublish() {
++	capif := p.Context().Capif
++	if capif == nil {
++		return
++	}
++	apiId := capif.TakeApiId()
++	if apiId == "" {
++		return
++	}
++	cfg := p.Config().Capif()
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	if err := p.Consumer().UnpublishServiceAPI(ctx, cfg.CcfUri, cfg.ApfId, apiId); err != nil {
++		logger.CapifLog.Warnf("Unpublication of %s %s at the CCF failed: %v", factory.ServiceAkma, apiId, err)
++		return
++	}
++	logger.CapifLog.Infof("%s %s unpublished at the CCF", factory.ServiceAkma, apiId)
++}
+diff --git a/internal/sbi/processor/capif_test.go b/internal/sbi/processor/capif_test.go
+new file mode 100644
+index 0000000..d09ff7a
+--- /dev/null
++++ b/internal/sbi/processor/capif_test.go
+@@ -0,0 +1,448 @@
++package processor
++
++import (
++	"bytes"
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/rsa"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"net/netip"
++	"strings"
++	"testing"
++	"time"
++
++	nef_context "github.com/free5gc/nef/internal/context"
++	"github.com/free5gc/nef/internal/logger"
++	"github.com/free5gc/nef/pkg/factory"
++	"github.com/free5gc/openapi/models"
++	"github.com/gin-gonic/gin"
++	"github.com/golang-jwt/jwt/v5"
++	"github.com/stretchr/testify/require"
++	"gopkg.in/h2non/gock.v1"
++)
++
++const (
++	capifCcfUri     = "http://127.0.0.1:8020"
++	capifInvokerId  = "5a9c9a3e-4ee4-4a2f-8a6b-0f2c1d7e9b10"
++	capifOtherAfId  = "af2.akma.example.FF00000001"
++	capifCaCertPEM  = "-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n"
++	capifAkmaScope  = "3gpp#nef-aef:3gpp-akma"
++	capifInsuffHdr  = `Bearer error="insufficient_scope", scope="3gpp#nef-aef:3gpp-akma"`
++	capifInvalidHdr = `Bearer error="invalid_token"`
++)
++
++// setCapif configures the NEF with CAPIF and returns the key of the access
++// tokens of the CAPIF core function. The AKMA policy has akmaAfId and
++// capifOtherAfId at akmaAfAddr.
++func setCapif(t *testing.T, allowNrfTokens bool) *ecdsa.PrivateKey {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	require.NoError(t, err)
++	capif, err := nef_context.NewCapifWithKey(&key.PublicKey, time.Minute)
++	require.NoError(t, err)
++	policy, err := nef_context.NewAkmaAfPolicy([]factory.AkmaAuthorizedAf{
++		{AfId: akmaAfId, SourceAddresses: []string{akmaAfAddr}},
++		{AfId: capifOtherAfId, SourceAddresses: []string{akmaAfAddr}},
++	})
++	require.NoError(t, err)
++	nefApp.Config().Configuration.Capif = &factory.Capif{
++		CcfUri:         capifCcfUri,
++		ApfId:          "nef-apf",
++		AefId:          "nef-aef",
++		Interface:      &factory.CapifInterface{Ipv4Addr: "192.0.2.1", Port: 8000},
++		AllowNrfTokens: allowNrfTokens,
++	}
++	nefApp.Context().Capif = capif
++	nefApp.Context().AkmaAfs = policy
++	t.Cleanup(func() {
++		nefApp.Config().Configuration.Capif = nil
++		nefApp.Context().Capif = nil
++	})
++	return key
++}
++
++func capifClaims() models.CapifAccessTokenClaims {
++	return models.CapifAccessTokenClaims{
++		Iss:      capifInvokerId,
++		ClientId: capifInvokerId,
++		Scope:    capifAkmaScope,
++		Exp:      time.Now().Add(10 * time.Minute).Unix(),
++	}
++}
++
++// capifToken signs claims with ES256 and the "kid" of key, as the CAPIF core
++// function does; header changes the JWS header (nil deletes a member).
++func capifToken(t *testing.T, key *ecdsa.PrivateKey, header map[string]any, claims models.CapifAccessTokenClaims) string {
++	t.Helper()
++	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
++	kid, err := nef_context.Thumbprint(&key.PublicKey)
++	require.NoError(t, err)
++	tok.Header["kid"] = kid
++	for name, v := range header {
++		if v == nil {
++			delete(tok.Header, name)
++		} else {
++			tok.Header[name] = v
++		}
++	}
++	s, err := tok.SignedString(key)
++	require.NoError(t, err)
++	return s
++}
++
++// initCCFInvokerInfoStub answers Obtain_API_Invoker_Info for id
++// (3GPP TS 29.222 clause 5.6.2.4).
++func initCCFInvokerInfoStub(id string, status int, afIds ...string) {
++	r := gock.New(capifCcfUri+"/capif-security/v1").
++		Get("/trustedInvokers/"+id).
++		MatchParam("authenticationInfo", "true").
++		MatchParam("authorizationInfo", "true")
++	if status != http.StatusOK {
++		r.Reply(status).SetHeader("Content-Type", "application/problem+json").
++			BodyString(fmt.Sprintf(`{"status":%d}`, status))
++		return
++	}
++	authz, _ := json.Marshal(map[string][]string{"akmaAfIds": afIds})
++	oauth := []models.CapifSecurityMethod{models.CapifSecurityMethod_OAUTH}
++	r.Reply(http.StatusOK).JSON(models.CapifServiceSecurity{
++		SecurityInfo: []models.CapifSecurityInformation{
++			{AefId: "other-aef", PrefSecurityMethods: oauth, SelSecurityMethod: models.CapifSecurityMethod_OAUTH,
++				AuthorizationInfo: `{"akmaAfIds":["af9.akma.example.FF00000001"]}`},
++			{AefId: "nef-aef", PrefSecurityMethods: oauth, SelSecurityMethod: models.CapifSecurityMethod_OAUTH,
++				AuthenticationInfo: capifCaCertPEM, AuthorizationInfo: string(authz)},
++		},
++		NotificationDestination: "https://192.0.2.10/capif/notify",
++		SupportedFeatures:       "0",
++	})
++}
++
++// akmaAuthorize runs the authorization of the AKMA API on a request with
++// the Authorization header auth; nrf tells whether the check of the access
++// tokens of the NRF ran.
++func akmaAuthorize(auth string) (w *httptest.ResponseRecorder, c *gin.Context, nrf bool) {
++	w = httptest.NewRecorder()
++	c, _ = gin.CreateTestContext(w)
++	c.Request = httptest.NewRequest(http.MethodPost, factory.AkmaResUriPrefix+"/retrieve", nil)
++	if auth != "" {
++		c.Request.Header.Set("Authorization", auth)
++	}
++	nefApp.Processor().AkmaAuthorization(c, func(*gin.Context) { nrf = true })
++	c.Writer.WriteHeaderNow()
++	return w, c, nrf
++}
++
++func requireRefused(t *testing.T, name string, w *httptest.ResponseRecorder, c *gin.Context, nrf bool,
++	status int, challenge string,
++) {
++	t.Helper()
++	require.True(t, c.IsAborted(), name)
++	require.False(t, nrf, name)
++	require.Equal(t, status, w.Code, name)
++	require.Equal(t, challenge, w.Header().Get("WWW-Authenticate"), name)
++	require.Empty(t, akmaProblem(t, w).Cause, name)
++}
++
++// TestCapifAccessToken covers the access token of the CAPIF core function on
++// the AKMA API (3GPP TS 29.522 clause 7.2; TS 33.122 clause 6.5.2.3 and
++// Annex C; TS 33.210 clause 6.3.3.1).
++func TestCapifAccessToken(t *testing.T) {
++	key := setCapif(t, true)
++	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
++
++	// A valid token: the NEF asks the CAPIF core function for the API
++	// invoker once, then keeps its data.
++	initCCFInvokerInfoStub(capifInvokerId, http.StatusOK, akmaAfId)
++	for i := 0; i < 2; i++ {
++		w, c, nrf := akmaAuthorize("Bearer " + capifToken(t, key, nil, capifClaims()))
++		require.False(t, c.IsAborted())
++		require.False(t, nrf)
++		require.Equal(t, http.StatusOK, w.Code)
++		inv, ok := capifInvokerOf(c)
++		require.True(t, ok)
++		require.Contains(t, inv.AkmaAfIds, akmaAfId)
++		require.NotContains(t, inv.AkmaAfIds, "af9.akma.example.FF00000001")
++		require.Equal(t, capifCaCertPEM, inv.AuthenticationInfo)
++	}
++	// Within the leeway of 30 s, and without "kid".
++	claims := capifClaims()
++	claims.Exp = time.Now().Add(-20 * time.Second).Unix()
++	_, c, _ := akmaAuthorize("Bearer " + capifToken(t, key, map[string]any{"kid": nil}, claims))
++	require.False(t, c.IsAborted())
++
++	// Tokens that are not of the CAPIF core function go to the NRF check.
++	hs256, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, capifClaims()).SignedString([]byte("secret"))
++	none, _ := jwt.NewWithClaims(jwt.SigningMethodNone, capifClaims()).SignedString(jwt.UnsafeAllowNoneSignatureType)
++	rs512, _ := jwt.NewWithClaims(jwt.SigningMethodRS512, capifClaims()).SignedString(rsaKey)
++	for name, auth := range map[string]string{
++		"no token":         "",
++		"another key":      "Bearer " + capifToken(t, other, nil, capifClaims()),
++		"kid of the CCF":   "Bearer " + capifToken(t, other, map[string]any{"kid": nefApp.Context().Capif.TokenKid}, capifClaims()),
++		"HS256":            "Bearer " + hs256,
++		"none":             "Bearer " + none,
++		"RS512":            "Bearer " + rs512,
++		"crit":             "Bearer " + capifToken(t, key, map[string]any{"crit": []string{"b64"}, "b64": true}, capifClaims()),
++		"not a JWT":        "Bearer abc",
++		"another scheme":   "Basic " + capifToken(t, key, nil, capifClaims()),
++		"tampered payload": "Bearer " + tamper(capifToken(t, key, nil, capifClaims())),
++	} {
++		_, c, nrf := akmaAuthorize(auth)
++		require.True(t, nrf, name)
++		require.False(t, c.IsAborted(), name)
++	}
++
++	// Tokens of the CAPIF core function that are refused.
++	expired := capifClaims()
++	expired.Exp = time.Now().Add(-31 * time.Second).Unix()
++	noExp := capifClaims()
++	noExp.Exp = 0
++	otherIss := capifClaims()
++	otherIss.Iss = "ccf"
++	noClient := capifClaims()
++	noClient.Iss, noClient.ClientId = "", ""
++	for name, claims := range map[string]models.CapifAccessTokenClaims{
++		"expired": expired, "no exp": noExp, "iss is not client_id": otherIss, "no client_id": noClient,
++	} {
++		w, c, nrf := akmaAuthorize("Bearer " + capifToken(t, key, nil, claims))
++		requireRefused(t, name, w, c, nrf, http.StatusUnauthorized, capifInvalidHdr)
++	}
++	for _, scope := range []string{
++		"3gpp#other-aef:3gpp-akma", "3gpp#nef-aef:3gpp-traffic-influence", "nef-aef:3gpp-akma", "", "3gpp#nef-aef",
++	} {
++		claims := capifClaims()
++		claims.Scope = scope
++		w, c, nrf := akmaAuthorize("Bearer " + capifToken(t, key, nil, claims))
++		requireRefused(t, "scope "+scope, w, c, nrf, http.StatusForbidden, capifInsuffHdr)
++	}
++	claims = capifClaims()
++	claims.Scope = "3gpp#other-aef:x;nef-aef:3gpp-other,3gpp-akma"
++	_, c, _ = akmaAuthorize("Bearer " + capifToken(t, key, nil, claims))
++	require.False(t, c.IsAborted(), "the scope grants 3gpp-akma in its second item")
++
++	// The API invoker offboarded, or the CAPIF core function restarted.
++	const gone = "0b4a3c2d-1e0f-4a5b-8c7d-6e5f4a3b2c1d"
++	initCCFInvokerInfoStub(gone, http.StatusNotFound)
++	claims = capifClaims()
++	claims.Iss, claims.ClientId = gone, gone
++	w, c, nrf := akmaAuthorize("Bearer " + capifToken(t, key, nil, claims))
++	requireRefused(t, "unknown API invoker", w, c, nrf, http.StatusUnauthorized, capifInvalidHdr)
++
++	// The CAPIF core function down.
++	const fresh = "7c6b5a49-3827-4615-a4b3-c2d1e0f9a8b7"
++	gock.New(capifCcfUri + "/capif-security/v1").Get("/trustedInvokers/" + fresh).
++		ReplyError(errors.New("connection refused"))
++	claims.Iss, claims.ClientId = fresh, fresh
++	w, c, nrf = akmaAuthorize("Bearer " + capifToken(t, key, nil, claims))
++	require.True(t, c.IsAborted())
++	require.False(t, nrf)
++	require.Equal(t, http.StatusServiceUnavailable, w.Code)
++	akmaProblem(t, w)
++
++	// The data of the API invoker is asked again after its lifetime.
++	nefApp.Context().Capif.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
++	initCCFInvokerInfoStub(capifInvokerId, http.StatusNotFound)
++	w, c, nrf = akmaAuthorize("Bearer " + capifToken(t, key, nil, capifClaims()))
++	requireRefused(t, "data of the API invoker asked again", w, c, nrf, http.StatusUnauthorized, capifInvalidHdr)
++}
++
++// tamper changes the last character of the payload of a JWS.
++func tamper(s string) string {
++	parts := strings.Split(s, ".")
++	p := []byte(parts[1])
++	if p[len(p)-1] == 'A' {
++		p[len(p)-1] = 'B'
++	} else {
++		p[len(p)-1] = 'A'
++	}
++	parts[1] = string(p)
++	return strings.Join(parts, ".")
++}
++
++// TestCapifWithoutNrfTokens covers allowNrfTokens: false.
++func TestCapifWithoutNrfTokens(t *testing.T) {
++	key := setCapif(t, false)
++	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++
++	w, c, nrf := akmaAuthorize("")
++	requireRefused(t, "no token", w, c, nrf, http.StatusUnauthorized, "Bearer")
++	w, c, nrf = akmaAuthorize("Bearer " + capifToken(t, other, nil, capifClaims()))
++	requireRefused(t, "token of another key", w, c, nrf, http.StatusUnauthorized, capifInvalidHdr)
++
++	initCCFInvokerInfoStub(capifInvokerId, http.StatusOK, akmaAfId)
++	_, c, nrf = akmaAuthorize("Bearer " + capifToken(t, key, nil, capifClaims()))
++	require.False(t, c.IsAborted())
++	require.False(t, nrf)
++}
++
++// TestCapifNotConfigured: without CAPIF, the AKMA API keeps the access tokens
++// of the NRF only, as before.
++func TestCapifNotConfigured(t *testing.T) {
++	_, c, nrf := akmaAuthorize("Bearer abc")
++	require.True(t, nrf)
++	require.False(t, c.IsAborted())
++}
++
++// TestCapifRetrieve covers the AF_ID of a K_AF request with an access token
++// of the CAPIF core function: in the profile of the API invoker and in the
++// address policy (3GPP TS 29.522 clause 7.2; TS 33.535 clause 6.3 step 2).
++func TestCapifRetrieve(t *testing.T) {
++	setCapif(t, true)
++	var buf bytes.Buffer
++	out := logger.Log.Out
++	logger.Log.SetOutput(&buf)
++	defer logger.Log.SetOutput(out)
++
++	inv := nef_context.CapifInvoker{Id: capifInvokerId, AkmaAfIds: map[string]struct{}{akmaAfId: {}}}
++	retrieve := func(req models.AkmaAfKeyRequest, remote string) *httptest.ResponseRecorder {
++		w := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(w)
++		c.Request = httptest.NewRequest(http.MethodPost, factory.AkmaResUriPrefix+"/retrieve", nil)
++		c.Set(capifInvokerKey, inv)
++		nefApp.Processor().RetrieveAkmaApplicationKey(c, &req, netip.MustParseAddr(remote))
++		c.Writer.WriteHeaderNow()
++		return w
++	}
++
++	initNRFDiscAANFStub(true)
++	initAANFRetrieveStub(false, http.StatusOK, `{"kaf":"`+akmaKaf+`","expiry":"2026-10-19T20:00:00Z"}`)
++	w := retrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, akmaAfAddr)
++	require.Equal(t, http.StatusOK, w.Code)
++	require.Contains(t, buf.String(), "Access token of API invoker "+capifInvokerId+" accepted for AF_ID "+akmaAfId)
++
++	// In the address policy, outside the profile of the API invoker.
++	w = retrieve(models.AkmaAfKeyRequest{AfId: capifOtherAfId, AKId: akmaAKId}, akmaAfAddr)
++	require.Equal(t, http.StatusForbidden, w.Code)
++	pd := akmaProblem(t, w)
++	require.Empty(t, pd.Cause)
++	require.Equal(t, "AF_ID not authorized for the API invoker", pd.Detail)
++	require.Contains(t, buf.String(), "AF_ID "+capifOtherAfId+" outside the profile of API invoker "+capifInvokerId)
++
++	// In the profile, from an address outside the policy.
++	w = retrieve(models.AkmaAfKeyRequest{AfId: akmaAfId, AKId: akmaAKId}, "192.0.2.99")
++	require.Equal(t, http.StatusForbidden, w.Code)
++	pd = akmaProblem(t, w)
++	require.Empty(t, pd.Cause)
++	require.Equal(t, "AF not authorized by local policy", pd.Detail)
++}
++
++// TestCapifCheckAuthentication covers the check-authentication operation of
++// AEF_Security_API (3GPP TS 29.222 clauses 6.2.2.2 and 9.1).
++func TestCapifCheckAuthentication(t *testing.T) {
++	setCapif(t, true)
++	var buf bytes.Buffer
++	out := logger.Log.Out
++	logger.Log.SetOutput(&buf)
++	defer logger.Log.SetOutput(out)
++
++	check := func(req models.CapifCheckAuthenticationReq, remote string) *httptest.ResponseRecorder {
++		w := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(w)
++		c.Request = httptest.NewRequest(http.MethodPost, factory.AefSecurityResUriPrefix+"/check-authentication", nil)
++		nefApp.Processor().CheckAuthentication(c, &req, netip.MustParseAddr(remote))
++		c.Writer.WriteHeaderNow()
++		return w
++	}
++
++	initCCFInvokerInfoStub(capifInvokerId, http.StatusOK, akmaAfId)
++	w := check(models.CapifCheckAuthenticationReq{ApiInvokerId: capifInvokerId, SupportedFeatures: "0"}, akmaAfAddr)
++	require.Equal(t, http.StatusOK, w.Code)
++	require.JSONEq(t, `{"supportedFeatures":"0"}`, w.Body.String())
++	require.Contains(t, buf.String(), "check-authentication of API invoker "+capifInvokerId+": 1 AF_IDs from the CCF")
++
++	for _, tc := range []struct {
++		req   models.CapifCheckAuthenticationReq
++		cause string
++	}{
++		{models.CapifCheckAuthenticationReq{SupportedFeatures: "0"}, "MANDATORY_IE_MISSING"},
++		{models.CapifCheckAuthenticationReq{ApiInvokerId: capifInvokerId}, "MANDATORY_IE_MISSING"},
++		{models.CapifCheckAuthenticationReq{ApiInvokerId: capifInvokerId, SupportedFeatures: "xyz"},
++			"MANDATORY_IE_INCORRECT"},
++	} {
++		w := check(tc.req, akmaAfAddr)
++		require.Equal(t, http.StatusBadRequest, w.Code)
++		require.Equal(t, tc.cause, akmaProblem(t, w).Cause)
++	}
++
++	w = check(models.CapifCheckAuthenticationReq{ApiInvokerId: capifInvokerId, SupportedFeatures: "0"}, "192.0.2.99")
++	require.Equal(t, http.StatusForbidden, w.Code)
++
++	const gone = "0b4a3c2d-1e0f-4a5b-8c7d-6e5f4a3b2c1d"
++	initCCFInvokerInfoStub(gone, http.StatusNotFound)
++	w = check(models.CapifCheckAuthenticationReq{ApiInvokerId: gone, SupportedFeatures: "0"}, akmaAfAddr)
++	require.Equal(t, http.StatusForbidden, w.Code)
++
++	const fresh = "7c6b5a49-3827-4615-a4b3-c2d1e0f9a8b7"
++	gock.New(capifCcfUri + "/capif-security/v1").Get("/trustedInvokers/" + fresh).
++		ReplyError(errors.New("connection refused"))
++	w = check(models.CapifCheckAuthenticationReq{ApiInvokerId: fresh, SupportedFeatures: "0"}, akmaAfAddr)
++	require.Equal(t, http.StatusServiceUnavailable, w.Code)
++}
++
++// TestCapifPublication covers the publication of the AKMA API at the CAPIF
++// core function, again after a failure, and its withdrawal (3GPP TS 29.222
++// clauses 5.3.2.2 and 5.3.2.3).
++func TestCapifPublication(t *testing.T) {
++	setCapif(t, true)
++	interval := capifRetryInterval
++	capifRetryInterval = 10 * time.Millisecond
++	defer func() { capifRetryInterval = interval }()
++	var buf bytes.Buffer
++	out := logger.Log.Out
++	logger.Log.SetOutput(&buf)
++	defer logger.Log.SetOutput(out)
++
++	published := akmaServiceAPI(nefApp.Config().Capif())
++	require.Equal(t, int32(8000), published.AefProfiles[0].InterfaceDescriptions[0].Port)
++	publish := func() *gock.Request {
++		return gock.New(capifCcfUri + "/published-apis/v1").
++			Post("/nef-apf/service-apis").
++			MatchType("json").
++			JSON(published)
++	}
++	publish().Times(2).Reply(http.StatusServiceUnavailable)
++	stored := published
++	stored.ApiId = "api-1"
++	publish().Reply(http.StatusCreated).
++		SetHeader("Location", capifCcfUri+"/published-apis/v1/nef-apf/service-apis/api-1").
++		JSON(stored)
++
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	nefApp.Processor().RunCapifPublication(ctx)
++	require.NoError(t, ctx.Err())
++	logs := buf.String()
++	require.Equal(t, 1, strings.Count(logs, "Publication of 3gpp-akma at the CCF failed"))
++	require.Contains(t, logs, "3gpp-akma published at the CCF as api-1")
++
++	gock.New(capifCcfUri + "/published-apis/v1").
++		Delete("/nef-apf/service-apis/api-1").
++		Reply(http.StatusNoContent)
++	nefApp.Processor().CapifUnpublish()
++	require.Contains(t, buf.String(), "3gpp-akma api-1 unpublished at the CCF")
++	// Nothing published any more.
++	nefApp.Processor().CapifUnpublish()
++	require.Equal(t, 1, strings.Count(buf.String(), "unpublished"))
++
++	// The publication stops with the NEF.
++	ctx, cancel = context.WithCancel(context.Background())
++	go func() {
++		time.Sleep(50 * time.Millisecond)
++		cancel()
++	}()
++	done := make(chan struct{})
++	go func() {
++		nefApp.Processor().RunCapifPublication(ctx)
++		close(done)
++	}()
++	select {
++	case <-done:
++	case <-time.After(5 * time.Second):
++		t.Fatal("the publication did not stop")
++	}
++}
+diff --git a/internal/sbi/server.go b/internal/sbi/server.go
+index 9e614c2..64139fd 100644
+--- a/internal/sbi/server.go
++++ b/internal/sbi/server.go
+@@ -96,16 +96,27 @@ func NewServer(nef nef, tlsKeyLogPath string) (*Server, error) {
+ 			applyRoutes(tiGroup, s.getTrafficInfluenceRoutes())
+ 
+ 		case factory.ServiceAkma:
+-			// 3gpp-akma is an AF-facing API (3GPP TS 29.522 clause 5.14).
++			// 3gpp-akma is an AF-facing API (3GPP TS 29.522 clause 5.14). With
++			// CAPIF, the access tokens of the CAPIF core function are checked
++			// first (clause 7.2).
+ 			authCheck := nef_util.NewRouterAuthorizationCheck(models.ServiceName_3GPP_AKMA)
+ 			akmaGroup := s.router.Group(factory.AkmaResUriPrefix)
+ 			akmaGroup.Use(func(c *gin.Context) {
+-				authCheck.Check(c, s.Context())
++				s.Processor().AkmaAuthorization(c, func(c *gin.Context) {
++					authCheck.Check(c, s.Context())
++				})
+ 			})
+ 			applyRoutes(akmaGroup, s.getAkmaRoutes())
+ 		}
+ 	}
+ 
++	// The NEF as API exposing function of CAPIF (3GPP TS 29.522 clause 7.1):
++	// AEF_Security_API, which is not a service of the NRF.
++	if s.Context().Capif != nil {
++		aefSecurityGroup := s.router.Group(factory.AefSecurityResUriPrefix)
++		applyRoutes(aefSecurityGroup, s.getAefSecurityRoutes())
++	}
++
+ 	s.router.Use(cors.New(cors.Config{
+ 		AllowMethods: []string{"GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"},
+ 		AllowHeaders: []string{
+diff --git a/internal/sbi/server_capif_test.go b/internal/sbi/server_capif_test.go
+new file mode 100644
+index 0000000..78f1fbd
+--- /dev/null
++++ b/internal/sbi/server_capif_test.go
+@@ -0,0 +1,121 @@
++package sbi
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
++	"encoding/pem"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	nef_context "github.com/free5gc/nef/internal/context"
++	"github.com/free5gc/nef/internal/sbi/consumer"
++	"github.com/free5gc/nef/internal/sbi/notifier"
++	"github.com/free5gc/nef/internal/sbi/processor"
++	"github.com/free5gc/nef/pkg/app"
++	"github.com/free5gc/nef/pkg/factory"
++	"github.com/stretchr/testify/require"
++)
++
++type serverTestApp struct {
++	app.App
++
++	cfg      *factory.Config
++	nefCtx   *nef_context.NefContext
++	consumer *consumer.Consumer
++	notifier *notifier.Notifier
++	proc     *processor.Processor
++}
++
++func (a *serverTestApp) Config() *factory.Config          { return a.cfg }
++func (a *serverTestApp) Context() *nef_context.NefContext { return a.nefCtx }
++func (a *serverTestApp) Consumer() *consumer.Consumer     { return a.consumer }
++func (a *serverTestApp) Notifier() *notifier.Notifier     { return a.notifier }
++func (a *serverTestApp) Processor() *processor.Processor  { return a.proc }
++
++// newCapifServer builds the SBI server of a NEF that serves 3gpp-akma, with
++// CAPIF when capif is not nil.
++func newCapifServer(t *testing.T, capif *factory.Capif) *Server {
++	t.Helper()
++	cfg := &factory.Config{
++		Info: &factory.Info{Version: "1.0.1"},
++		Configuration: &factory.Configuration{
++			Sbi:         &factory.Sbi{Scheme: "http", RegisterIPv4: "127.0.0.5", BindingIPv4: "127.0.0.5", Port: 8000},
++			NrfUri:      "http://127.0.0.10:8000",
++			ServiceList: []factory.Service{{ServiceName: factory.ServiceAkma}},
++			Akma: &factory.Akma{AuthorizedAfs: []factory.AkmaAuthorizedAf{
++				{AfId: "af1.akma.example.FF00000001", SourceAddresses: []string{"192.0.2.10"}},
++			}},
++			Capif: capif,
++		},
++		Logger: &factory.Logger{Level: "info"},
++	}
++	a := &serverTestApp{cfg: cfg}
++	var err error
++	a.nefCtx, err = nef_context.NewContext(a)
++	require.NoError(t, err)
++	a.consumer, err = consumer.NewConsumer(a)
++	require.NoError(t, err)
++	a.notifier, err = notifier.NewNotifier()
++	require.NoError(t, err)
++	a.proc, err = processor.NewProcessor(a)
++	require.NoError(t, err)
++	s, err := NewServer(a, "")
++	require.NoError(t, err)
++	return s
++}
++
++func post(s *Server, path, auth, body string) *httptest.ResponseRecorder {
++	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
++	req.RemoteAddr = "192.0.2.99:40000"
++	req.Header.Set("Content-Type", "application/json")
++	if auth != "" {
++		req.Header.Set("Authorization", auth)
++	}
++	w := httptest.NewRecorder()
++	s.router.ServeHTTP(w, req)
++	return w
++}
++
++// TestCapifRoutes checks that the AKMA API goes through the check of the
++// access tokens of the CAPIF core function, and that AEF_Security_API is
++// served only with CAPIF (3GPP TS 29.522 clauses 7.1 and 7.2).
++func TestCapifRoutes(t *testing.T) {
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	require.NoError(t, err)
++	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
++	require.NoError(t, err)
++	keyFile := filepath.Join(t.TempDir(), "ccf-token.pub.pem")
++	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600))
++
++	s := newCapifServer(t, &factory.Capif{
++		CcfUri:         "http://127.0.0.1:8020",
++		ApfId:          "nef-apf",
++		AefId:          "nef-aef",
++		TokenPublicKey: keyFile,
++		Interface:      &factory.CapifInterface{Ipv4Addr: "192.0.2.1", Port: 8000},
++		AllowNrfTokens: false,
++	})
++	w := post(s, factory.AkmaResUriPrefix+"/retrieve", "", `{}`)
++	require.Equal(t, http.StatusUnauthorized, w.Code)
++	require.Equal(t, "Bearer", w.Header().Get("WWW-Authenticate"))
++	// 192.0.2.99 is not an address of the AKMA policy.
++	w = post(s, factory.AefSecurityResUriPrefix+"/check-authentication", "",
++		`{"apiInvokerId":"x","supportedFeatures":"0"}`)
++	require.Equal(t, http.StatusForbidden, w.Code)
++	w = post(s, factory.AefSecurityResUriPrefix+"/check-authentication", "", `{`)
++	require.Equal(t, http.StatusBadRequest, w.Code)
++
++	// Without CAPIF.
++	s = newCapifServer(t, nil)
++	w = post(s, factory.AefSecurityResUriPrefix+"/check-authentication", "",
++		`{"apiInvokerId":"x","supportedFeatures":"0"}`)
++	require.Equal(t, http.StatusNotFound, w.Code)
++	w = post(s, factory.AkmaResUriPrefix+"/retrieve", "", `{}`)
++	require.NotEqual(t, http.StatusUnauthorized, w.Code, "OAuth2 of the NRF is off: the request goes on")
++}
+diff --git a/pkg/factory/capif_test.go b/pkg/factory/capif_test.go
+new file mode 100644
+index 0000000..f69c494
+--- /dev/null
++++ b/pkg/factory/capif_test.go
+@@ -0,0 +1,62 @@
++package factory
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func capifConfig(services ...string) *Config {
++	cfg := &Config{
++		Info: &Info{Version: "1.0.1"},
++		Configuration: &Configuration{
++			Sbi:    &Sbi{Scheme: "http", RegisterIPv4: "127.0.0.5", BindingIPv4: "127.0.0.5", Port: 8000},
++			NrfUri: "http://127.0.0.10:8000",
++			Capif: &Capif{
++				CcfUri:         "http://127.0.0.1:8020",
++				ApfId:          "nef-apf",
++				AefId:          "nef-aef",
++				TokenPublicKey: "cert/ccf-token.pub.pem",
++				Interface:      &CapifInterface{Ipv4Addr: "192.168.16.130", Port: 8000},
++			},
++		},
++		Logger: &Logger{Level: "info"},
++	}
++	for _, s := range services {
++		cfg.Configuration.ServiceList = append(cfg.Configuration.ServiceList, Service{ServiceName: s})
++	}
++	return cfg
++}
++
++// TestCapifConfig covers the validation of the capif section.
++func TestCapifConfig(t *testing.T) {
++	ok, err := capifConfig(ServiceAkma).Validate()
++	require.NoError(t, err)
++	require.True(t, ok)
++	d, err := capifConfig(ServiceAkma).Configuration.Capif.GetInvokerInfoLifetime()
++	require.NoError(t, err)
++	require.Equal(t, NefCapifDefaultInvokerInfoLifetime, d)
++
++	for name, change := range map[string]func(*Capif){
++		"ccfUri without host":      func(c *Capif) { c.CcfUri = "http://" },
++		"ccfUri with a path":       func(c *Capif) { c.CcfUri = "http://127.0.0.1:8020/x" },
++		"ccfUri of another scheme": func(c *Capif) { c.CcfUri = "ftp://127.0.0.1:8020" },
++		"apfId with ':'":           func(c *Capif) { c.ApfId = "nef:apf" },
++		"aefId with a space":       func(c *Capif) { c.AefId = "nef aef" },
++		"no aefId":                 func(c *Capif) { c.AefId = "" },
++		"interface 0.0.0.0":        func(c *Capif) { c.Interface.Ipv4Addr = "0.0.0.0" },
++		"interface without port":   func(c *Capif) { c.Interface.Port = 0 },
++		"no interface":             func(c *Capif) { c.Interface = nil },
++		"no tokenPublicKey":        func(c *Capif) { c.TokenPublicKey = "" },
++		"lifetime 500ms":           func(c *Capif) { c.InvokerInfoLifetime = "500ms" },
++	} {
++		cfg := capifConfig(ServiceAkma)
++		change(cfg.Configuration.Capif)
++		_, err := cfg.Validate()
++		require.Error(t, err, name)
++	}
++
++	// The NEF publishes the AKMA API: it has to be served.
++	_, err = capifConfig(ServiceNefOam).Validate()
++	require.Error(t, err)
++}
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index f47e8a6..22e43e8 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -7,10 +7,12 @@ package factory
+ import (
+ 	"errors"
+ 	"fmt"
++	"net/url"
+ 	"os"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/asaskevich/govalidator"
+ 	"github.com/davecgh/go-spew/spew"
+@@ -51,6 +53,12 @@ const (
+ 	NefOamResUriPrefix           = "/" + ServiceNefOam + "/v1"
+ 	NefCallbackResUriPrefix      = "/" + ServiceNefCallback + "/v1"
+ 	AkmaResUriPrefix             = "/" + ServiceAkma + "/v1"
++	// AefSecurityResUriPrefix is the AEF_Security_API of the NEF as API
++	// exposing function (3GPP TS 29.222 clause 9.1).
++	AefSecurityResUriPrefix = "/aef-security/v1"
++	// NefCapifDefaultInvokerInfoLifetime is how long the NEF keeps the data
++	// of an API invoker obtained from the CAPIF core function.
++	NefCapifDefaultInvokerInfoLifetime = 10 * time.Minute
+ )
+ 
+ type Config struct {
+@@ -95,6 +103,7 @@ type Configuration struct {
+ 	NrfCertPem   string    `yaml:"nrfCertPem,omitempty" valid:"optional"`
+ 	ServiceList  []Service `yaml:"serviceList,omitempty" valid:"required"`
+ 	Akma         *Akma     `yaml:"akma,omitempty" valid:"optional"`
++	Capif        *Capif    `yaml:"capif,omitempty" valid:"optional"`
+ }
+ 
+ // Akma configures the AKMA API (3GPP TS 29.522 clause 5.14).
+@@ -128,6 +137,75 @@ func (a *Akma) validate() error {
+ 	return nil
+ }
+ 
++// Capif configures the NEF as API publishing function and API exposing
++// function of CAPIF for the AKMA API (3GPP TS 29.522 clause 7; TS 29.222).
++type Capif struct {
++	// CcfUri is the apiRoot of the CAPIF core function on CAPIF-3 and
++	// CAPIF-4.
++	CcfUri string `yaml:"ccfUri" valid:"required"`
++	ApfId  string `yaml:"apfId" valid:"required"`
++	AefId  string `yaml:"aefId" valid:"required"`
++	// TokenPublicKey is the PEM file of the ECDSA P-256 public key with which
++	// the CAPIF core function signs the access tokens (ES256, 3GPP TS 33.210
++	// clause 6.3.3.1).
++	TokenPublicKey string `yaml:"tokenPublicKey" valid:"required"`
++	// Interface is the address at which the AKMA API is published
++	// (InterfaceDescription, 3GPP TS 29.222 table 8.2.4.2.3-1).
++	Interface *CapifInterface `yaml:"interface" valid:"required"`
++	// InvokerInfoLifetime is how long the NEF keeps the data of an API
++	// invoker, a Go duration ("10m").
++	InvokerInfoLifetime string `yaml:"invokerInfoLifetime,omitempty" valid:"optional"`
++	// AllowNrfTokens keeps the AKMA API open to the access tokens of the NRF,
++	// as when CAPIF is not used (3GPP TS 29.522 clause 6).
++	AllowNrfTokens bool `yaml:"allowNrfTokens,omitempty" valid:"optional"`
++}
++
++type CapifInterface struct {
++	Ipv4Addr string `yaml:"ipv4Addr" valid:"required,ipv4"`
++	Port     int    `yaml:"port" valid:"required,port"`
++}
++
++// capifIdentifier matches the identifiers that go in a "scope" of CAPIF,
++// "3gpp#<aefId>:<API name>" (3GPP TS 29.222 table 8.5.4.2.6-1): no delimiter
++// of the scope and no white space.
++func capifIdentifier(s string) bool {
++	return s != "" && !strings.ContainsAny(s, "#:,; \t\r\n")
++}
++
++func (c *Capif) validate() error {
++	u, err := url.Parse(c.CcfUri)
++	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
++		(u.Path != "" && u.Path != "/") {
++		return fmt.Errorf("invalid capif.ccfUri: expected \"http(s)://<host>:<port>\"")
++	}
++	if !capifIdentifier(c.ApfId) {
++		return errors.New("invalid capif.apfId")
++	}
++	if !capifIdentifier(c.AefId) {
++		return errors.New("invalid capif.aefId")
++	}
++	if c.Interface == nil || c.Interface.Ipv4Addr == "0.0.0.0" {
++		return errors.New("invalid capif.interface: an address the AFs can reach is required")
++	}
++	if _, err := c.GetInvokerInfoLifetime(); err != nil {
++		return err
++	}
++	return nil
++}
++
++// GetInvokerInfoLifetime returns how long the NEF keeps the data of an API
++// invoker.
++func (c *Capif) GetInvokerInfoLifetime() (time.Duration, error) {
++	if c.InvokerInfoLifetime == "" {
++		return NefCapifDefaultInvokerInfoLifetime, nil
++	}
++	d, err := time.ParseDuration(c.InvokerInfoLifetime)
++	if err != nil || d < time.Second {
++		return 0, fmt.Errorf("invalid capif.invokerInfoLifetime: a Go duration of at least 1s")
++	}
++	return d, nil
++}
++
+ type Logger struct {
+ 	Enable       bool   `yaml:"enable" valid:"type(bool)"`
+ 	Level        string `yaml:"level" valid:"required,in(trace|debug|info|warn|error|fatal|panic)"`
+@@ -180,6 +258,19 @@ func (c *Configuration) validate() (bool, error) {
+ 			return false, appendInvalid(err)
+ 		}
+ 	}
++	if c.Capif != nil {
++		if err := c.Capif.validate(); err != nil {
++			return false, appendInvalid(err)
++		}
++		// The NEF publishes the AKMA API at the CAPIF core function.
++		akma := false
++		for _, s := range c.ServiceList {
++			akma = akma || s.ServiceName == ServiceAkma
++		}
++		if !akma {
++			return false, appendInvalid(errors.New("capif requires " + ServiceAkma + " in serviceList"))
++		}
++	}
+ 	result, err := govalidator.ValidateStruct(c)
+ 	return result, appendInvalid(err)
+ }
+@@ -565,6 +656,14 @@ func (c *Config) AkmaAuthorizedAfs() []AkmaAuthorizedAf {
+ 	return c.Configuration.Akma.AuthorizedAfs
+ }
+ 
++// Capif returns the CAPIF configuration, or nil when CAPIF is not used.
++func (c *Config) Capif() *Capif {
++	c.RLock()
++	defer c.RUnlock()
++
++	return c.Configuration.Capif
++}
++
+ func (c *Config) GetCertPemPath() string {
+ 	c.RLock()
+ 	defer c.RUnlock()
+diff --git a/pkg/service/init.go b/pkg/service/init.go
+index a6ef82e..5763e8c 100644
+--- a/pkg/service/init.go
++++ b/pkg/service/init.go
+@@ -39,6 +39,9 @@ type NefApp struct {
+ 	proc          *processor.Processor
+ 	sbiServer     *sbi.Server
+ 	metricsServer *metrics.Server
++	// capifDone is closed when the publication at the CAPIF core function
++	// ends.
++	capifDone chan struct{}
+ }
+ 
+ func NewApp(
+@@ -214,6 +217,16 @@ func (a *NefApp) Start() error {
+ 		logger.MainLog.Infoln("register to NRF successfully")
+ 	}
+ 
++	// The NEF as API publishing function publishes the AKMA API at the CAPIF
++	// core function (3GPP TS 29.522 clause 7.1; TS 29.222 clause 5.3).
++	if a.nefCtx.Capif != nil {
++		a.capifDone = make(chan struct{})
++		go func() {
++			defer close(a.capifDone)
++			a.proc.RunCapifPublication(a.ctx)
++		}()
++	}
++
+ 	a.WaitRoutineStopped()
+ 	return nil
+ }
+@@ -247,6 +260,11 @@ func (a *NefApp) terminateProcedure() {
+ 
+ 	a.CallServersStop()
+ 
++	if a.capifDone != nil {
++		<-a.capifDone
++		a.proc.CapifUnpublish()
++	}
++
+ 	// deregister with NRF
+ 	if _, err := a.consumer.DeregisterNFInstance(); err != nil {
+ 		logger.MainLog.Error(err)

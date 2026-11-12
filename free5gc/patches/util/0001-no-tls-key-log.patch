@@ -1,0 +1,71 @@
+diff --git a/httpwrapper/httpwrapper.go b/httpwrapper/httpwrapper.go
+index a841cf3..1a5bb42 100644
+--- a/httpwrapper/httpwrapper.go
++++ b/httpwrapper/httpwrapper.go
+@@ -1,11 +1,8 @@
+ package httpwrapper
+ 
+ import (
+-	"crypto/tls"
+-	"fmt"
+ 	"net/http"
+ 	"net/url"
+-	"os"
+ 	"time"
+ 
+ 	"github.com/pkg/errors"
+@@ -45,9 +42,9 @@ func NewResponse(code int, h http.Header, body interface{}) *Response {
+ 	return ret
+ }
+ 
+-// NewHttp2Server returns a server instance with HTTP/2.0 and HTTP/2.0 cleartext support
+-// If this function cannot open or create the secret log file,
+-// **it still returns server instance** but without the secret log and error indication
++// NewHttp2Server returns a server instance with HTTP/2.0 and HTTP/2.0 cleartext support.
++// preMasterSecretLogPath is ignored: the secrets of the TLS sessions would break
++// the confidentiality of the SBI (TS 33.501 cl. 13.1.0) and go to no file.
+ func NewHttp2Server(bindAddr string, preMasterSecretLogPath string, handler http.Handler) (*http.Server, error) {
+ 	if handler == nil {
+ 		return nil, errors.New("server needs handler to handle request")
+@@ -62,15 +59,5 @@ func NewHttp2Server(bindAddr string, preMasterSecretLogPath string, handler http
+ 		Handler: h2c.NewHandler(handler, h2Server),
+ 	}
+ 
+-	if preMasterSecretLogPath != "" {
+-		preMasterSecretFile, err := os.OpenFile(preMasterSecretLogPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+-		if err != nil {
+-			return nil, fmt.Errorf("create pre-master-secret log [%s] fail: %s", preMasterSecretLogPath, err)
+-		}
+-		server.TLSConfig = &tls.Config{
+-			KeyLogWriter: preMasterSecretFile,
+-		}
+-	}
+-
+ 	return server, nil
+ }
+diff --git a/httpwrapper/httpwrapper_test.go b/httpwrapper/httpwrapper_test.go
+index 3d46f2d..87c6886 100644
+--- a/httpwrapper/httpwrapper_test.go
++++ b/httpwrapper/httpwrapper_test.go
+@@ -3,6 +3,8 @@ package httpwrapper
+ import (
+ 	"context"
+ 	"net/http"
++	"os"
++	"path/filepath"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/assert"
+@@ -31,3 +33,12 @@ func TestNewResponse(t *testing.T) {
+ 	assert.Equal(t, "url=https://free5gc.org", response.Header.Get("Refresh"))
+ 	assert.Equal(t, 1000, response.Body)
+ }
++
++func TestNoSecretLog(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "sslkey.log")
++	server, err := NewHttp2Server("127.0.0.1:0", path, http.NotFoundHandler())
++	assert.NoError(t, err)
++	assert.Nil(t, server.TLSConfig)
++	_, err = os.Stat(path)
++	assert.True(t, os.IsNotExist(err))
++}

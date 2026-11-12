@@ -1,0 +1,151 @@
+diff --git a/nfs_setup.go b/nfs_setup.go
+index d31ef56..df448d2 100644
+--- a/nfs_setup.go
++++ b/nfs_setup.go
+@@ -252,8 +252,8 @@ func NewAusfStruct(ctx context.Context) app.NFstruct {
+ // AanfSbiIPv4 is the address of the AAnF of the test bench.
+ const AanfSbiIPv4 = "127.0.0.40"
+ 
+-// AanfTestAfId is the AF_ID that the AAnF of the test bench authorizes from
+-// 127.0.0.1.
++// AanfTestAfId is the AF_ID that the AAnF of the test bench authorizes. The
++// bench runs over http, without the certificate of the AF: only the AF_ID counts.
+ const AanfTestAfId = "af1.akma.example.FF00000001"
+ 
+ func NewAanfStruct(ctx context.Context) app.NFstruct {
+@@ -289,12 +289,12 @@ func aanfConfig() *aanf_factory.Config {
+ 			},
+ 			ServiceNameList: []string{"naanf-akma"},
+ 			NrfUri:          "http://127.0.0.10:8000",
+-			NrfCertPem:      "../cert/nrf.pem",
++			NrfCertPem:      "../cert/sba/nrf-token.pem",
+ 			PlmnSupportList: []models.PlmnId{{Mcc: "208", Mnc: "93"}},
+ 			Akma: &aanf_factory.Akma{
+ 				KafLifetime: "1h",
+ 				AuthorizedAfs: []aanf_factory.AuthorizedAf{
+-					{AfId: AanfTestAfId, SourceAddresses: []string{"127.0.0.1"}},
++					{AfId: AanfTestAfId, NfInstanceIds: []string{"2170454b-4cfa-406a-a77c-2137042b54b4"}},
+ 				},
+ 			},
+ 		},
+@@ -346,20 +346,17 @@ func nrfConfig(oauth bool) error {
+ 			Description: "NRF initial test configuration",
+ 		},
+ 		Configuration: &nrf_factory.Configuration{
+-			MongoDBName: "free5gc",
+-			MongoDBUrl:  "mongodb://127.0.0.1:27017",
++			NfInstanceId: "cdee1983-45ab-41a6-8f5b-6f832d5206e8", // the one of the certificate of the access tokens
++			MongoDBName:  "free5gc",
++			MongoDBUrl:   "mongodb://127.0.0.1:27017",
+ 			Sbi: &nrf_factory.Sbi{
+ 				Scheme:       "http",
+ 				RegisterIPv4: "127.0.0.10",
+ 				BindingIPv4:  "127.0.0.10",
+ 				Port:         8000,
+ 				Cert: &nrf_factory.Cert{
+-					Pem: "../cert/nrf.pem",
+-					Key: "../cert/nrf.key",
+-				},
+-				RootCert: &nrf_factory.Cert{
+-					Pem: "../cert/root.pem",
+-					Key: "../cert/root.key",
++					Pem: "../cert/sba/nrf-token.pem",
++					Key: "../cert/sba/nrf-token.key",
+ 				},
+ 				OAuth: oauth,
+ 			},
+@@ -456,7 +453,7 @@ func amfConfig(testID TestId) error {
+ 				"internet",
+ 			},
+ 			NrfUri:     "http://127.0.0.10:8000",
+-			NrfCertPem: "../cert/nrf.pem",
++			NrfCertPem: "../cert/sba/nrf-token.pem",
+ 			Security: &amf_factory.Security{
+ 				IntegrityOrder: integrityOrder,
+ 				CipheringOrder: cipheringOrder,
+@@ -673,7 +670,7 @@ func smfConfig(testID TestId) error {
+ 				MaxRetryTimes: 2,
+ 			},
+ 			NrfUri:       "http://127.0.0.10:8000",
+-			NrfCertPem:   "../cert/nrf.pem",
++			NrfCertPem:   "../cert/sba/nrf-token.pem",
+ 			UrrPeriod:    30,
+ 			UrrThreshold: 10000,
+ 			PLMNList: []smf_factory.PlmnID{
+@@ -825,7 +822,7 @@ func udrConfig() error {
+ 				Url:  "mongodb://localhost:27017",
+ 			},
+ 			NrfUri:     "http://127.0.0.10:8000",
+-			NrfCertPem: "../cert/nrf.pem",
++			NrfCertPem: "../cert/sba/nrf-token.pem",
+ 		},
+ 		Logger: &udr_factory.Logger{
+ 			Enable:       true,
+@@ -862,7 +859,7 @@ func pcfConfig() error {
+ 			TimeFormat:      "2019-01-02 15:04:05",
+ 			DefaultBdtRefId: "BdtPolicyId-",
+ 			NrfUri:          "http://127.0.0.10:8000",
+-			NrfCertPem:      "../cert/nrf.pem",
++			NrfCertPem:      "../cert/sba/nrf-token.pem",
+ 			ServiceList: []pcf_factory.Service{{
+ 				ServiceName: "npcf-am-policy-control",
+ 			}, {
+@@ -925,7 +922,7 @@ func udmConfig() error {
+ 				},
+ 			},
+ 			NrfUri:     "http://127.0.0.10:8000",
+-			NrfCertPem: "../cert/nrf.pem",
++			NrfCertPem: "../cert/sba/nrf-token.pem",
+ 			SuciProfiles: []suci.SuciProfile{
+ 				{
+ 					ProtectionScheme: "1", // Protect Scheme: Profile A
+@@ -978,7 +975,7 @@ func nssfConfig() error {
+ 				"nnssf-nssaiavailability",
+ 			},
+ 			NrfUri:     "http://127.0.0.10:8000",
+-			NrfCertPem: "../cert/nrf.pem",
++			NrfCertPem: "../cert/sba/nrf-token.pem",
+ 			SupportedPlmnList: []models.PlmnId{{
+ 				Mcc: "208",
+ 				Mnc: "93",
+@@ -1467,7 +1464,7 @@ func ausfConfig() error {
+ 				"nausf-auth",
+ 			},
+ 			NrfUri:     "http://127.0.0.10:8000",
+-			NrfCertPem: "../cert/nrf.pem",
++			NrfCertPem: "../cert/sba/nrf-token.pem",
+ 			PlmnSupportList: []models.PlmnId{{
+ 				Mcc: "208",
+ 				Mnc: "93",
+@@ -1546,7 +1543,7 @@ func chfConfig() error {
+ 				},
+ 			},
+ 			NrfUri:     "http://127.0.0.10:8000",
+-			NrfCertPem: "../cert/nrf.pem",
++			NrfCertPem: "../cert/sba/nrf-token.pem",
+ 			ServiceNameList: []string{
+ 				"nchf-convergedcharging",
+ 			},
+@@ -1605,10 +1602,10 @@ type nefAppWrapper struct {
+ 	inner *nef_service.NefApp
+ }
+ 
+-func (w *nefAppWrapper) SetLogEnable(enable bool)        { w.inner.SetLogEnable(enable) }
+-func (w *nefAppWrapper) SetLogLevel(level string)        { w.inner.SetLogLevel(level) }
++func (w *nefAppWrapper) SetLogEnable(enable bool)          { w.inner.SetLogEnable(enable) }
++func (w *nefAppWrapper) SetLogLevel(level string)          { w.inner.SetLogLevel(level) }
+ func (w *nefAppWrapper) SetReportCaller(reportCaller bool) { w.inner.SetReportCaller(reportCaller) }
+-func (w *nefAppWrapper) Terminate()                      { w.inner.Terminate() }
++func (w *nefAppWrapper) Terminate()                        { w.inner.Terminate() }
+ func (w *nefAppWrapper) Start() {
+ 	if err := w.inner.Start(); err != nil {
+ 		fmt.Printf("NEF Start() returned error: %v\n", err)
+@@ -1650,7 +1647,7 @@ func nefConfig() (*nef_factory.Config, error) {
+ 				Port:         8000,
+ 			},
+ 			NrfUri:     "http://127.0.0.10:8000",
+-			NrfCertPem: "../cert/nrf.pem",
++			NrfCertPem: "../cert/sba/nrf-token.pem",
+ 			ServiceList: []nef_factory.Service{
+ 				{ServiceName: nef_factory.ServiceNefCallback},
+ 				{ServiceName: nef_factory.ServiceTraffInflu},

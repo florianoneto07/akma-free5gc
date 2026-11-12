@@ -135,6 +135,14 @@ func TestRegisterNFInstanceProfile(t *testing.T) {
 	if len(s.IpEndPoints) != 1 || s.IpEndPoints[0].Ipv4Address != "192.168.16.130" || s.IpEndPoints[0].Port != 8000 {
 		t.Errorf("ipEndPoints = %+v", s.IpEndPoints)
 	}
+	if got := s.AllowedOperationsPerNfType["AUSF"]; len(got) != 2 || got[1] != "naanf-akma:anchorkey" {
+		t.Errorf("allowedOperationsPerNfType of the AUSF = %v", got)
+	}
+	for _, nfType := range []string{"NEF", "AF"} {
+		if got := s.AllowedOperationsPerNfType[nfType]; len(got) != 3 || got[2] != "naanf-akma:applicationkeyget:supi-access" {
+			t.Errorf("allowedOperationsPerNfType of the %s = %v", nfType, got)
+		}
+	}
 	allowed := map[models.NrfNfManagementNfType]bool{}
 	for _, nt := range s.AllowedNfTypes {
 		allowed[nt] = true

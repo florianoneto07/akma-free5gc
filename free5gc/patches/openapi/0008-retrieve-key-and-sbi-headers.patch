@@ -1,0 +1,281 @@
+diff --git a/models/model_retrieve_key_req.go b/models/model_retrieve_key_req.go
+new file mode 100644
+index 0000000..f0169e3
+--- /dev/null
++++ b/models/model_retrieve_key_req.go
+@@ -0,0 +1,21 @@
++/*
++ * NRF OAuth2
++ *
++ * NRF OAuth2 Authorization.
++ *
++ * Source file: 3GPP TS 29.510 V20.1.0; 5G System; Network Function Repository Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.510/
++ */
++
++package models
++
++// RetrieveKeyReq contains the information to identify the key used to
++// validate an OAuth 2.0 access token (TS 29.510 table 6.3.5.2.7-1).
++type RetrieveKeyReq struct {
++	// NF instance ID of the issuer of the access token being verified.
++	Issuer string `json:"issuer" yaml:"issuer" bson:"issuer,omitempty"`
++	// Header parameters identifying the key used to validate the signature of
++	// the access token; the keys of the map are the names of the header
++	// parameters (TS 33.210 cl. 6.3.3).
++	HeaderParameters map[string]string `json:"headerParameters" yaml:"headerParameters" bson:"headerParameters,omitempty"`
++}
+diff --git a/models/model_retrieve_key_rsp.go b/models/model_retrieve_key_rsp.go
+new file mode 100644
+index 0000000..cdd8822
+--- /dev/null
++++ b/models/model_retrieve_key_rsp.go
+@@ -0,0 +1,23 @@
++/*
++ * NRF OAuth2
++ *
++ * NRF OAuth2 Authorization.
++ *
++ * Source file: 3GPP TS 29.510 V20.1.0; 5G System; Network Function Repository Services; Stage 3
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.510/
++ */
++
++package models
++
++// RetrieveKeyRsp contains the key used to validate an OAuth 2.0 access token
++// (TS 29.510 table 6.3.5.2.8-1). At least one attribute is present.
++type RetrieveKeyRsp struct {
++	// Base64 encoded raw public key.
++	RawPubKey string `json:"rawPubKey,omitempty" yaml:"rawPubKey" bson:"rawPubKey,omitempty"`
++	// Reference to the binary body part with the X.509 certificate, ASN.1 DER
++	// encoded (cl. 6.3.5.5.2).
++	X509Cert *RefToBinaryData `json:"x509Cert,omitempty" yaml:"x509Cert" bson:"x509Cert,omitempty"`
++	// Reference to the binary body part with the certificate chain, in CMS
++	// with ASN.1 DER encoding (cl. 6.3.5.5.3).
++	CertChain *RefToBinaryData `json:"certChain,omitempty" yaml:"certChain" bson:"certChain,omitempty"`
++}
+diff --git a/oauth/get_token_context.go b/oauth/get_token_context.go
+index eeea46e..f4391a4 100644
+--- a/oauth/get_token_context.go
++++ b/oauth/get_token_context.go
+@@ -35,6 +35,8 @@ func sendAccTokenReq(
+ 
+ 	configuration := AccessToken.NewConfiguration()
+ 	configuration.SetBasePath(nrfUri)
++	// TS 29.500 table 5.2.2.2-1: the User-Agent with the NF type.
++	configuration.SetUserAgent(openapi.NfAgent(nfType, nfId))
+ 
+ 	if val, ok := clientMap.Load(configuration); ok {
+ 		client = val.(*AccessToken.APIClient)
+diff --git a/oauth/signer.go b/oauth/signer.go
+index 1a18605..4701e4b 100644
+--- a/oauth/signer.go
++++ b/oauth/signer.go
+@@ -19,6 +19,7 @@ import (
+ // TS 33.210 cl. 6.3.3: ES256, "kid" and "x5t#S256".
+ type Signer struct {
+ 	key    *ecdsa.PrivateKey
++	cert   *x509.Certificate
+ 	kid    string
+ 	x5t    string
+ 	issuer string
+@@ -51,7 +52,7 @@ func NewSigner(certPath, keyPath string) (*Signer, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return &Signer{key: key, kid: kid, x5t: certThumbprint(cert), issuer: issuer}, nil
++	return &Signer{key: key, cert: cert, kid: kid, x5t: certThumbprint(cert), issuer: issuer}, nil
+ }
+ 
+ // Issuer returns the NF instance ID of the signing certificate: the "iss" of
+@@ -60,6 +61,43 @@ func (s *Signer) Issuer() string {
+ 	return s.issuer
+ }
+ 
++// Certificate returns the certificate that validates the signature of the
++// access tokens, for the Retrieve Key Request (TS 29.510 cl. 5.4.2.3).
++func (s *Signer) Certificate() *x509.Certificate {
++	return s.cert
++}
++
++// Identifies tells whether the header parameters of an access token identify
++// the key of this signer (TS 29.510 table 6.3.5.2.7-1, headerParameters):
++// "kid" and "x5t#S256" (TS 33.210 cl. 6.3.3.1 and 6.3.3.4) identify it when
++// each one present is equal to the one this signer puts in the tokens, and at
++// least one is present; "alg", when present, has to be ES256. Any other
++// header parameter does not identify a key of this signer.
++func (s *Signer) Identifies(params map[string]string) bool {
++	identified := false
++	for name, value := range params {
++		switch name {
++		case "kid":
++			if value != s.kid {
++				return false
++			}
++			identified = true
++		case "x5t#S256":
++			if value != s.x5t {
++				return false
++			}
++			identified = true
++		case "alg":
++			if value != jwt.SigningMethodES256.Alg() {
++				return false
++			}
++		default:
++			return false
++		}
++	}
++	return identified
++}
++
+ // Sign returns claims as a JWS in compact serialization.
+ func (s *Signer) Sign(claims jwt.Claims) (string, error) {
+ 	t := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+diff --git a/oauth/signer_test.go b/oauth/signer_test.go
+new file mode 100644
+index 0000000..26d730d
+--- /dev/null
++++ b/oauth/signer_test.go
+@@ -0,0 +1,42 @@
++package oauth
++
++import "testing"
++
++// The header parameters that identify the key of the access tokens in a
++// Retrieve Key Request (TS 29.510 table 6.3.5.2.7-1; TS 33.210 cl. 6.3.3).
++func TestSignerIdentifies(t *testing.T) {
++	ca := newAuthority(t, "CA")
++	certFile, keyFile, cert := ca.issue(t, leafOptions{id: nrfId, nfType: "NRF", serial: 2, signing: true})
++	s, err := NewSigner(certFile, keyFile)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !s.Certificate().Equal(cert) {
++		t.Fatal("Certificate is not the signing certificate")
++	}
++	otherFile, otherKey, _ := ca.issue(t, leafOptions{id: nrfId, nfType: "NRF", serial: 3, signing: true})
++	other, err := NewSigner(otherFile, otherKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, c := range []struct {
++		name   string
++		params map[string]string
++		want   bool
++	}{
++		{"kid", map[string]string{"kid": s.kid}, true},
++		{"x5t#S256", map[string]string{"x5t#S256": s.x5t}, true},
++		{"kid, x5t#S256 and alg", map[string]string{"kid": s.kid, "x5t#S256": s.x5t, "alg": "ES256"}, true},
++		{"alg only", map[string]string{"alg": "ES256"}, false},
++		{"none", map[string]string{}, false},
++		{"kid of another key", map[string]string{"kid": other.kid}, false},
++		{"x5t#S256 of another certificate", map[string]string{"x5t#S256": other.x5t}, false},
++		{"kid with another x5t#S256", map[string]string{"kid": s.kid, "x5t#S256": other.x5t}, false},
++		{"another alg", map[string]string{"kid": s.kid, "alg": "RS512"}, false},
++		{"another header parameter", map[string]string{"kid": s.kid, "x5u": "https://example.com/k"}, false},
++	} {
++		if got := s.Identifies(c.params); got != c.want {
++			t.Errorf("%s: Identifies = %v, want %v", c.name, got, c.want)
++		}
++	}
++}
+diff --git a/sbi_headers.go b/sbi_headers.go
+new file mode 100644
+index 0000000..c67852c
+--- /dev/null
++++ b/sbi_headers.go
+@@ -0,0 +1,54 @@
++package openapi
++
++import (
++	"strings"
++
++	"github.com/free5gc/openapi/models"
++)
++
++// HTTP headers of TS 29.500 that identify the NF at each end.
++const (
++	// HeaderNfPeerInfo carries the NF instances of the sender and of the
++	// receiver (TS 29.500 cl. 5.2.3.2.21; table 5.2.3.2.1-1: "The HTTP client
++	// and server should include this header in every HTTP request and
++	// response messages").
++	HeaderNfPeerInfo = "3gpp-Sbi-NF-Peer-Info"
++	// HeaderServer identifies the originator of an HTTP error response
++	// (TS 29.500 table 5.2.2.2-1).
++	HeaderServer = "Server"
++)
++
++// NfAgent returns the value of the User-Agent of the requests of an NF and of
++// the Server of its error responses (TS 29.500 table 5.2.2.2-1): the NF type,
++// as in TS 29.510 table 6.1.6.3.3-1 (NOTE 1 of the table), "-" and the NF
++// instance ID, the "<NFType>-<NF Instance ID>" of the Server header.
++func NfAgent(nfType models.NrfNfManagementNfType, nfInstanceId string) string {
++	return string(nfType) + "-" + nfInstanceId
++}
++
++// NfPeerInfo returns the value of 3gpp-Sbi-NF-Peer-Info (TS 29.500
++// cl. 5.2.3.2.21): the source NF instance and, when known, the destination
++// one ("The header shall contain the source peer information, and should
++// contain the destination peer information if available").
++func NfPeerInfo(srcInst, dstInst string) string {
++	if srcInst == "" {
++		return ""
++	}
++	info := []string{"srcinst=" + srcInst}
++	if dstInst != "" {
++		info = append(info, "dstinst="+dstInst)
++	}
++	return strings.Join(info, "; ")
++}
++
++// PeerInfoSource returns the srcinst of a 3gpp-Sbi-NF-Peer-Info value, empty
++// without it.
++func PeerInfoSource(value string) string {
++	for _, info := range strings.Split(value, ";") {
++		name, v, ok := strings.Cut(strings.TrimSpace(info), "=")
++		if ok && name == "srcinst" {
++			return strings.TrimSpace(v)
++		}
++	}
++	return ""
++}
+diff --git a/sbi_headers_test.go b/sbi_headers_test.go
+new file mode 100644
+index 0000000..85a4f2b
+--- /dev/null
++++ b/sbi_headers_test.go
+@@ -0,0 +1,33 @@
++package openapi
++
++import (
++	"testing"
++
++	"github.com/free5gc/openapi/models"
++)
++
++func TestSbiHeaders(t *testing.T) {
++	const ausf, aanf = "3d5c6fd4-6e8f-4fae-a7ea-6b8c3a6a1f10", "b6f417f0-06fa-4c38-b291-33066f5a5fe7"
++	if got := NfAgent(models.NrfNfManagementNfType_AUSF, ausf); got != "AUSF-"+ausf {
++		t.Errorf("NfAgent = %q", got)
++	}
++	if got := NfPeerInfo(ausf, aanf); got != "srcinst="+ausf+"; dstinst="+aanf {
++		t.Errorf("NfPeerInfo = %q", got)
++	}
++	if got := NfPeerInfo(ausf, ""); got != "srcinst="+ausf {
++		t.Errorf("NfPeerInfo without destination = %q", got)
++	}
++	if got := NfPeerInfo("", aanf); got != "" {
++		t.Errorf("NfPeerInfo without source = %q", got)
++	}
++	for value, want := range map[string]string{
++		"srcinst=" + ausf + "; dstinst=" + aanf: ausf,
++		"dstinst=" + aanf + ";srcinst=" + ausf:  ausf,
++		"dstinst=" + aanf:                       "",
++		"":                                      "",
++	} {
++		if got := PeerInfoSource(value); got != want {
++			t.Errorf("PeerInfoSource(%q) = %q, want %q", value, got, want)
++		}
++	}
++}

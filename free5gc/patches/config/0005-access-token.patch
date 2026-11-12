@@ -1,0 +1,106 @@
+diff --git a/amfcfg.yaml b/amfcfg.yaml
+index b0b9830..3f5b53c 100644
+--- a/amfcfg.yaml
++++ b/amfcfg.yaml
+@@ -62,3 +62,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+ 
+diff --git a/ausfcfg.yaml b/ausfcfg.yaml
+index fc97683..c727130 100644
+--- a/ausfcfg.yaml
++++ b/ausfcfg.yaml
+@@ -19,3 +19,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+   plmnSupportList: # the PLMNs (Public Land Mobile Network) list supported by this AUSF
+diff --git a/bsfcfg.yaml b/bsfcfg.yaml
+index b8683c6..f7b3c45 100644
+--- a/bsfcfg.yaml
++++ b/bsfcfg.yaml
+@@ -18,3 +18,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+   mongodb:
+diff --git a/chfcfg.yaml b/chfcfg.yaml
+index 72c699f..e216cbe 100644
+--- a/chfcfg.yaml
++++ b/chfcfg.yaml
+@@ -18,3 +18,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+   serviceNameList: # the SBI services provided by this CHF, refer to TS 32.291
+diff --git a/nefcfg.yaml b/nefcfg.yaml
+index 47e3397..be18aba 100644
+--- a/nefcfg.yaml
++++ b/nefcfg.yaml
+@@ -17,3 +17,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # A valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+   serviceList: # the SBI services provided by this NEF
+diff --git a/nrfcfg.yaml b/nrfcfg.yaml
+index 21e35ba..955ec23 100644
+--- a/nrfcfg.yaml
++++ b/nrfcfg.yaml
+@@ -18,8 +18,5 @@ configuration:
+       ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+-    cert: # the local path of TLS key
+-      pem: cert/nrf.pem # NRF TLS Certificate
+-      key: cert/nrf.key # NRF TLS Private key
+-    rootcert: # the local path of root CA certs
+-      pem: cert/root.pem
+-      key: cert/root.key
++    cert: # the key pair of the access tokens (TS 33.310 table 6.1.3c.3-2)
++      pem: cert/sba/nrf-token.pem # with id-kp-oauthAccessTokenSigning
++      key: cert/sba/nrf-token.key # ECDSA P-256: ES256 (TS 33.210 cl. 6.3.3.1)
+     oauth: true
+diff --git a/nssfcfg.yaml b/nssfcfg.yaml
+index 1144578..733fa86 100644
+--- a/nssfcfg.yaml
++++ b/nssfcfg.yaml
+@@ -21,3 +21,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+   supportedPlmnList: # the PLMNs (Public land mobile network) list supported by this NSSF
+diff --git a/pcfcfg.yaml b/pcfcfg.yaml
+index c490ad2..a4e34c2 100644
+--- a/pcfcfg.yaml
++++ b/pcfcfg.yaml
+@@ -20,3 +20,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000  # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+   bsf:
+diff --git a/smfcfg.yaml b/smfcfg.yaml
+index 5ecf462..25d02b4 100644
+--- a/smfcfg.yaml
++++ b/smfcfg.yaml
+@@ -119,3 +119,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+   urrPeriod: 30 # default usage report period in seconds
+diff --git a/udmcfg.yaml b/udmcfg.yaml
+index 63ff1da..de8da5e 100644
+--- a/udmcfg.yaml
++++ b/udmcfg.yaml
+@@ -23,3 +23,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+ 
+diff --git a/udrcfg.yaml b/udrcfg.yaml
+index 9bc9cf5..579e06e 100644
+--- a/udrcfg.yaml
++++ b/udrcfg.yaml
+@@ -21,3 +21,3 @@ configuration:
+   nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+-  nrfCertPem: cert/nrf.pem # NRF Certificate
++  nrfCertPem: cert/sba/nrf-token.pem # certificate of the access tokens of the NRF
+ 

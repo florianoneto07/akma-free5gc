@@ -1,0 +1,24 @@
+diff --git a/internal/sbi/consumer/aanf_service.go b/internal/sbi/consumer/aanf_service.go
+index 93ca0a7..91b4ea9 100644
+--- a/internal/sbi/consumer/aanf_service.go
++++ b/internal/sbi/consumer/aanf_service.go
+@@ -12,6 +12,7 @@ import (
+ 	Naanf_AKMA "github.com/free5gc/openapi/aanf/AKMA"
+ 	"github.com/free5gc/openapi/models"
+ 	Nnrf_NFDiscovery "github.com/free5gc/openapi/nrf/NFDiscovery"
++	"github.com/free5gc/openapi/oauth"
+ )
+ 
+ type naanfService struct {
+@@ -45,8 +46,9 @@ func (s *naanfService) RegisterAKMAKey(ctx context.Context, rid string, info mod
+ 	if err != nil {
+ 		return err
+ 	}
+-	tokenCtx, _, err := ausf_context.GetSelf().GetTokenCtx(models.ServiceName_NAANF_AKMA,
+-		models.NrfNfManagementNfType_AANF)
++	// The service and the scope of storing keys (TS 29.535 table 5.1.9-1).
++	tokenCtx, _, err := ausf_context.GetSelf().GetTokenCtx(
++		models.ServiceName_NAANF_AKMA+" "+oauth.ScopeNaanfAkmaAnchorKey, models.NrfNfManagementNfType_AANF)
+ 	if err != nil {
+ 		return errors.Wrap(err, "access token for naanf-akma")
+ 	}

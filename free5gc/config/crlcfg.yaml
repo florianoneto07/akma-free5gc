@@ -1,0 +1,13 @@
+info:
+  version: 1.0.0
+  description: CRL service local configuration
+
+configuration:
+  bindingIPv4: 192.168.16.130 # reachable from the AF host; the CRL distribution point of the certificates
+  port: 8030 # not used by free5GC, the AAnF or the CCF
+  directory: cert/crl # sba-ca.crl, by make-sba-certs.sh, and ccf-ca.crl, by the CCF
+
+logger: # log output setting
+  enable: true # true or false
+  level: info # how detailed to output, value: trace, debug, info, warn, error, fatal, panic
+  reportCaller: false # enable the caller report or not, value: true or false

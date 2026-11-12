@@ -3,25 +3,19 @@ package sbi
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
@@ -35,13 +29,20 @@ import (
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/pkg/factory"
 	"github.com/florianoneto07/akma-free5gc/shared/akma/afid"
 	"github.com/free5gc/openapi/models"
+	"github.com/free5gc/openapi/oauth"
 )
 
 const (
 	prefix   = "/naanf-akma/v1"
-	afLocal  = "af1.akma.example.FF00000001" // authorized from 127.0.0.1
-	afRemote = "af2.akma.example.FF00000001" // authorized from 192.0.2.10 only
+	afLocal  = "af1.akma.example.FF00000001" // authorized for afInstance
+	afRemote = "af2.akma.example.FF00000001" // authorized for af2Instance only
 	afNone   = "af3.akma.example.FF00000001" // not in the local policy
+
+	aanfInstance = "b6f417f0-06fa-4c38-b291-33066f5a5fe7"
+	afInstance   = "2170454b-4cfa-406a-a77c-2137042b54b4"
+	af2Instance  = "e4b00d27-d8ed-473f-9f93-af78e87fc0ce"
+	nefInstance  = "8e73ad07-906c-4952-93ac-cd32bbb076ed"
+	ausfInstance = "5a6d7127-edf7-4edc-960c-e4105ff023d8"
 )
 
 // Vector "testbed-ue" of the oracle (shared/akma/testdata/vectors.json).
@@ -108,8 +109,8 @@ func testConfig() *factory.Config {
 			Akma: &factory.Akma{
 				KafLifetime: "1h",
 				AuthorizedAfs: []factory.AuthorizedAf{
-					{AfId: afLocal, SourceAddresses: []string{"127.0.0.1", "::1"}},
-					{AfId: afRemote, SourceAddresses: []string{"192.0.2.10"}},
+					{AfId: afLocal, NfInstanceIds: []string{afInstance}},
+					{AfId: afRemote, NfInstanceIds: []string{af2Instance}},
 				},
 			},
 		},
@@ -124,6 +125,9 @@ type env struct {
 	ts     *httptest.Server
 	client *http.Client
 	v      vector
+	// peer is the TLS client of the requests, that the test server, in h2c,
+	// gives to the handlers; nil is the SBI over http.
+	peer *tls.ConnectionState
 }
 
 func newEnv(t *testing.T) *env {
@@ -146,7 +150,12 @@ func newEnv(t *testing.T) *env {
 	// A route that panics, to observe the 500 answer.
 	s.router.POST(prefix+"/panic-for-test", func(*gin.Context) { panic("test panic") })
 
-	ts := httptest.NewUnstartedServer(h2c.NewHandler(s.router, &http2.Server{}))
+	e := &env{t: t, app: app, server: s, v: loadVector(t), peer: peerOf(t, afInstance, "AF")}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.TLS = e.peer
+		s.router.ServeHTTP(w, r)
+	})
+	ts := httptest.NewUnstartedServer(h2c.NewHandler(handler, &http2.Server{}))
 	ts.Start()
 	t.Cleanup(ts.Close)
 
@@ -157,7 +166,8 @@ func newEnv(t *testing.T) *env {
 			return d.DialContext(ctx, network, addr)
 		},
 	}}
-	return &env{t: t, app: app, server: s, ts: ts, client: client, v: loadVector(t)}
+	e.ts, e.client = ts, client
+	return e
 }
 
 type response struct {
@@ -417,11 +427,26 @@ func TestRetrieveAfNotAuthorized(t *testing.T) {
 			wantProblem(t, e.retrieve(af, e.v.AKID["base64"]), http.StatusForbidden, "")
 		})
 	}
-	// Forwarding headers do not change the source address.
-	b, _ := json.Marshal(map[string]any{"afId": afRemote, "aKId": e.v.AKID["base64"]})
-	r := e.do(http.MethodPost, prefix+"/retrieve-applicationkey", "application/json", bytes.NewReader(b),
-		map[string]string{"X-Forwarded-For": "192.0.2.10", "X-Real-Ip": "192.0.2.10"})
-	wantProblem(t, r, http.StatusForbidden, "")
+	// S15 of tls-sbi.md: the certificate of another AF.
+	t.Run("the AF_ID of another AF", func(t *testing.T) {
+		e.peer = peerOf(t, af2Instance, "AF")
+		wantProblem(t, e.retrieve(afLocal, e.v.AKID["base64"]), http.StatusForbidden, "")
+		wantStatus(t, e.retrieve(afRemote, e.v.AKID["base64"]), http.StatusOK)
+	})
+	t.Run("the NF instance of the AF with another type", func(t *testing.T) {
+		e.peer = peerOf(t, afInstance, "AUSF")
+		wantProblem(t, e.retrieve(afLocal, e.v.AKID["base64"]), http.StatusForbidden, "")
+	})
+	t.Run("a certificate without NF instance", func(t *testing.T) {
+		e.peer = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{}}}
+		wantProblem(t, e.retrieve(afLocal, e.v.AKID["base64"]), http.StatusForbidden, "")
+	})
+	// The SBI over http has no identity: only the list of AF_IDs.
+	t.Run("without TLS", func(t *testing.T) {
+		e.peer = nil
+		wantStatus(t, e.retrieve(afRemote, e.v.AKID["base64"]), http.StatusOK)
+		wantProblem(t, e.retrieve(afNone, e.v.AKID["base64"]), http.StatusForbidden, "")
+	})
 }
 
 func TestRetrieveBadRequests(t *testing.T) {
@@ -573,82 +598,89 @@ func TestInternalError(t *testing.T) {
 
 // --- OAuth2 (TS 29.535 cl. 5.1.9; TS 33.501 cl. 13.4.1.1.2) ---
 
-type tokenIssuer struct {
-	key     *rsa.PrivateKey
-	pemPath string
-}
-
-func newTokenIssuer(t *testing.T) tokenIssuer {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "nrf.pem")
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return tokenIssuer{key, path}
-}
-
-func (ti tokenIssuer) token(t *testing.T, scope string, exp time.Time, aud any) string {
-	t.Helper()
-	claims := models.NrfAccessTokenAccessTokenClaims{
-		Iss: uuid.New().String(), Sub: uuid.New().String(), Aud: aud, Scope: scope, Exp: int32(exp.Unix()),
-	}
-	s, err := jwt.NewWithClaims(jwt.SigningMethodRS512, claims).SignedString(ti.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return "Bearer " + s
-}
+const anchorKeyScopes = "naanf-akma " + oauth.ScopeNaanfAkmaAnchorKey
 
 func TestOAuth2(t *testing.T) {
 	e := newEnv(t)
 	ti := newTokenIssuer(t)
-	e.app.ctx.NrfCertPem = ti.pemPath
-	e.app.ctx.SetOAuth2Required(true)
-	other := newTokenIssuer(t)
+	e.useIssuer(ti)
+	e.peer = peerOf(t, ausfInstance, "AUSF")
+	ti.sub = ausfInstance
+	other := newOtherIssuer(t)
+	other.sub = ausfInstance
 	future := time.Now().Add(time.Hour)
-	nfId := e.app.ctx.NfId
 
 	t.Run("no token", func(t *testing.T) {
 		r := e.register(nil)
 		wantProblem(t, r, http.StatusUnauthorized, "")
-		if r.header.Get("WWW-Authenticate") != "Bearer" {
-			t.Errorf("WWW-Authenticate = %q", r.header.Get("WWW-Authenticate"))
+		got := r.header.Get("WWW-Authenticate")
+		if !strings.HasPrefix(got, `Bearer realm="`) || !strings.HasSuffix(got, `/naanf-akma/v1"`) {
+			t.Errorf("WWW-Authenticate = %q", got)
 		}
 	})
-	rejected := map[string]string{
-		"other signer":          other.token(t, "naanf-akma", future, "AANF"),
-		"other scope":           ti.token(t, "nausf-auth", future, "AANF"),
-		"expired":               ti.token(t, "naanf-akma", time.Now().Add(-time.Minute), "AANF"),
-		"without exp":           ti.token(t, "naanf-akma", time.Unix(0, 0), "AANF"),
-		"audience of another":   ti.token(t, "naanf-akma", future, uuid.New().String()),
-		"audience another type": ti.token(t, "naanf-akma", future, "UDM"),
-		"empty audience":        ti.token(t, "naanf-akma", future, ""),
-		"without audience":      ti.token(t, "naanf-akma", future, nil),
-		"empty audience list":   ti.token(t, "naanf-akma", future, []string{}),
-		"not Bearer":            strings.Replace(ti.token(t, "naanf-akma", future, "AANF"), "Bearer", "Basic", 1),
+	invalid := map[string]string{
+		"other signer": other.token(t, anchorKeyScopes, future, "AANF"),
+		"expired":      ti.token(t, anchorKeyScopes, time.Now().Add(-time.Minute), "AANF"),
+		"not Bearer":   strings.Replace(ti.token(t, anchorKeyScopes, future, "AANF"), "Bearer", "Basic", 1),
 	}
-	for name, tok := range rejected {
+	for name, tok := range invalid {
 		t.Run(name, func(t *testing.T) {
 			r := e.register(map[string]string{"Authorization": tok})
 			wantProblem(t, r, http.StatusUnauthorized, "")
-			if !strings.Contains(r.header.Get("WWW-Authenticate"), "invalid_token") {
-				t.Errorf("WWW-Authenticate = %q", r.header.Get("WWW-Authenticate"))
-			}
+			wantChallenge(t, r, `error="invalid_token"`)
+		})
+	}
+	missing := map[string]string{
+		"without exp":         ti.token(t, anchorKeyScopes, time.Unix(0, 0), "AANF"),
+		"empty audience":      ti.token(t, anchorKeyScopes, future, ""),
+		"without audience":    ti.token(t, anchorKeyScopes, future, nil),
+		"empty audience list": ti.token(t, anchorKeyScopes, future, []string{}),
+	}
+	for name, tok := range missing {
+		t.Run(name, func(t *testing.T) {
+			r := e.register(map[string]string{"Authorization": tok})
+			wantProblem(t, r, http.StatusUnauthorized, "ACCESS_TOKEN_CLAIM_MISSING")
+			wantChallenge(t, r, `error="invalid_token"`)
+		})
+	}
+	// S12 of tls-sbi.md: the token of another producer.
+	mismatch := map[string]string{
+		"audience of another":   ti.token(t, anchorKeyScopes, future, uuid.New().String()),
+		"audience another type": ti.token(t, anchorKeyScopes, future, "UDM"),
+	}
+	for name, tok := range mismatch {
+		t.Run(name, func(t *testing.T) {
+			r := e.register(map[string]string{"Authorization": tok})
+			wantProblem(t, r, http.StatusForbidden, "ACCESS_TOKEN_CLAIM_MISMATCH", "aud")
+			wantChallenge(t, r, `error="invalid_token"`)
+		})
+	}
+	// S11 of tls-sbi.md: the token of another NF instance.
+	t.Run("sub of another certificate", func(t *testing.T) {
+		tok := ti.token(t, anchorKeyScopes, future, "AANF")
+		e.peer = peerOf(t, afInstance, "AF")
+		defer func() { e.peer = peerOf(t, ausfInstance, "AUSF") }()
+		r := e.register(map[string]string{"Authorization": tok})
+		wantProblem(t, r, http.StatusForbidden, "ACCESS_TOKEN_CLAIM_MISMATCH", "sub")
+	})
+	scopes := map[string]struct{ scope, want string }{
+		"other service":     {"nausf-auth", `scope="naanf-akma"`},
+		"only the service":  {"naanf-akma", `scope="naanf-akma:anchorkey"`},
+		"another operation": {"naanf-akma " + oauth.ScopeNaanfAkmaApplicationKey, `scope="naanf-akma:anchorkey"`},
+	}
+	for name, tc := range scopes {
+		t.Run(name, func(t *testing.T) {
+			r := e.register(map[string]string{"Authorization": ti.token(t, tc.scope, future, "AANF")})
+			wantProblem(t, r, http.StatusForbidden, "")
+			wantChallenge(t, r, `error="insufficient_scope"`)
+			wantChallenge(t, r, tc.want)
 		})
 	}
 	accepted := map[string]string{
-		"audience NF instance": ti.token(t, "naanf-akma", future, nfId),
-		"audience NF type":     ti.token(t, "naanf-akma", future, "AANF"),
-		"audience list":        ti.token(t, "naanf-akma", future, []string{uuid.New().String(), nfId}),
-		"several scopes":       ti.token(t, "nausf-auth naanf-akma", future, "AANF"),
+		"audience NF instance": ti.token(t, anchorKeyScopes, future, aanfInstance),
+		"audience NF type":     ti.token(t, anchorKeyScopes, future, "AANF"),
+		"audience list":        ti.token(t, anchorKeyScopes, future, []string{uuid.New().String(), aanfInstance}),
+		"several scopes":       ti.token(t, "nausf-auth "+anchorKeyScopes, future, "AANF"),
 	}
 	for name, tok := range accepted {
 		t.Run(name, func(t *testing.T) {
@@ -658,10 +690,24 @@ func TestOAuth2(t *testing.T) {
 	t.Run("remove requires a token", func(t *testing.T) {
 		wantProblem(t, e.postJSON("/remove-context", map[string]any{"supi": e.v.Supi}, nil), http.StatusUnauthorized, "")
 	})
+	t.Run("remove requires the scope", func(t *testing.T) {
+		header := map[string]string{"Authorization": ti.token(t, "naanf-akma", future, "AANF")}
+		r := e.postJSON("/remove-context", map[string]any{"supi": e.v.Supi}, header)
+		wantProblem(t, r, http.StatusForbidden, "")
+		wantChallenge(t, r, `error="insufficient_scope"`)
+	})
 	// The AF is authorized by local policy, without a token.
 	t.Run("retrieve without token", func(t *testing.T) {
+		e.peer = peerOf(t, afInstance, "AF")
 		wantStatus(t, e.retrieve(afLocal, e.v.AKID["base64"]), http.StatusOK)
 	})
+}
+
+func wantChallenge(t *testing.T, r response, part string) {
+	t.Helper()
+	if got := r.header.Get("WWW-Authenticate"); !strings.HasPrefix(got, "Bearer ") || !strings.Contains(got, part) {
+		t.Errorf("WWW-Authenticate = %q, want %s", got, part)
+	}
 }
 
 // --- K_AF requested through the NEF (TS 33.535 cl. 6.3; nef.md cl. 4) ---
@@ -669,19 +715,20 @@ func TestOAuth2(t *testing.T) {
 func TestRetrieveViaNef(t *testing.T) {
 	e := newEnv(t)
 	wantStatus(t, e.register(nil), http.StatusOK)
-	// The test client connects from the loopback address, which is also the
-	// address of afLocal in the AF policy.
 	nefs, err := aanf_context.NewNefPolicy([]factory.AuthorizedNef{
-		{SourceAddresses: []string{"127.0.0.1", "::1"}, AfIds: []string{afRemote}},
+		{NfInstanceIds: []string{nefInstance}, AfIds: []string{afRemote}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.app.ctx.NefPolicy = nefs
 	ti := newTokenIssuer(t)
-	e.app.ctx.NrfCertPem = ti.pemPath
-	e.app.ctx.SetOAuth2Required(true)
-	token := map[string]string{"Authorization": ti.token(t, "naanf-akma", time.Now().Add(time.Hour), "AANF")}
+	e.useIssuer(ti)
+	ti.sub = nefInstance
+	e.peer = peerOf(t, nefInstance, "NEF")
+	future := time.Now().Add(time.Hour)
+	scopes := "naanf-akma " + oauth.ScopeNaanfAkmaApplicationKey + " " + oauth.ScopeNaanfAkmaSupiAccess
+	token := map[string]string{"Authorization": ti.token(t, scopes, future, "AANF")}
 	retrieve := func(afID string, anon bool, header map[string]string) response {
 		return e.postJSON("/retrieve-applicationkey",
 			map[string]any{"afId": afID, "aKId": e.v.AKID["base64"], "anonInd": anon}, header)
@@ -706,23 +753,51 @@ func TestRetrieveViaNef(t *testing.T) {
 			t.Errorf("SUPI in the anonymous answer: %s", r.body)
 		}
 	})
+	t.Run("token without supi-access: K_AF without the SUPI", func(t *testing.T) {
+		header := map[string]string{
+			"Authorization": ti.token(t, "naanf-akma "+oauth.ScopeNaanfAkmaApplicationKey, future, "AANF"),
+		}
+		r := retrieve(afRemote, false, header)
+		wantStatus(t, r, http.StatusOK)
+		if bytes.Contains(r.body, []byte(`"supi"`)) {
+			t.Errorf("SUPI without the scope: %s", r.body)
+		}
+	})
+	// S14 of tls-sbi.md.
+	t.Run("token of the service only", func(t *testing.T) {
+		header := map[string]string{"Authorization": ti.token(t, "naanf-akma", future, "AANF")}
+		r := retrieve(afRemote, false, header)
+		wantProblem(t, r, http.StatusForbidden, "")
+		wantChallenge(t, r, `error="insufficient_scope", scope="naanf-akma:applicationkeyget"`)
+	})
 	t.Run("NEF with token, AF_ID not accepted from the NEF", func(t *testing.T) {
 		wantProblem(t, retrieve(afLocal, false, token), http.StatusForbidden, "")
 	})
 	t.Run("invalid token", func(t *testing.T) {
-		bad := map[string]string{"Authorization": newTokenIssuer(t).token(t, "naanf-akma", time.Now().Add(time.Hour), "AANF")}
+		other := newOtherIssuer(t)
+		other.sub = nefInstance
+		bad := map[string]string{"Authorization": other.token(t, scopes, future, "AANF")}
 		r := retrieve(afRemote, false, bad)
 		wantProblem(t, r, http.StatusUnauthorized, "")
-		if !strings.Contains(r.header.Get("WWW-Authenticate"), "invalid_token") {
-			t.Errorf("WWW-Authenticate = %q", r.header.Get("WWW-Authenticate"))
-		}
+		wantChallenge(t, r, `error="invalid_token"`)
 	})
-	// Without a token, the request is an AF's, under the AF policy.
-	t.Run("no token, AF policy", func(t *testing.T) {
-		wantStatus(t, retrieve(afLocal, false, nil), http.StatusOK)
+	t.Run("the certificate of the NEF, without a token", func(t *testing.T) {
 		wantProblem(t, retrieve(afRemote, false, nil), http.StatusForbidden, "")
 	})
-	// Without OAuth2, the NEF is recognized by its source address alone.
+	t.Run("another NF of type NEF", func(t *testing.T) {
+		e.peer = peerOf(t, uuid.New().String(), "NEF")
+		defer func() { e.peer = peerOf(t, nefInstance, "NEF") }()
+		ti.sub = sbitlsId(t, e.peer)
+		defer func() { ti.sub = nefInstance }()
+		r := retrieve(afRemote, false, map[string]string{"Authorization": ti.token(t, scopes, future, "AANF")})
+		wantProblem(t, r, http.StatusForbidden, "")
+	})
+	t.Run("the instance of the NEF with another type", func(t *testing.T) {
+		e.peer = peerOf(t, nefInstance, "AF")
+		defer func() { e.peer = peerOf(t, nefInstance, "NEF") }()
+		wantProblem(t, retrieve(afRemote, false, token), http.StatusForbidden, "")
+	})
+	// Without OAuth2, the NEF is recognized by its certificate alone.
 	t.Run("OAuth2 not required", func(t *testing.T) {
 		e.app.ctx.SetOAuth2Required(false)
 		defer e.app.ctx.SetOAuth2Required(true)
@@ -732,14 +807,14 @@ func TestRetrieveViaNef(t *testing.T) {
 }
 
 func TestNefPolicy(t *testing.T) {
+	const other = "e4b00d27-d8ed-473f-9f93-af78e87fc0ce"
 	p, err := aanf_context.NewNefPolicy([]factory.AuthorizedNef{
-		{SourceAddresses: []string{"192.0.2.20"}, AfIds: []string{afRemote}},
-		{SourceAddresses: []string{"192.0.2.20", "192.0.2.21"}, AfIds: []string{"af4.akma.example.ff00000001"}},
+		{NfInstanceIds: []string{nefInstance}, AfIds: []string{afRemote}},
+		{NfInstanceIds: []string{nefInstance, other}, AfIds: []string{"af4.akma.example.ff00000001"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	nef, other := netip.MustParseAddr("192.0.2.20"), netip.MustParseAddr("192.0.2.21")
 	id := func(s string) afid.AfID {
 		v, err := afid.Parse(s)
 		if err != nil {
@@ -747,20 +822,25 @@ func TestNefPolicy(t *testing.T) {
 		}
 		return v
 	}
-	if !p.IsNef(nef) || !p.IsNef(netip.MustParseAddr("::ffff:192.0.2.20")) || p.IsNef(netip.MustParseAddr("192.0.2.22")) {
+	if !p.IsNef(nefInstance) || !p.IsNef(other) || p.IsNef(afInstance) {
 		t.Error("IsNef")
 	}
-	if !p.Authorize(id(afRemote), nef) || !p.Authorize(id("af4.akma.example.FF00000001"), nef) ||
-		p.Authorize(id(afRemote), other) || p.Authorize(id(afLocal), nef) {
+	if !p.Authorize(id(afRemote), nefInstance) || !p.Authorize(id("af4.akma.example.FF00000001"), nefInstance) ||
+		p.Authorize(id(afRemote), other) || p.Authorize(id(afLocal), nefInstance) {
 		t.Error("Authorize")
 	}
 	if got := strings.Join(p.AfIds(), ","); got != "af2.akma.example.FF00000001,af4.akma.example.FF00000001" {
 		t.Errorf("AfIds = %s", got)
 	}
 	if _, err := aanf_context.NewNefPolicy([]factory.AuthorizedNef{
-		{SourceAddresses: []string{"192.0.2.20"}, AfIds: []string{"af1.akma.example"}},
+		{NfInstanceIds: []string{nefInstance}, AfIds: []string{"af1.akma.example"}},
 	}); err == nil {
 		t.Error("AF_ID without Ua* id accepted")
+	}
+	if _, err := aanf_context.NewNefPolicy([]factory.AuthorizedNef{
+		{NfInstanceIds: []string{"192.0.2.20"}, AfIds: []string{afRemote}},
+	}); err == nil {
+		t.Error("NF instance that is not a UUID accepted")
 	}
 }
 

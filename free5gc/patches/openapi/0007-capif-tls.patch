@@ -1,0 +1,305 @@
+diff --git a/client.go b/client.go
+index 633077c..b034938 100644
+--- a/client.go
++++ b/client.go
+@@ -47,13 +47,15 @@ const (
+ )
+ 
+ var (
++	innerHTTP2Transport = &http2.Transport{
++		DialTLSContext:  sbitls.DialTLSContext,
++		ReadIdleTimeout: ReadIdleTimeoutPeriod,
++		PingTimeout:     PingTimeoutPeriod,
++	}
++
+ 	innerHTTP2Client = &http.Client{
+-		Transport: otelhttp.NewTransport(&http2.Transport{
+-			DialTLSContext:  sbitls.DialTLSContext,
+-			ReadIdleTimeout: ReadIdleTimeoutPeriod,
+-			PingTimeout:     PingTimeoutPeriod,
+-		}),
+-		Timeout: TimeoutPeriod,
++		Transport: otelhttp.NewTransport(innerHTTP2Transport),
++		Timeout:   TimeoutPeriod,
+ 	}
+ 
+ 	innerHTTP2CleartextClient = &http.Client{
+@@ -157,6 +159,14 @@ func ParameterToString(obj interface{}, format string) string {
+ 	return fmt.Sprintf("%v", obj)
+ }
+ 
++// CloseIdleConnections closes the idle TLS connections of the client and of the
++// default HTTP transport: a new client certificate of the process only applies
++// to new connections.
++func CloseIdleConnections() {
++	innerHTTP2Transport.CloseIdleConnections()
++	http.DefaultClient.CloseIdleConnections()
++}
++
+ // callAPI do the request.
+ func CallAPI(cfg Configuration, request *http.Request) (*http.Response, error) {
+ 	start := time.Now()
+diff --git a/sbitls/crl.go b/sbitls/crl.go
+index 78ee9e1..c9a8dba 100644
+--- a/sbitls/crl.go
++++ b/sbitls/crl.go
+@@ -2,6 +2,7 @@ package sbitls
+ 
+ import (
+ 	"bytes"
++	"crypto/tls"
+ 	"crypto/x509"
+ 	"errors"
+ 	"fmt"
+@@ -28,8 +29,9 @@ type crlStore struct {
+ }
+ 
+ type crlEntry struct {
+-	mu   sync.Mutex
+-	list *x509.RevocationList
++	mu      sync.Mutex
++	list    *x509.RevocationList
++	fetched time.Time
+ }
+ 
+ func newCrlStore(log Logger) *crlStore {
+@@ -58,13 +60,14 @@ func distributionPoint(cert *x509.Certificate) string {
+ }
+ 
+ // check refuses a certificate without a distribution point, without a valid
+-// CRL, or revoked (TS 33.310 cl. 6.3.1).
+-func (s *crlStore) check(cert, issuer *x509.Certificate) error {
++// CRL, or revoked (TS 33.310 cl. 6.3.1). maxAge, when not zero, is how long the
++// CRL stays in memory before its nextUpdate.
++func (s *crlStore) check(cert, issuer *x509.Certificate, maxAge time.Duration) error {
+ 	uri := distributionPoint(cert)
+ 	if uri == "" {
+ 		return errors.New("certificate without an HTTP CRL distribution point")
+ 	}
+-	list, err := s.get(uri, []*x509.Certificate{issuer})
++	list, err := s.get(uri, []*x509.Certificate{issuer}, maxAge)
+ 	if err != nil {
+ 		return fmt.Errorf("CRL %s not available: %w", uri, err)
+ 	}
+@@ -77,11 +80,11 @@ func (s *crlStore) check(cert, issuer *x509.Certificate) error {
+ }
+ 
+ func (s *crlStore) prefetch(uri string, issuers []*x509.Certificate) error {
+-	_, err := s.get(uri, issuers)
++	_, err := s.get(uri, issuers, 0)
+ 	return err
+ }
+ 
+-func (s *crlStore) get(uri string, issuers []*x509.Certificate) (*x509.RevocationList, error) {
++func (s *crlStore) get(uri string, issuers []*x509.Certificate, maxAge time.Duration) (*x509.RevocationList, error) {
+ 	s.mu.Lock()
+ 	entry := s.entries[uri]
+ 	if entry == nil {
+@@ -93,19 +96,50 @@ func (s *crlStore) get(uri string, issuers []*x509.Certificate) (*x509.Revocatio
+ 	entry.mu.Lock()
+ 	defer entry.mu.Unlock()
+ 	now := time.Now()
+-	if entry.list != nil && now.Before(entry.list.NextUpdate) && issuedByOneOf(entry.list, issuers) == nil {
++	valid := entry.list != nil && now.Before(entry.list.NextUpdate) && issuedByOneOf(entry.list, issuers) == nil
++	if valid && (maxAge == 0 || now.Sub(entry.fetched) < maxAge) {
+ 		return entry.list, nil
+ 	}
+ 	list, err := s.fetch(uri, issuers, now)
+ 	if err != nil {
++		// The CRL in memory is still within its nextUpdate.
++		if valid {
++			s.log.Warnf("CRL %s not fetched again: %v", uri, err)
++			return entry.list, nil
++		}
+ 		return nil, err
+ 	}
+-	entry.list = list
+-	s.log.Infof("CRL %s loaded: %d revoked, next update %s", uri, len(list.RevokedCertificateEntries),
+-		list.NextUpdate.UTC().Format(time.RFC3339))
++	if entry.list == nil || entry.list.Number.Cmp(list.Number) != 0 {
++		s.log.Infof("CRL %s loaded: %d revoked, next update %s", uri, len(list.RevokedCertificateEntries),
++			list.NextUpdate.UTC().Format(time.RFC3339))
++	}
++	entry.list, entry.fetched = list, now
+ 	return list, nil
+ }
+ 
++// CrlChecker checks the CRL of a TLS peer outside the SBI, such as the server
++// of CAPIF-1e, whose CA is not the one of the process.
++type CrlChecker struct {
++	crls *crlStore
++}
++
++// NewCrlChecker returns a checker with its own CRLs in memory.
++func NewCrlChecker(log Logger) *CrlChecker {
++	if log == nil {
++		log = discard{}
++	}
++	return &CrlChecker{crls: newCrlStore(log)}
++}
++
++// VerifyConnection is for tls.Config: it runs after crypto/tls has checked the
++// chain, in every handshake (TS 33.310 cl. 6.3.1).
++func (k *CrlChecker) VerifyConnection(state tls.ConnectionState) error {
++	if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) < 2 {
++		return errors.New("peer certificate without a verified chain")
++	}
++	return k.crls.check(state.VerifiedChains[0][0], state.VerifiedChains[0][1], 0)
++}
++
+ func (s *crlStore) fetch(uri string, issuers []*x509.Certificate, now time.Time) (*x509.RevocationList, error) {
+ 	resp, err := s.client.Get(uri)
+ 	if err != nil {
+diff --git a/sbitls/sbitls.go b/sbitls/sbitls.go
+index 4c24174..b0d6946 100644
+--- a/sbitls/sbitls.go
++++ b/sbitls/sbitls.go
+@@ -58,19 +58,24 @@ type Config struct {
+ 	// ExtraClientCANoCrl says that the certificates of ExtraClientCA have no
+ 	// CRL distribution point.
+ 	ExtraClientCANoCrl bool
+-	Logger             Logger
++	// ExtraClientCrlMaxAge, when not zero, is how long the CRL of
++	// ExtraClientCA stays in memory: that CA revokes at any moment, and the
++	// nextUpdate of the CRL is days ahead.
++	ExtraClientCrlMaxAge time.Duration
++	Logger               Logger
+ }
+ 
+ // Context holds the certificate, the CAs and the CRLs of a network function.
+ type Context struct {
+-	keyPair      tls.Certificate
+-	leaf         *x509.Certificate
+-	roots        *x509.CertPool
+-	clientCAs    *x509.CertPool
+-	extraIssuers []*x509.Certificate
+-	extraNoCrl   bool
+-	crls         *crlStore
+-	log          Logger
++	keyPair        tls.Certificate
++	leaf           *x509.Certificate
++	roots          *x509.CertPool
++	clientCAs      *x509.CertPool
++	extraIssuers   []*x509.Certificate
++	extraNoCrl     bool
++	extraCrlMaxAge time.Duration
++	crls           *crlStore
++	log            Logger
+ }
+ 
+ var current atomic.Pointer[Context]
+@@ -106,7 +111,7 @@ func readCAs(path string) ([]*x509.Certificate, error) {
+ // this NF. A CRL that cannot be fetched now is only reported: the check of a
+ // peer tries again and fails closed.
+ func New(cfg Config) (*Context, error) {
+-	c := &Context{log: cfg.Logger, extraNoCrl: cfg.ExtraClientCANoCrl}
++	c := &Context{log: cfg.Logger, extraNoCrl: cfg.ExtraClientCANoCrl, extraCrlMaxAge: cfg.ExtraClientCrlMaxAge}
+ 	if c.log == nil {
+ 		c.log = discard{}
+ 	}
+@@ -267,14 +272,16 @@ func (c *Context) verifyPeer(state tls.ConnectionState) error {
+ 		return errors.New("peer certificate without a verified chain")
+ 	}
+ 	peer, issuer := state.VerifiedChains[0][0], state.VerifiedChains[0][1]
+-	if c.extraNoCrl {
+-		for _, ca := range c.extraIssuers {
+-			if ca.Equal(issuer) {
++	var maxAge time.Duration
++	for _, ca := range c.extraIssuers {
++		if ca.Equal(issuer) {
++			if c.extraNoCrl {
+ 				return nil
+ 			}
++			maxAge = c.extraCrlMaxAge
+ 		}
+ 	}
+-	return c.crls.check(peer, issuer)
++	return c.crls.check(peer, issuer, maxAge)
+ }
+ 
+ // VerifyTokenSigner checks the certificate that signs the access tokens of the
+@@ -288,7 +295,7 @@ func (c *Context) VerifyTokenSigner(cert *x509.Certificate) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	return c.crls.check(cert, chains[0][1])
++	return c.crls.check(cert, chains[0][1], 0)
+ }
+ 
+ // IsExtraClient reports whether the client of a connection came with a
+diff --git a/sbitls/sbitls_test.go b/sbitls/sbitls_test.go
+index e6ecea9..6cf69e6 100644
+--- a/sbitls/sbitls_test.go
++++ b/sbitls/sbitls_test.go
+@@ -613,6 +613,71 @@ func TestExtraClientCA(t *testing.T) {
+ 	}
+ }
+ 
++// A CRL of the extra CA with a maximum age: the revocation shows up before the
++// nextUpdate, and a failed fetch keeps the CRL in memory.
++func TestExtraClientCrlMaxAge(t *testing.T) {
++	l := newLab(t)
++	invokers := newCA(t, "invokers")
++	invokerCrl := newCrlServer(t, invokers.crl(t, time.Now().Add(-time.Minute), time.Now().Add(time.Hour)))
++	cert := l.ca.issue(t, leafOptions{serial: 1, id: serverId, crl: l.crl.URL + "/ca.crl", dns: testName})
++	nef, err := New(Config{Certificate: cert.certFile, Key: cert.keyFile, CA: l.ca.file,
++		ExtraClientCA: invokers.file, ExtraClientCrlMaxAge: 30 * time.Millisecond})
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := serve(t, nef, nil)
++	invoker := invokers.issue(t, leafOptions{serial: 7, id: clientId, crl: invokerCrl.URL + "/invokers.crl"})
++	pair, err := tls.LoadX509KeyPair(invoker.certFile, invoker.keyFile)
++	if err != nil {
++		t.Fatal(err)
++	}
++	client, err := New(Config{KeyPair: &pair, CA: l.ca.file})
++	if err != nil {
++		t.Fatal(err)
++	}
++	addr := server.Listener.Addr().String()
++	if _, err = call(client, addr, testName); err != nil {
++		t.Fatalf("API invoker refused: %v", err)
++	}
++
++	invokerCrl.body.Store(invokers.crl(t, time.Now().Add(-time.Minute), time.Now().Add(time.Hour), invoker.cert))
++	time.Sleep(50 * time.Millisecond)
++	if _, err = call(client, addr, testName); err == nil {
++		t.Error("revoked API invoker accepted after the maximum age of the CRL")
++	}
++
++	// A CRL that cannot be fetched again: the one in memory, with the
++	// revocation, still counts until its nextUpdate.
++	invokerCrl.Close()
++	time.Sleep(50 * time.Millisecond)
++	if _, err = call(client, addr, testName); err == nil {
++		t.Error("revoked API invoker accepted with the CRL service down")
++	}
++}
++
++func TestCrlChecker(t *testing.T) {
++	l := newLab(t)
++	cert := l.ca.issue(t, leafOptions{serial: 1, id: serverId, crl: l.crl.URL + "/ca.crl", dns: testName})
++	state := func(leaf *x509.Certificate) tls.ConnectionState {
++		return tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{leaf, l.ca.cert}}}
++	}
++	checker := NewCrlChecker(nil)
++	if err := checker.VerifyConnection(state(cert.cert)); err != nil {
++		t.Errorf("valid certificate refused: %v", err)
++	}
++	if err := checker.VerifyConnection(tls.ConnectionState{}); err == nil {
++		t.Error("a connection without a verified chain accepted")
++	}
++	noPoint := l.ca.issue(t, leafOptions{serial: 2, id: serverId, dns: testName})
++	if err := checker.VerifyConnection(state(noPoint.cert)); err == nil {
++		t.Error("a certificate without a distribution point accepted")
++	}
++	l.crl.body.Store(l.ca.crl(t, time.Now().Add(-time.Minute), time.Now().Add(time.Hour), cert.cert))
++	if err := NewCrlChecker(nil).VerifyConnection(state(cert.cert)); err == nil {
++		t.Error("a revoked certificate accepted")
++	}
++}
++
+ func TestNotConfigured(t *testing.T) {
+ 	current.Store(nil)
+ 	if _, err := DialTLSContext(context.Background(), "tcp", "127.0.0.1:1", nil); !errors.Is(err, ErrNotConfigured) {

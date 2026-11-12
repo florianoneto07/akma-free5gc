@@ -13,7 +13,7 @@ const baseConfig = `info:
   description: AANF test configuration
 configuration:
   sbi:
-    scheme: http
+    scheme: %SCHEME%
     registerIPv4: 192.168.16.130
     bindingIPv4: 192.168.16.130
     port: 8010
@@ -25,14 +25,15 @@ configuration:
     - mcc: "208"
       mnc: "93"
   routingIndicators: [%RIDS%]
+  heartBeatTimer: %HEARTBEAT%
   akma:
     kafLifetime: %LIFETIME%
     roamingStatusSubscription: %ROAMING%
     authorizedAfs:
       - afId: %AFID%
-        sourceAddresses: [%ADDR%]
+        nfInstanceIds: [%AF%]
     authorizedNefs:
-      - sourceAddresses: [%NEFADDR%]
+      - nfInstanceIds: [%NEF%]
         afIds: [%NEFAFIDS%]
 logger:
   enable: true
@@ -45,13 +46,15 @@ type params map[string]string
 func writeConfig(t *testing.T, p params) string {
 	t.Helper()
 	defaults := params{
-		"RIDS":     `"0000", "012"`,
-		"LIFETIME": "30m",
-		"ROAMING":  "false",
-		"AFID":     "af1.akma.example.FF00000001",
-		"ADDR":     "192.168.16.129",
-		"NEFADDR":  "192.168.16.130",
-		"NEFAFIDS": "af1.akma.example.FF00000001",
+		"SCHEME":    "http",
+		"HEARTBEAT": "60",
+		"RIDS":      `"0000", "012"`,
+		"LIFETIME":  "30m",
+		"ROAMING":   "false",
+		"AFID":      "af1.akma.example.FF00000001",
+		"AF":        "2170454b-4cfa-406a-a77c-2137042b54b4",
+		"NEF":       "8e73ad07-906c-4952-93ac-cd32bbb076ed",
+		"NEFAFIDS":  "af1.akma.example.FF00000001",
 	}
 	s := baseConfig
 	for k, v := range defaults {
@@ -118,12 +121,17 @@ func TestInvalidConfigs(t *testing.T) {
 		"lifetime not positive":    {"LIFETIME": "-1m"},
 		"afId without Ua* id":      {"AFID": "af1.akma.example"},
 		"afId with 9 hex digits":   {"AFID": "af1.akma.example.FF0000001"},
-		"source address not an IP": {"ADDR": "af1.akma.example"},
-		"no source address":        {"ADDR": ""},
-		"NEF address not an IP":    {"NEFADDR": "nef.example"},
-		"NEF without address":      {"NEFADDR": ""},
+		"NF instance not a UUID":   {"AF": "af1.akma.example"},
+		"no NF instance":           {"AF": ""},
+		"NEF instance not a UUID":  {"NEF": "192.168.16.130"},
+		"NEF without NF instance":  {"NEF": ""},
 		"NEF without AF_ID":        {"NEFAFIDS": ""},
 		"NEF AF_ID without Ua* id": {"NEFAFIDS": "af1.akma.example"},
+		// F24: TS 29.510 table 6.1.6.2.2-1 NOTE 1.
+		"https without fqdn": {"SCHEME": "https"},
+		// F29: the range of the NRF of free5GC.
+		"heartBeatTimer above 3600": {"HEARTBEAT": "3601"},
+		"heartBeatTimer negative":   {"HEARTBEAT": "-1"},
 	}
 	for name, p := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -3,24 +3,29 @@ info:
   description: AANF initial local configuration
 
 configuration:
-  # Fixed NF instance ID (UUID v4). With OAuth2 enabled, the NRF of free5GC
-  # signs a certificate cert/aanf_<nfInstanceId>.pem at each new registration;
-  # a fixed ID keeps it to one file.
+  # Fixed NF instance ID (UUID v4): the one of the certificate (TS 33.310
+  # cl. 6.1.3c.3).
   nfInstanceId: b6f417f0-06fa-4c38-b291-33066f5a5fe7
   sbi: # Service-based interface information
-    scheme: http # the protocol for sbi (http or https); http is h2c, without TLS
+    scheme: https # the protocol for sbi (http or https); http is h2c, without TLS
+    fqdn: aanf.5gc.mnc093.mcc208.3gppnetwork.org # required with https (TS 29.510 cl. 6.1.6.2.2 NOTE 1)
     registerIPv4: 192.168.16.130 # IP used to register to NRF; reachable from the AF host
     bindingIPv4: 192.168.16.130 # IP used to bind the service
     port: 8010 # port used to bind the service; not used by any free5GC NF (8000 is their SBI port)
+    tls: # the certificate of the SBI (TS 33.310 cl. 6.1.3c.3)
+      pem: cert/sba/aanf.pem
+      key: cert/sba/aanf.key
+      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
   serviceNameList: # the SBI services provided by this AANF
     - naanf-akma # Naanf_AKMA service (TS 29.535)
-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
-  nrfCertPem: cert/nrf.pem # NRF certificate, used to verify OAuth2 access tokens
+  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+  nrfCertPem: cert/sba/nrf-token.pem # NRF certificate, used to verify OAuth2 access tokens
   plmnSupportList: # the PLMNs (Network Identifier) of this AANF
     - mcc: "208" # Mobile Country Code (3 digits string, digit: 0~9)
       mnc: "93" # Mobile Network Code (2 or 3 digits string, digit: 0~9)
   routingIndicators: # published in AanfInfo; quote them, every digit is significant
     - "0000"
+  heartBeatTimer: 60 # seconds between heart-beats, proposed to the NRF; the value of the NRF prevails (TS 29.510 cl. 5.2.2.3.2)
   akma:
     kafLifetime: 1h # K_AF lifetime (operator policy, TS 33.535 cl. 5.2)
     # Refresh of K_AKMA (operator policy, TS 33.535 cl. 6.4.4): when an AF asks for a K_AF of a K_AKMA
@@ -29,41 +34,42 @@ configuration:
     kakmaRefresh: 0
     roamingStatusSubscription: false # must stay false: not implemented (TS 33.535 cl. 6.2.1 step 5)
     authorizedAfs: # local policy, TS 33.535 cl. 6.2.1 step 2; one AF_ID per Ua* profile and cipher suite
-      # "<FQDN>.<Ua* security protocol id>", each with the addresses from which
-      # the AF may request its K_AF
+      # "<FQDN>.<Ua* security protocol id>", each with the NF instances of the AF
+      # that may request its K_AF: the ones of their client certificates
+      # (TS 33.501 cl. 13.1.0)
       - afId: af1.akma.example.0100011301 # Digest in TLS 1.3 (TS 24.109 K.2), TLS_AES_128_GCM_SHA256 (TS 33.220 H.3)
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.0100011302 # TLS_AES_256_GCM_SHA384
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.0100011303 # TLS_CHACHA20_POLY1305_SHA256
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.010001C02B # Digest in TLS 1.2, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.010001C02C # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.0100000007 # TLS 1.3 with K_AF as pre-shared key (K.3.3)
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.010001D001 # (D)TLS 1.2, TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256 (K.3.2)
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.0100000009 # DTLS 1.3 with K_AF as pre-shared key (TS 33.535 Annex C)
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.0100000008 # OSCORE with a context from K_AF (TS 33.535 Annex D)
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
       - afId: af1.akma.example.FF00000001 # simplified Ua*, test only (TS 33.220 H.2 NOTE 2)
-        sourceAddresses:
-          - 192.168.16.129
+        nfInstanceIds:
+          - 2170454b-4cfa-406a-a77c-2137042b54b4
     authorizedNefs: # K_AF requests relayed by a NEF for external AFs, TS 33.535 cl. 6.3
-      - sourceAddresses: # addresses of the NEF
-          - 192.168.16.130
+      - nfInstanceIds: # the NEF: the NF instance of its client certificate (TS 33.501 cl. 13.1.0)
+          - 8e73ad07-906c-4952-93ac-cd32bbb076ed
         afIds: # external AF_IDs accepted from this NEF
           - af1.akma.example.0100011301
           - af1.akma.example.0100011302

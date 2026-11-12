@@ -1,0 +1,938 @@
+diff --git a/internal/context/context.go b/internal/context/context.go
+index 9c10962..8faa44d 100644
+--- a/internal/context/context.go
++++ b/internal/context/context.go
+@@ -2,10 +2,6 @@ package context
+ 
+ import (
+ 	"context"
+-	"crypto/rsa"
+-	"crypto/x509"
+-	"os"
+-	"path/filepath"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+@@ -26,11 +22,7 @@ import (
+ type NRFContext struct {
+ 	NrfNfProfile     models.NrfNfManagementNfProfile
+ 	Nrf_NfInstanceID string
+-	RootPrivKey      *rsa.PrivateKey
+-	RootCert         *x509.Certificate
+-	NrfPrivKey       *rsa.PrivateKey
+-	NrfPubKey        *rsa.PublicKey
+-	NrfCert          *x509.Certificate
++	TokenSigner      *oauth.Signer
+ 	NfRegistNum      int
+ 	nfRegistNumLock  sync.RWMutex
+ }
+@@ -54,6 +46,7 @@ func InitNrfContext() error {
+ 	configuration := config.Configuration
+ 
+ 	nrfContext.NrfNfProfile.NfInstanceId = config.GetNfInstanceId()
++	nrfContext.Nrf_NfInstanceID = nrfContext.NrfNfProfile.NfInstanceId
+ 	nrfContext.NrfNfProfile.NfType = models.NrfNfManagementNfType_NRF
+ 	nrfContext.NrfNfProfile.NfStatus = models.NrfNfManagementNfStatus_REGISTERED
+ 	nrfContext.NrfNfProfile.Fqdn = config.GetSbiFqdn()
+@@ -63,53 +56,17 @@ func InitNrfContext() error {
+ 
+ 	if config.GetOAuth() {
+ 		var err error
+-		rootPrivKeyPath := config.GetRootPrivKeyPath()
+-		nrfContext.RootPrivKey, err = oauth.ParsePrivateKeyFromPEM(rootPrivKeyPath)
+-		if err != nil {
+-			logger.InitLog.Warnf("No root private key: %v; generate new one", err)
+-			err = makeDir(rootPrivKeyPath)
+-			if err != nil {
+-				return errors.Wrapf(err, "NRF init")
+-			}
+-			nrfContext.RootPrivKey, err = oauth.GenerateRSAKeyPair("", rootPrivKeyPath)
+-			if err != nil {
+-				return errors.Wrapf(err, "NRF init")
+-			}
+-		}
+-
+-		rootCertPath := config.GetRootCertPemPath()
+-		nrfContext.RootCert, err = oauth.ParseCertFromPEM(rootCertPath)
+-		if err != nil {
+-			logger.InitLog.Warnf("No root cert: %v; generate new one", err)
+-			err = makeDir(rootCertPath)
+-			if err != nil {
+-				return errors.Wrapf(err, "NRF init")
+-			}
+-			nrfContext.RootCert, err = oauth.GenerateRootCertificate(rootCertPath, nrfContext.RootPrivKey)
+-			if err != nil {
+-				return errors.Wrapf(err, "NRF init")
+-			}
+-		}
+-
+-		nrfPrivKeyPath := config.GetNrfPrivKeyPath()
+-		nrfContext.NrfPrivKey, err = oauth.ParsePrivateKeyFromPEM(nrfPrivKeyPath)
+-		if err != nil {
+-			logger.InitLog.Warnf("No NF priv key: %v; generate new one", err)
+-			nrfContext.NrfPrivKey, err = oauth.GenerateRSAKeyPair("", nrfPrivKeyPath)
+-			if err != nil {
+-				return errors.Wrapf(err, "NRF init")
+-			}
+-		}
+-		nrfContext.NrfPubKey = &nrfContext.NrfPrivKey.PublicKey
+-
+-		nrfCertPath := config.GetNrfCertPemPath()
+-		logger.InitLog.Infof("generate new NRF cert")
+-		nrfContext.NrfCert, err = oauth.GenerateCertificate(
+-			string(nrfContext.NrfNfProfile.NfType), nrfContext.Nrf_NfInstanceID,
+-			nrfCertPath, nrfContext.NrfPubKey, nrfContext.RootCert, nrfContext.RootPrivKey)
++		nrfContext.TokenSigner, err = oauth.NewSigner(config.GetNrfCertPemPath(), config.GetNrfPrivKeyPath())
+ 		if err != nil {
+ 			return errors.Wrapf(err, "NRF init")
+ 		}
++		// "iss" is the NF instance ID of the NRF, and the producers compare it
++		// with the certificate (TS 29.510 table 6.3.5.2.4-1; TS 33.501
++		// cl. 13.4.1.1.2).
++		if !strings.EqualFold(nrfContext.TokenSigner.Issuer(), nrfContext.Nrf_NfInstanceID) {
++			return errors.Errorf("NRF init: the certificate of the access tokens is of NF instance %s, not of %s",
++				nrfContext.TokenSigner.Issuer(), nrfContext.Nrf_NfInstanceID)
++		}
+ 	}
+ 
+ 	NFServices := InitNFService(serviceNameList, config.Info.Version)
+@@ -147,64 +104,6 @@ func InitNFService(srvNameList []string, version string) []models.NrfNfManagemen
+ 	return NFServices
+ }
+ 
+-func makeDir(filePath string) error {
+-	dir, _ := filepath.Split(filePath)
+-	if err := os.MkdirAll(dir, 0o775); err != nil {
+-		return errors.Wrapf(err, "makeDir(%s):", dir)
+-	}
+-	return nil
+-}
+-
+-func SignNFCert(nfType, nfId string) error {
+-	// Use default {Nf_type}.pem
+-	nfCertPath := oauth.GetNFCertPath(factory.NrfConfig.GetCertBasePath(), nfType, "")
+-	newCertPath := oauth.GetNFCertPath(factory.NrfConfig.GetCertBasePath(), nfType, nfId)
+-
+-	logger.NfmLog.Infoln("Use NF certPath:", nfCertPath)
+-
+-	// Get NF's Certificate from file
+-	nfCert, err := oauth.ParseCertFromPEM(nfCertPath)
+-	if err != nil {
+-		logger.NfmLog.Warnf("No NF cert: %v; generate new one", err)
+-
+-		// Get NF's Public key from file
+-		var nfPubKey *rsa.PublicKey
+-		nfPubKey, err = oauth.ParsePublicKeyFromPEM(nfCertPath)
+-		if err != nil {
+-			// When ParsePublicKayFromPEM failed, generate new RSA key pair
+-			_, err = oauth.GenerateRSAKeyPair(nfCertPath, "")
+-			if err != nil {
+-				return errors.Wrapf(err, "Generate Error")
+-			}
+-			nfPubKey, err = oauth.ParsePublicKeyFromPEM(nfCertPath)
+-			if err != nil {
+-				return errors.Wrapf(err, "Generated but can't parse public key")
+-			}
+-		}
+-
+-		// Generate new NF's Certificate to new file
+-		_, err = oauth.GenerateCertificate(
+-			nfType, nfId, newCertPath, nfPubKey, nrfContext.RootCert, nrfContext.RootPrivKey)
+-		if err != nil {
+-			return errors.Wrapf(err, "sign NF cert")
+-		}
+-	} else {
+-		nfPubkey, ok := nfCert.PublicKey.(*rsa.PublicKey)
+-		if !ok {
+-			return errors.Errorf("No public key in NF cert")
+-		}
+-
+-		// Re-generate new NF's Certificate to new file
+-		_, err = oauth.GenerateCertificate(
+-			nfType, nfId, newCertPath, nfPubkey, nrfContext.RootCert, nrfContext.RootPrivKey)
+-		if err != nil {
+-			return errors.Wrapf(err, "sign NF cert")
+-		}
+-	}
+-
+-	return nil
+-}
+-
+ func GetSelf() *NRFContext {
+ 	return &nrfContext
+ }
+@@ -228,7 +127,7 @@ func (ctx *NRFContext) GetTokenCtx(
+ 	if !factory.NrfConfig.GetOAuth() {
+ 		return context.TODO(), nil, nil
+ 	}
+-	if ctx.NrfPrivKey == nil {
++	if ctx.TokenSigner == nil {
+ 		pd := &models.ProblemDetails{Status: 500, Cause: "NRF_PRIVATE_KEY_MISSING"}
+ 		return nil, pd, errors.New("NRF private key not initialized")
+ 	}
+@@ -247,8 +146,7 @@ func (ctx *NRFContext) GetTokenCtx(
+ 			ID:       uuid.New().String(),
+ 		},
+ 	}
+-	token := jwt.NewWithClaims(jwt.GetSigningMethod("RS512"), claims)
+-	accessToken, err := token.SignedString(ctx.NrfPrivKey)
++	accessToken, err := ctx.TokenSigner.Sign(claims)
+ 	if err != nil {
+ 		pd := &models.ProblemDetails{Status: 500, Cause: "TOKEN_SIGNING_FAILED"}
+ 		return nil, pd, err
+diff --git a/internal/context/token_test.go b/internal/context/token_test.go
+new file mode 100644
+index 0000000..a728d1e
+--- /dev/null
++++ b/internal/context/token_test.go
+@@ -0,0 +1,95 @@
++package context
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"encoding/pem"
++	"math/big"
++	"net/url"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/golang-jwt/jwt/v5"
++	"github.com/stretchr/testify/require"
++	"golang.org/x/oauth2"
++
++	"github.com/free5gc/nrf/pkg/factory"
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++const testNrfId = "cdee1983-45ab-41a6-8f5b-6f832d5206e8"
++
++// tokenPair writes the certificate of the access tokens of an NF instance and
++// its key.
++func tokenPair(t *testing.T, id string) (certFile, keyFile string) {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	require.NoError(t, err)
++	uri, err := url.Parse("urn:uuid:" + id)
++	require.NoError(t, err)
++	template := &x509.Certificate{
++		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: id},
++		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
++		URIs:               []*url.URL{uri},
++		UnknownExtKeyUsage: []asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 39}},
++	}
++	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
++	require.NoError(t, err)
++	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
++	require.NoError(t, err)
++	dir := t.TempDir()
++	certFile, keyFile = filepath.Join(dir, "nrf-token.pem"), filepath.Join(dir, "nrf-token.key")
++	require.NoError(t, os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
++	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}), 0o600))
++	return certFile, keyFile
++}
++
++func nrfConfig(certFile, keyFile string) *factory.Config {
++	return &factory.Config{
++		Info: &factory.Info{Version: "1.0.0"},
++		Configuration: &factory.Configuration{
++			NfInstanceId: testNrfId,
++			Sbi: &factory.Sbi{
++				Scheme: "https", RegisterIPv4: "127.0.0.10", BindingIPv4: "127.0.0.10", Port: 8000, OAuth: true,
++				Cert: &factory.Cert{Pem: certFile, Key: keyFile},
++			},
++		},
++	}
++}
++
++func TestInitNrfContextToken(t *testing.T) {
++	certFile, keyFile := tokenPair(t, testNrfId)
++	factory.NrfConfig = nrfConfig(certFile, keyFile)
++	require.NoError(t, InitNrfContext())
++
++	ctx, pd, err := GetSelf().GetTokenCtx(models.ServiceName_NNRF_NFM, models.NrfNfManagementNfType_AMF)
++	require.NoError(t, err)
++	require.Nil(t, pd)
++	source, ok := ctx.Value(openapi.ContextOAuth2).(oauth2.TokenSource)
++	require.True(t, ok)
++	token, err := source.Token()
++	require.NoError(t, err)
++
++	claims := jwt.MapClaims{}
++	parsed, _, err := jwt.NewParser().ParseUnverified(token.AccessToken, claims)
++	require.NoError(t, err)
++	require.Equal(t, "ES256", parsed.Header["alg"])
++	require.NotEmpty(t, parsed.Header["kid"])
++	require.NotEmpty(t, parsed.Header["x5t#S256"])
++	require.Equal(t, testNrfId, claims["iss"])
++	require.Equal(t, testNrfId, claims["sub"])
++	require.Equal(t, "AMF", claims["aud"])
++}
++
++func TestInitNrfContextAnotherIssuer(t *testing.T) {
++	certFile, keyFile := tokenPair(t, "5a6d7127-edf7-4edc-960c-e4105ff023d8")
++	factory.NrfConfig = nrfConfig(certFile, keyFile)
++	require.ErrorContains(t, InitNrfContext(), "of NF instance 5a6d7127")
++}
+diff --git a/internal/sbi/api_discovery.go b/internal/sbi/api_discovery.go
+index 3280100..566bde1 100644
+--- a/internal/sbi/api_discovery.go
++++ b/internal/sbi/api_discovery.go
+@@ -36,5 +36,9 @@ func (s *Server) getNfDiscoveryRoutes() []Route {
+ 
+ // SearchNFInstances - Search a collection of NF Instances
+ func (s *Server) HTTPSearchNFInstances(c *gin.Context) {
+-	s.Processor().HandleNFDiscoveryRequest(c, c.Request.URL.Query())
++	query := c.Request.URL.Query()
++	if !peerMatches(c, query.Get("requester-nf-instance-id"), query.Get("requester-nf-type")) {
++		return
++	}
++	s.Processor().HandleNFDiscoveryRequest(c, query)
+ }
+diff --git a/internal/sbi/api_nfmanagement.go b/internal/sbi/api_nfmanagement.go
+index d2fb574..a7435e9 100644
+--- a/internal/sbi/api_nfmanagement.go
++++ b/internal/sbi/api_nfmanagement.go
+@@ -99,6 +99,23 @@ func (s *Server) getNfManagementRoute() []Route {
+ 	}
+ }
+ 
++// peerMatches compares the NF of a request with the client certificate of the
++// session, and answers 403 without cause when they differ (TS 33.501
++// cl. 13.3.1.3; TS 29.500 table 5.2.7.1-1).
++func peerMatches(c *gin.Context, nfInstanceID, nfType string) bool {
++	err := util.CheckPeer(c.Request.TLS, nfInstanceID, nfType)
++	if err == nil {
++		return true
++	}
++	logger.SBILog.Warnf("%s %s refused: %v", c.Request.Method, c.Request.URL.Path, err)
++	util.GinProblemJson(c, &models.ProblemDetails{
++		Title:  "Forbidden",
++		Status: http.StatusForbidden,
++		Detail: "the request does not match the client certificate",
++	})
++	return false
++}
++
+ // DeregisterNFInstance - Deregisters a given NF Instance
+ func (s *Server) HTTPDeregisterNFInstance(c *gin.Context) {
+ 	nfInstanceID := c.Params.ByName("nfInstanceID")
+@@ -111,6 +128,9 @@ func (s *Server) HTTPDeregisterNFInstance(c *gin.Context) {
+ 		util.GinProblemJson(c, problemDetails)
+ 		return
+ 	}
++	if !peerMatches(c, nfInstanceID, "") {
++		return
++	}
+ 	s.Processor().HandleNFDeregisterRequest(c, nfInstanceID)
+ }
+ 
+@@ -182,6 +202,10 @@ func (s *Server) HTTPRegisterNFInstance(c *gin.Context) {
+ 		return
+ 	}
+ 
++	if !peerMatches(c, nfInstanceID, string(nfprofile.NfType)) {
++		return
++	}
++
+ 	s.Processor().HandleNFRegisterRequest(c, &nfprofile, requestBody)
+ }
+ 
+@@ -211,6 +235,9 @@ func (s *Server) HTTPUpdateNFInstance(c *gin.Context) {
+ 		util.GinProblemJson(c, problemDetail)
+ 		return
+ 	}
++	if !peerMatches(c, nfInstanceID, "") {
++		return
++	}
+ 	s.Processor().HandleUpdateNFInstanceRequest(c, requestBody, nfInstanceID)
+ }
+ 
+diff --git a/internal/sbi/peer_test.go b/internal/sbi/peer_test.go
+new file mode 100644
+index 0000000..b399390
+--- /dev/null
++++ b/internal/sbi/peer_test.go
+@@ -0,0 +1,76 @@
++package sbi
++
++import (
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++
++	"github.com/free5gc/nrf/internal/sbi/processor"
++	"github.com/free5gc/openapi/models"
++)
++
++const peerId = "0383f793-0b51-4fc6-996e-a9a8bafc4ce1"
++
++func peerContext(t *testing.T, method, target string) (*gin.Context, *httptest.ResponseRecorder) {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++	uri, err := url.Parse("urn:uuid:" + peerId)
++	require.NoError(t, err)
++	value, err := asn1.Marshal([]string{"AF"})
++	require.NoError(t, err)
++	value[2] = asn1.TagIA5String
++	w := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(w)
++	c.Request = httptest.NewRequest(method, target, nil)
++	c.Request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{
++		URIs:       []*url.URL{uri},
++		Extensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 34}, Value: value}},
++	}}}
++	return c, w
++}
++
++func TestPeerMatches(t *testing.T) {
++	c, w := peerContext(t, http.MethodPut, "/nnrf-nfm/v1/nf-instances/"+peerId)
++	require.True(t, peerMatches(c, peerId, "AF"))
++	require.Equal(t, http.StatusOK, w.Code)
++
++	for name, args := range map[string][2]string{
++		"another NF instance": {"5a6d7127-edf7-4edc-960c-e4105ff023d8", "AF"},
++		"another NF type":     {peerId, "AUSF"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			c, w := peerContext(t, http.MethodPut, "/nnrf-nfm/v1/nf-instances/"+args[0])
++			require.False(t, peerMatches(c, args[0], args[1]))
++			require.Equal(t, http.StatusForbidden, w.Code)
++			require.Equal(t, "application/problem+json", w.Header().Get("Content-Type"))
++			var pd models.ProblemDetails
++			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &pd))
++			require.Empty(t, pd.Cause, "TS 29.500 table 5.2.7.1-1: 403 without cause")
++		})
++	}
++}
++
++func TestAccessTokenRequestOfAnotherNf(t *testing.T) {
++	for name, req := range map[string]models.NrfAccessTokenAccessTokenReq{
++		"NF instance": {NfInstanceId: "5a6d7127-edf7-4edc-960c-e4105ff023d8", NfType: "AF"},
++		"NF type":     {NfInstanceId: peerId, NfType: "AUSF"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			c, w := peerContext(t, http.MethodPost, "/oauth2/token")
++			(&processor.Processor{}).HandleAccessTokenRequest(c, req)
++			require.Equal(t, http.StatusBadRequest, w.Code)
++			require.JSONEq(t, `{"error":"invalid_client"}`, w.Body.String())
++			require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
++			require.Equal(t, "no-cache", w.Header().Get("Pragma"))
++		})
++	}
++}
+diff --git a/internal/sbi/processor/access_token.go b/internal/sbi/processor/access_token.go
+index bf83e56..d73cedf 100644
+--- a/internal/sbi/processor/access_token.go
++++ b/internal/sbi/processor/access_token.go
+@@ -1,8 +1,8 @@
+ package processor
+ 
+ import (
+-	"crypto/x509"
+ 	"net/http"
++	"slices"
+ 	"strings"
+ 	"time"
+ 
+@@ -16,7 +16,6 @@ import (
+ 	"github.com/free5gc/nrf/internal/util"
+ 	"github.com/free5gc/nrf/pkg/factory"
+ 	"github.com/free5gc/openapi/models"
+-	"github.com/free5gc/openapi/oauth"
+ 	"github.com/free5gc/util/mapstruct"
+ 	"github.com/free5gc/util/metrics/sbi"
+ 	"github.com/free5gc/util/mongoapi"
+@@ -26,6 +25,18 @@ func (p *Processor) HandleAccessTokenRequest(c *gin.Context, accessTokenReq mode
+ 	// Param of AccessTokenRsp
+ 	logger.AccTokenLog.Debugln("Handle AccessTokenRequest")
+ 
++	// TS 29.510 table 6.3.4.2.2-3 and table 6.3.4.2.2-4.
++	c.Header("Cache-Control", "no-store")
++	c.Header("Pragma", "no-cache")
++
++	// TS 29.510 cl. 5.4.2.2.1; TS 33.501 cl. 13.4.1.1.2 step 2.
++	if err := checkAccessTokenPeer(c, accessTokenReq); err != nil {
++		logger.AccTokenLog.Warnf("Access token request refused: %v", err)
++		c.Set(sbi.IN_PB_DETAILS_CTX_STR, "invalid_client")
++		c.JSON(http.StatusBadRequest, &models.AccessTokenErr{Error: "invalid_client"})
++		return
++	}
++
+ 	response, errResponse := p.AccessTokenProcedure(accessTokenReq)
+ 	if errResponse != nil {
+ 		c.Set(sbi.IN_PB_DETAILS_CTX_STR, errResponse.Error)
+@@ -45,6 +56,15 @@ func (p *Processor) HandleAccessTokenRequest(c *gin.Context, accessTokenReq mode
+ 	util.GinProblemJson(c, problemDetails)
+ }
+ 
++// checkAccessTokenPeer compares an access token request with the client
++// certificate of the session: the NF instance ID, the NF type and the PLMN.
++func checkAccessTokenPeer(c *gin.Context, req models.NrfAccessTokenAccessTokenReq) error {
++	if err := util.CheckPeer(c.Request.TLS, req.NfInstanceId, string(req.NfType)); err != nil {
++		return err
++	}
++	return util.CheckPeerPlmn(c.Request.TLS, req.RequesterPlmn)
++}
++
+ func (p *Processor) AccessTokenProcedure(request models.NrfAccessTokenAccessTokenReq) (
+ 	*models.NrfAccessTokenAccessTokenRsp, *models.AccessTokenErr,
+ ) {
+@@ -77,8 +97,7 @@ func (p *Processor) AccessTokenProcedure(request models.NrfAccessTokenAccessToke
+ 	accessTokenClaims.IssuedAt = &jwt.NumericDate{Time: now}
+ 
+ 	// Use NRF private key to sign AccessToken
+-	token := jwt.NewWithClaims(jwt.GetSigningMethod("RS512"), accessTokenClaims)
+-	accessToken, err := token.SignedString(nrfCtx.NrfPrivKey)
++	accessToken, err := nrfCtx.TokenSigner.Sign(accessTokenClaims)
+ 	if err != nil {
+ 		logger.AccTokenLog.Warnln("Signed string error: ", err)
+ 		return nil, &models.AccessTokenErr{
+@@ -148,62 +167,6 @@ func (p *Processor) AccessTokenScopeCheck(req models.NrfAccessTokenAccessTokenRe
+ 		}
+ 	}
+ 
+-	// Verify NF's certificate with root certificate
+-	roots := x509.NewCertPool()
+-	nrfCtx := nrf_context.GetSelf()
+-	roots.AddCert(nrfCtx.RootCert)
+-
+-	nfCert, err := oauth.ParseCertFromPEM(
+-		oauth.GetNFCertPath(factory.NrfConfig.GetCertBasePath(), reqNfType, reqNfInstanceId))
+-	if err != nil {
+-		logger.AccTokenLog.Errorln("NF Certificate get error: " + err.Error())
+-		return &models.AccessTokenErr{
+-			Error: "invalid_client",
+-		}
+-	}
+-
+-	opts := x509.VerifyOptions{
+-		Roots:   roots,
+-		DNSName: reqNfType,
+-	}
+-	if _, err = nfCert.Verify(opts); err != nil {
+-		// DEBUG
+-		// In testing environment, this would leads to follwing error:
+-		// certificate verify error: x509: certificate signed by unknown authority free5GC
+-		if strings.Contains(err.Error(), "unknown authority") {
+-			logger.AccTokenLog.Warnf("Certificate verify: %v", err)
+-		} else {
+-			logger.AccTokenLog.Errorf("Certificate verify: %v", err)
+-			return &models.AccessTokenErr{
+-				Error: "invalid_client",
+-			}
+-		}
+-	}
+-
+-	if len(nfCert.URIs) == 0 || nfCert.URIs[0] == nil {
+-		logger.AccTokenLog.Errorln("Certificate verify error: missing URI SAN")
+-		return &models.AccessTokenErr{
+-			Error: "invalid_client",
+-		}
+-	}
+-
+-	uri := nfCert.URIs[0]
+-	opaqueParts := strings.SplitN(uri.Opaque, ":", 2)
+-	if len(opaqueParts) != 2 || opaqueParts[1] == "" {
+-		logger.AccTokenLog.Errorf("Certificate verify error: invalid URI SAN format: %s", uri.String())
+-		return &models.AccessTokenErr{
+-			Error: "invalid_client",
+-		}
+-	}
+-	id := opaqueParts[1]
+-	if id != reqNfInstanceId {
+-		logger.AccTokenLog.Errorln("Certificate verify error: NF Instance Id mismatch (Expected ID: " +
+-			reqNfInstanceId + " Received ID: " + id + ")")
+-		return &models.AccessTokenErr{
+-			Error: "invalid_client",
+-		}
+-	}
+-
+ 	// Check scope
+ 	if reqTargetNfType == "NRF" {
+ 		if req.Scope == "" {
+@@ -259,29 +222,8 @@ func (p *Processor) AccessTokenScopeCheck(req models.NrfAccessTokenAccessTokenRe
+ 			Error: "invalid_client",
+ 		}
+ 	}
+-	nfServices := nfProfile.NfServices
+-
+-	scopes := strings.Split(req.Scope, " ")
+-
+-	for _, reqNfService := range scopes {
+-		found := false
+-		for _, nfService := range nfServices {
+-			if string(nfService.ServiceName) == reqNfService {
+-				if len(nfService.AllowedNfTypes) == 0 {
+-					found = true
+-					break
+-				} else {
+-					for _, nfType := range nfService.AllowedNfTypes {
+-						if string(nfType) == reqNfType {
+-							found = true
+-							break
+-						}
+-					}
+-					break
+-				}
+-			}
+-		}
+-		if !found {
++	for _, reqNfService := range strings.Split(req.Scope, " ") {
++		if !scopeGranted(nfProfile.NfServices, reqNfService, reqNfType) {
+ 			logger.AccTokenLog.Errorln("Certificate verify error: Request out of scope (" + reqNfService + ")")
+ 			return &models.AccessTokenErr{
+ 				Error: "invalid_scope",
+@@ -291,6 +233,35 @@ func (p *Processor) AccessTokenScopeCheck(req models.NrfAccessTokenAccessTokenRe
+ 	return nil
+ }
+ 
++// scopeGranted tells whether the NF services of a producer give a scope to an
++// NF type. A service with allowedOperationsPerNfType gives only what the list
++// has for the NF type: any other NF type is disallowed (TS 29.510
++// table 6.1.6.2.3-1 NOTE 11). Without the list, the scope is the name of the
++// service, for the allowedNfTypes.
++func scopeGranted(services []models.NrfNfManagementNfService, scope, nfType string) bool {
++	for i := range services {
++		service := &services[i]
++		if len(service.AllowedOperationsPerNfType) > 0 {
++			if slices.Contains(service.AllowedOperationsPerNfType[nfType], scope) {
++				return true
++			}
++			continue
++		}
++		if string(service.ServiceName) != scope {
++			continue
++		}
++		if len(service.AllowedNfTypes) == 0 {
++			return true
++		}
++		for _, allowed := range service.AllowedNfTypes {
++			if string(allowed) == nfType {
++				return true
++			}
++		}
++	}
++	return false
++}
++
+ // accessTokenAudience returns the audience claim of an access token: the NF
+ // instance ID of the NF service producer when the consumer requested a
+ // specific instance, and otherwise the NF type of the NF service producers
+diff --git a/internal/sbi/processor/access_token_scope_test.go b/internal/sbi/processor/access_token_scope_test.go
+new file mode 100644
+index 0000000..3dfba0a
+--- /dev/null
++++ b/internal/sbi/processor/access_token_scope_test.go
+@@ -0,0 +1,35 @@
++package processor
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/require"
++
++	"github.com/free5gc/openapi/models"
++)
++
++func TestScopeGranted(t *testing.T) {
++	services := []models.NrfNfManagementNfService{{
++		ServiceName: models.ServiceName_NAANF_AKMA,
++		AllowedOperationsPerNfType: map[string][]string{
++			"AUSF": {"naanf-akma", "naanf-akma:anchorkey"},
++			"NEF":  {"naanf-akma", "naanf-akma:applicationkeyget"},
++		},
++	}}
++	require.True(t, scopeGranted(services, "naanf-akma", "AUSF"))
++	require.True(t, scopeGranted(services, "naanf-akma:anchorkey", "AUSF"))
++	require.False(t, scopeGranted(services, "naanf-akma:applicationkeyget", "AUSF"), "outside the list of the type")
++	require.False(t, scopeGranted(services, "naanf-akma", "AMF"), "a type outside the lists is disallowed")
++
++	// Without the list: the name of the service, for allowedNfTypes.
++	services = []models.NrfNfManagementNfService{{
++		ServiceName:    models.ServiceName_NUDM_SDM,
++		AllowedNfTypes: []models.NrfNfManagementNfType{models.NrfNfManagementNfType_AMF},
++	}, {
++		ServiceName: models.ServiceName_NUDM_UECM,
++	}}
++	require.True(t, scopeGranted(services, "nudm-sdm", "AMF"))
++	require.False(t, scopeGranted(services, "nudm-sdm", "SMF"))
++	require.True(t, scopeGranted(services, "nudm-uecm", "SMF"), "no allowedNfTypes")
++	require.False(t, scopeGranted(services, "nudm-sdm:read", "AMF"), "no operation scope without the list")
++}
+diff --git a/internal/sbi/processor/nf_management.go b/internal/sbi/processor/nf_management.go
+index a7c44a9..4a84df8 100644
+--- a/internal/sbi/processor/nf_management.go
++++ b/internal/sbi/processor/nf_management.go
+@@ -5,7 +5,6 @@ import (
+ 	"encoding/json"
+ 	"fmt"
+ 	"net/http"
+-	"os"
+ 	"strings"
+ 	"time"
+ 
+@@ -17,9 +16,7 @@ import (
+ 	nrf_context "github.com/free5gc/nrf/internal/context"
+ 	"github.com/free5gc/nrf/internal/logger"
+ 	"github.com/free5gc/nrf/internal/util"
+-	"github.com/free5gc/nrf/pkg/factory"
+ 	"github.com/free5gc/openapi/models"
+-	"github.com/free5gc/openapi/oauth"
+ 	timedecode "github.com/free5gc/util/mapstruct"
+ 	"github.com/free5gc/util/mongoapi"
+ )
+@@ -347,12 +344,6 @@ func (p *Processor) NFDeregisterProcedure(nfInstanceID string) *models.ProblemDe
+ 		}
+ 		return problemDetail
+ 	}
+-	if factory.NrfConfig.GetOAuth() {
+-		nfCertPath := oauth.GetNFCertPath(factory.NrfConfig.GetCertBasePath(), string(nfInstanceType), nfInstanceID)
+-		if removeErr := os.Remove(nfCertPath); removeErr != nil {
+-			logger.NfmLog.Warningf("Can not delete NFCertPem file: %v: %v", nfCertPath, removeErr)
+-		}
+-	}
+ 	// Minus NF Register Conter
+ 	p.Context().DelNfRegister()
+ 	logger.NfmLog.Infof("NfDeregister Success: %v [%v]", nfInstanceType, nfInstanceID)
+@@ -702,13 +693,6 @@ func (p *Processor) NFRegisterProcedure(
+ 		}
+ 		c.Writer.Header().Add("Location", locationHeaderValue)
+ 
+-		if factory.NrfConfig.GetOAuth() {
+-			// Generate NF's pubkey certificate with root certificate
+-			err = nrf_context.SignNFCert(string(nf.NfType), nfInstanceId)
+-			if err != nil {
+-				logger.NfmLog.Warnln(err)
+-			}
+-		}
+ 		c.JSON(http.StatusCreated, putData)
+ 		return
+ 	}
+diff --git a/internal/util/peer.go b/internal/util/peer.go
+new file mode 100644
+index 0000000..15bb971
+--- /dev/null
++++ b/internal/util/peer.go
+@@ -0,0 +1,72 @@
++package util
++
++import (
++	"crypto/tls"
++	"fmt"
++	"regexp"
++	"strings"
++
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
++)
++
++// homeNetworkDomain finds the PLMN of the Home Network Domain in the O of the
++// Subject of a certificate (TS 33.310 table 6.1.3c.3-1; TS 23.003 cl. 28.2).
++var homeNetworkDomain = regexp.MustCompile(`(?:^|\.)mnc([0-9]{3})\.mcc([0-9]{3})\.3gppnetwork\.org$`)
++
++// CheckPeer compares an NF instance ID and an NF type, when given, with the
++// client certificate of the session. Without TLS, as in the test bench of
++// free5GC, there is no certificate to compare.
++func CheckPeer(state *tls.ConnectionState, nfInstanceId, nfType string) error {
++	cert := sbitls.PeerCertificate(state)
++	if cert == nil {
++		return nil
++	}
++	if nfInstanceId != "" {
++		id, err := sbitls.NfInstanceId(cert)
++		if err != nil {
++			return err
++		}
++		if !strings.EqualFold(id, nfInstanceId) {
++			return fmt.Errorf("NF instance %s, the certificate is of %s", nfInstanceId, id)
++		}
++	}
++	if nfType == "" {
++		return nil
++	}
++	types, err := sbitls.NfTypes(cert)
++	if err != nil {
++		return err
++	}
++	for _, t := range types {
++		if strings.EqualFold(t, nfType) {
++			return nil
++		}
++	}
++	return fmt.Errorf("NF type %s, the certificate is of %s", nfType, strings.Join(types, ","))
++}
++
++// CheckPeerPlmn compares a PLMN, when given, with the O of the client
++// certificate of the session. A two-digit MNC has a zero on the left in the
++// domain (TS 23.003 cl. 28.2).
++func CheckPeerPlmn(state *tls.ConnectionState, plmn *models.PlmnId) error {
++	cert := sbitls.PeerCertificate(state)
++	if cert == nil || plmn == nil {
++		return nil
++	}
++	mnc := plmn.Mnc
++	if len(mnc) == 2 {
++		mnc = "0" + mnc
++	}
++	for _, organization := range cert.Subject.Organization {
++		match := homeNetworkDomain.FindStringSubmatch(organization)
++		if match == nil {
++			continue
++		}
++		if match[1] == mnc && match[2] == plmn.Mcc {
++			return nil
++		}
++		return fmt.Errorf("PLMN %s-%s, the certificate is of %s", plmn.Mcc, plmn.Mnc, organization)
++	}
++	return fmt.Errorf("PLMN %s-%s, the certificate has no Home Network Domain", plmn.Mcc, plmn.Mnc)
++}
+diff --git a/internal/util/peer_test.go b/internal/util/peer_test.go
+new file mode 100644
+index 0000000..cd23abb
+--- /dev/null
++++ b/internal/util/peer_test.go
+@@ -0,0 +1,59 @@
++package util
++
++import (
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"net/url"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++
++	"github.com/free5gc/openapi/models"
++)
++
++const peerId = "0383f793-0b51-4fc6-996e-a9a8bafc4ce1"
++
++func peerState(t *testing.T, id, nfType, organization string) *tls.ConnectionState {
++	t.Helper()
++	cert := &x509.Certificate{Subject: pkix.Name{Organization: []string{organization}}}
++	if id != "" {
++		uri, err := url.Parse("urn:uuid:" + id)
++		require.NoError(t, err)
++		cert.URIs = []*url.URL{uri}
++	}
++	if nfType != "" {
++		value, err := asn1.Marshal([]string{nfType})
++		require.NoError(t, err)
++		value[2] = asn1.TagIA5String
++		cert.Extensions = []pkix.Extension{{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 34}, Value: value}}
++	}
++	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
++}
++
++func TestCheckPeer(t *testing.T) {
++	state := peerState(t, peerId, "AF", "5gc.mnc093.mcc208.3gppnetwork.org")
++	require.NoError(t, CheckPeer(state, peerId, "AF"))
++	require.NoError(t, CheckPeer(state, "0383F793-0B51-4FC6-996E-A9A8BAFC4CE1", "af"))
++	require.NoError(t, CheckPeer(state, "", "AF"), "without the NF instance ID")
++	require.NoError(t, CheckPeer(state, peerId, ""), "without the NF type")
++	require.NoError(t, CheckPeer(nil, peerId, "AF"), "without TLS")
++
++	require.Error(t, CheckPeer(state, "5a6d7127-edf7-4edc-960c-e4105ff023d8", "AF"), "another NF instance")
++	require.Error(t, CheckPeer(state, peerId, "AUSF"), "another NF type")
++	require.Error(t, CheckPeer(peerState(t, "", "AF", ""), peerId, ""), "no NF instance in the certificate")
++	require.Error(t, CheckPeer(peerState(t, peerId, "", ""), "", "AF"), "no NF type in the certificate")
++}
++
++func TestCheckPeerPlmn(t *testing.T) {
++	state := peerState(t, peerId, "AF", "5gc.mnc093.mcc208.3gppnetwork.org")
++	require.NoError(t, CheckPeerPlmn(state, nil), "without the PLMN")
++	require.NoError(t, CheckPeerPlmn(nil, &models.PlmnId{Mcc: "208", Mnc: "93"}), "without TLS")
++	require.NoError(t, CheckPeerPlmn(state, &models.PlmnId{Mcc: "208", Mnc: "93"}), "two-digit MNC")
++	require.NoError(t, CheckPeerPlmn(state, &models.PlmnId{Mcc: "208", Mnc: "093"}), "three-digit MNC")
++
++	require.Error(t, CheckPeerPlmn(state, &models.PlmnId{Mcc: "208", Mnc: "94"}))
++	require.Error(t, CheckPeerPlmn(state, &models.PlmnId{Mcc: "209", Mnc: "93"}))
++	require.Error(t, CheckPeerPlmn(peerState(t, peerId, "AF", "free5GC"), &models.PlmnId{Mcc: "208", Mnc: "93"}))
++}
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 5d669da..55b6a96 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -8,7 +8,6 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"os"
+-	"path/filepath"
+ 	"strconv"
+ 	"sync"
+ 
+@@ -23,8 +22,6 @@ const (
+ 	NrfDefaultTLSKeyLogPath      = "./log/nrfsslkey.log"
+ 	NrfDefaultCertPemPath        = "./cert/nrf.pem"
+ 	NrfDefaultPrivateKeyPath     = "./cert/nrf.key"
+-	NrfDefaultRootCertPemPath    = "./cert/root.pem"
+-	NrfDefaultRootPrivateKeyPath = "./cert/root.key"
+ 	NrfDefaultConfigPath         = "./config/nrfcfg.yaml"
+ 	NrfDefaultNfInstanceIdEnvVar = "NRF_NF_INSTANCE_ID"
+ 	NrfSbiDefaultIPv4            = "127.0.0.10"
+@@ -167,7 +164,6 @@ type Sbi struct {
+ 	Fqdn        string `yaml:"fqdn,omitempty" valid:"dns,optional"` // FQDN of the NRF; without it, URIs by IP address
+ 	Tls         *Tls   `yaml:"tls,omitempty" valid:"optional"`      // TLS of the SBI, with a CA of the peers
+ 	Cert        *Cert  `yaml:"cert,omitempty" valid:"optional"`
+-	RootCert    *Cert  `yaml:"rootcert,omitempty" valid:"optional"`
+ 	OAuth       bool   `yaml:"oauth,omitempty" valid:"optional"`
+ }
+ 
+@@ -420,13 +416,6 @@ func (c *Config) GetNrfCertPemPath() string {
+ 	return NrfDefaultCertPemPath
+ }
+ 
+-func (c *Config) GetCertBasePath() string {
+-	c.RLock()
+-	defer c.RUnlock()
+-	dir, _ := filepath.Split(c.GetNrfCertPemPath())
+-	return dir
+-}
+-
+ func (c *Config) GetNrfPrivKeyPath() string {
+ 	c.RLock()
+ 	defer c.RUnlock()
+@@ -436,24 +425,6 @@ func (c *Config) GetNrfPrivKeyPath() string {
+ 	return NrfDefaultPrivateKeyPath
+ }
+ 
+-func (c *Config) GetRootCertPemPath() string {
+-	c.RLock()
+-	defer c.RUnlock()
+-	if c.Configuration.Sbi.RootCert != nil {
+-		return c.Configuration.Sbi.RootCert.Pem
+-	}
+-	return NrfDefaultRootCertPemPath
+-}
+-
+-func (c *Config) GetRootPrivKeyPath() string {
+-	c.RLock()
+-	defer c.RUnlock()
+-	if c.Configuration.Sbi.RootCert != nil {
+-		return c.Configuration.Sbi.RootCert.Key
+-	}
+-	return NrfDefaultRootPrivateKeyPath
+-}
+-
+ func (c *Config) AreMetricsEnabled() bool {
+ 	c.RLock()
+ 	defer c.RUnlock()

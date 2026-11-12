@@ -1,0 +1,50 @@
+# AKMA AF outside the operator network, as API invoker of CAPIF: it discovers
+# the NEF at the CAPIF core function and requests K_AF through it with an
+# access token of the CAPIF core function (TS 29.522 cl. 7.2; TS 33.535
+# cl. 6.3).
+configuration:
+  # Same FQDN and profiles as the AF of afcfg.yaml: same AF_IDs, same K_AF.
+  fqdn: af1.akma.example
+  profiles:
+    - type: digest-tls
+      listen: 192.168.16.129:8453
+      certificate: ../build/cert/af1.akma.example.pem
+      key: ../build/cert/af1.akma.example.key
+    - type: psk-tls13
+      listen: 192.168.16.129:8454
+    - type: psk-tls12
+      listen: 192.168.16.129:8455
+    - type: psk-dtls13
+      listen: 192.168.16.129:5694
+    - type: psk-dtls12
+      listen: 192.168.16.129:5695
+    - type: oscore
+      listen: 192.168.16.129:5693
+    # Test only: the simplified Ua*. Off by default.
+    # - type: digest-http
+    #   listen: 192.168.16.129:8083
+  uaStarId: FF00000001
+  path: /ua/v1/session
+  realmPrefix: 3GPP-bootstrapping-akma
+  qop: [auth]
+  nonceLifetime: 300s
+  kafExpiry: refetch
+  capif: # the AF as API invoker (TS 29.522 cl. 7.2); the NEF is discovered at the CCF
+    ccfUri: https://192.168.16.130:8020
+    # Onboarding enrolment information (TS 33.122 cl. 6.1 step 1): the CA of
+    # the CCF and the onboarding credential, made on the free5GC machine by
+    # make-capif-certs.sh and "ccf credential --profile af1-external".
+    ccfCa: ../build/capif/ccf-ca.pem
+    credential: ../build/capif/af1-external.jwt
+    state: ../build/capif/af1-external.json # API invoker ID, certificate, private key and secret
+    notificationDestination: https://192.168.16.129/capif/notify # mandatory; not served: the CCF sends no notification
+    apiScheme: https # scheme of the discovered apiRoot (TS 29.501 cl. 4.4.1; TS 33.501 cl. 12.3)
+    aefCa: ../build/sba/sba-ca.pem # CA of the certificate of the NEF, pre-provisioned (TS 33.122 cl. 6.5.2.3)
+    offboardOnExit: false
+  # true: anonymous user access, K_AF without the SUPI (TS 33.535 cl. 6.2.2).
+  anonymous: false
+
+logger:
+  enable: true
+  level: info # trace, debug, info, warn, error, fatal, panic
+  reportCaller: false

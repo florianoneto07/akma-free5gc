@@ -1,0 +1,80 @@
+diff --git a/pkg/factory/config.go b/pkg/factory/config.go
+index 295c16f..83b8765 100644
+--- a/pkg/factory/config.go
++++ b/pkg/factory/config.go
+@@ -5,6 +5,7 @@
+ package factory
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"sync"
+@@ -64,7 +65,17 @@ type Sbi struct {
+ 	BindingIPv6  string `yaml:"bindingIPv6,omitempty"`
+ 	Port         int    `yaml:"port,omitempty"`
+ 	Tls          *Tls   `yaml:"tls,omitempty"`
+-	Fqdn         string `yaml:"fqdn,omitempty"` // FQDN of the NF; without it, URIs by IP address
++	Fqdn         string `yaml:"fqdn,omitempty"` // FQDN of the NF; required with https
++}
++
++// validate checks the SBI: with https, the FQDN is in the NF profile and
++// builds the target URIs (TS 29.510 table 6.1.6.2.2-1 NOTE 1), so there are
++// no URIs by IP address.
++func (s *Sbi) validate() error {
++	if s != nil && s.Scheme == "https" && s.Fqdn == "" {
++		return errors.New("sbi.fqdn is required with https (TS 29.510 table 6.1.6.2.2-1 NOTE 1)")
++	}
++	return nil
+ }
+ 
+ type Tls struct {
+@@ -200,6 +211,11 @@ func ReadConfig(cfgPath string) (*Config, error) {
+ 			return nil, fmt.Errorf("[Configuration] %s: %+v", cfgPath, yamlErr)
+ 		}
+ 	}
++	if BsfConfig != nil && BsfConfig.Configuration != nil {
++		if err := BsfConfig.Configuration.Sbi.validate(); err != nil {
++			return nil, fmt.Errorf("[Configuration] %s: %w", cfgPath, err)
++		}
++	}
+ 
+ 	return BsfConfig, nil
+ }
+@@ -216,8 +232,8 @@ func CheckConfigVersion() error {
+ 	return nil
+ }
+ 
+-// GetSbiFqdn returns the FQDN of this NF (TS 29.510 cl. 6.1.6.2.2 NOTE 1), empty
+-// when the URIs go by IP address.
++// GetSbiFqdn returns the FQDN of this NF (TS 29.510 cl. 6.1.6.2.2 NOTE 1),
++// required with https; empty only with http, when the URIs go by IP address.
+ func (c *Config) GetSbiFqdn() string {
+ 	if c == nil || c.Configuration == nil || c.Configuration.Sbi == nil {
+ 		return ""
+diff --git a/pkg/factory/config_fqdn_test.go b/pkg/factory/config_fqdn_test.go
+new file mode 100644
+index 0000000..ff2dd2c
+--- /dev/null
++++ b/pkg/factory/config_fqdn_test.go
+@@ -0,0 +1,20 @@
++package factory
++
++import "testing"
++
++// With https, the FQDN is mandatory (TS 29.510 table 6.1.6.2.2-1 NOTE 1;
++// F24); with http, the URIs may go by IP address.
++func TestSbiFqdnRequiredWithHttps(t *testing.T) {
++	sbi := &Sbi{Scheme: "https", RegisterIPv4: "127.0.0.15", BindingIPv4: "127.0.0.15", Port: 8000}
++	if err := sbi.validate(); err == nil {
++		t.Fatal("https without fqdn accepted")
++	}
++	sbi.Fqdn = "bsf.5gc.mnc093.mcc208.3gppnetwork.org"
++	if err := sbi.validate(); err != nil {
++		t.Fatalf("https with fqdn refused: %v", err)
++	}
++	sbi = &Sbi{Scheme: "http", RegisterIPv4: "127.0.0.15", BindingIPv4: "127.0.0.15", Port: 8000}
++	if err := sbi.validate(); err != nil {
++		t.Fatalf("http without fqdn refused: %v", err)
++	}
++}

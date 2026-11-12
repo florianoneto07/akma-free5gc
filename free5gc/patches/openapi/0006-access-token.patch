@@ -1,0 +1,1159 @@
+diff --git a/oauth/oauth.go b/oauth/oauth.go
+index 9a9827f..9541e6b 100644
+--- a/oauth/oauth.go
++++ b/oauth/oauth.go
+@@ -16,8 +16,6 @@ import (
+ 
+ 	"github.com/golang-jwt/jwt/v5"
+ 	"github.com/pkg/errors"
+-
+-	"github.com/free5gc/openapi/models"
+ )
+ 
+ type CCAClaims struct {
+@@ -54,64 +52,6 @@ func GenerateClientCredentialAssertion(
+ 	return accessToken, nil
+ }
+ 
+-func VerifyOAuth(
+-	authorization, serviceName, certPath string,
+-) error {
+-	verifyKey, err := ParsePublicKeyFromPEM(certPath)
+-	if err != nil {
+-		return errors.Wrapf(err, "verify OAuth")
+-	}
+-
+-	auth_fields := strings.Fields(authorization)
+-	if len(auth_fields) < 2 {
+-		return errors.Errorf("verify OAuth Authorization header invalid")
+-	}
+-
+-	access_token := auth_fields[1]
+-	token, err := jwt.ParseWithClaims(
+-		access_token,
+-		&models.NrfAccessTokenAccessTokenClaims{},
+-		func(token *jwt.Token) (interface{}, error) {
+-			if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+-				return nil, errors.Wrapf(err, "Unexpected signing method")
+-			}
+-			if token.Header["alg"] != "RS512" {
+-				return nil, errors.Wrapf(err, "Unexpected signing method")
+-			}
+-			return verifyKey, nil
+-		})
+-	if err != nil {
+-		return errors.Wrapf(err, "verify OAuth parse")
+-	}
+-
+-	if !verifyScope(token.Claims.(*models.NrfAccessTokenAccessTokenClaims).Scope, serviceName) {
+-		return errors.New("OAuth scope verification failed: insufficient permissions")
+-	}
+-	return nil
+-}
+-
+-func verifyScope(scope, serviceName string) bool {
+-	if len(serviceName) == 0 {
+-		return true
+-	}
+-	if len(scope) != 0 {
+-		scopeSplit := strings.Fields(scope)
+-		found := false
+-		for _, item := range scopeSplit {
+-			if item == serviceName {
+-				found = true
+-				break
+-			}
+-		}
+-		if !found {
+-			return false
+-		}
+-	} else {
+-		return false
+-	}
+-	return true
+-}
+-
+ func GenerateRootCertificate(
+ 	rootCertPath string,
+ 	rootPrivKey *rsa.PrivateKey,
+diff --git a/oauth/peer.go b/oauth/peer.go
+deleted file mode 100644
+index 9529e86..0000000
+--- a/oauth/peer.go
++++ /dev/null
+@@ -1,25 +0,0 @@
+-package oauth
+-
+-import (
+-	"crypto/tls"
+-	"encoding/json"
+-	"net/http"
+-)
+-
+-// CheckTokenPeer ties an access token to the TLS client of the request. Without
+-// a token or without TLS, there is nothing to check.
+-func CheckTokenPeer(authorization string, peer *tls.ConnectionState) error {
+-	return nil
+-}
+-
+-// WriteTokenError answers a request that the check of the access token refused.
+-func WriteTokenError(w http.ResponseWriter, r *http.Request, err error) {
+-	body, jsonErr := json.Marshal(map[string]string{"error": err.Error()})
+-	if jsonErr != nil {
+-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+-		return
+-	}
+-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+-	w.WriteHeader(http.StatusUnauthorized)
+-	_, _ = w.Write(body)
+-}
+diff --git a/oauth/scopes.go b/oauth/scopes.go
+new file mode 100644
+index 0000000..7ee13cc
+--- /dev/null
++++ b/oauth/scopes.go
+@@ -0,0 +1,8 @@
++package oauth
++
++// The resource/operation-level scopes of Naanf_AKMA (TS 29.535 table 5.1.9-1).
++const (
++	ScopeNaanfAkmaAnchorKey      = "naanf-akma:anchorkey"
++	ScopeNaanfAkmaApplicationKey = "naanf-akma:applicationkeyget"
++	ScopeNaanfAkmaSupiAccess     = "naanf-akma:applicationkeyget:supi-access"
++)
+diff --git a/oauth/signer.go b/oauth/signer.go
+new file mode 100644
+index 0000000..1a18605
+--- /dev/null
++++ b/oauth/signer.go
+@@ -0,0 +1,91 @@
++package oauth
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/sha256"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/base64"
++	"errors"
++	"fmt"
++
++	"github.com/golang-jwt/jwt/v5"
++
++	"github.com/free5gc/openapi/sbitls"
++)
++
++// Signer signs the access tokens of the NRF, with the JWS profile of
++// TS 33.210 cl. 6.3.3: ES256, "kid" and "x5t#S256".
++type Signer struct {
++	key    *ecdsa.PrivateKey
++	kid    string
++	x5t    string
++	issuer string
++}
++
++// NewSigner reads the key pair of the access tokens: a certificate with
++// id-kp-oauthAccessTokenSigning (TS 33.310 table 6.1.3c.3-2) and an ECDSA
++// P-256 key.
++func NewSigner(certPath, keyPath string) (*Signer, error) {
++	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
++	if err != nil {
++		return nil, err
++	}
++	key, ok := pair.PrivateKey.(*ecdsa.PrivateKey)
++	if !ok || key.Curve != elliptic.P256() {
++		return nil, errors.New(keyPath + ": not an ECDSA P-256 key")
++	}
++	cert, err := x509.ParseCertificate(pair.Certificate[0])
++	if err != nil {
++		return nil, err
++	}
++	if !sbitls.SignsTokens(cert) {
++		return nil, errors.New(certPath + ": without id-kp-oauthAccessTokenSigning")
++	}
++	issuer, err := sbitls.NfInstanceId(cert)
++	if err != nil {
++		return nil, fmt.Errorf("%s: %w", certPath, err)
++	}
++	kid, err := keyThumbprint(&key.PublicKey)
++	if err != nil {
++		return nil, err
++	}
++	return &Signer{key: key, kid: kid, x5t: certThumbprint(cert), issuer: issuer}, nil
++}
++
++// Issuer returns the NF instance ID of the signing certificate: the "iss" of
++// the access tokens (TS 29.510 table 6.3.5.2.4-1).
++func (s *Signer) Issuer() string {
++	return s.issuer
++}
++
++// Sign returns claims as a JWS in compact serialization.
++func (s *Signer) Sign(claims jwt.Claims) (string, error) {
++	t := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
++	t.Header["kid"] = s.kid
++	t.Header["x5t#S256"] = s.x5t
++	return t.SignedString(s.key)
++}
++
++// keyThumbprint returns the JWK thumbprint of a P-256 public key (RFC 7638
++// cl. 3): the base64url SHA-256 of its required members (RFC 7518 cl. 6.2.1)
++// in lexicographic order, without white space.
++func keyThumbprint(pub *ecdsa.PublicKey) (string, error) {
++	point, err := pub.Bytes()
++	if err != nil {
++		return "", err
++	}
++	// point is 0x04 || x || y, each coordinate in 32 octets.
++	enc := base64.RawURLEncoding
++	jwk := fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":"%s","y":"%s"}`,
++		enc.EncodeToString(point[1:33]), enc.EncodeToString(point[33:65]))
++	sum := sha256.Sum256([]byte(jwk))
++	return enc.EncodeToString(sum[:]), nil
++}
++
++// certThumbprint is the "x5t#S256" of a certificate (RFC 7515 cl. 4.1.8).
++func certThumbprint(cert *x509.Certificate) string {
++	sum := sha256.Sum256(cert.Raw)
++	return base64.RawURLEncoding.EncodeToString(sum[:])
++}
+diff --git a/oauth/verify.go b/oauth/verify.go
+new file mode 100644
+index 0000000..3fcc564
+--- /dev/null
++++ b/oauth/verify.go
+@@ -0,0 +1,362 @@
++package oauth
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"net/http"
++	"os"
++	"strings"
++	"time"
++
++	"github.com/golang-jwt/jwt/v5"
++
++	"github.com/free5gc/openapi/models"
++	"github.com/free5gc/openapi/sbitls"
++)
++
++// The checks of the NF Service Producer on an access token of the NRF
++// (TS 33.501 cl. 13.4.1.1.2; TS 29.500 cl. 6.7.3).
++
++// tokenAlg is the only JWS algorithm of the access tokens of the NRF
++// (TS 33.210 cl. 6.3.3.1).
++const tokenAlg = "ES256"
++
++// The application errors of TS 29.500 table 5.2.7.2-1.
++const (
++	causeClaimMissing  = "ACCESS_TOKEN_CLAIM_MISSING"
++	causeClaimMismatch = "ACCESS_TOKEN_CLAIM_MISMATCH"
++)
++
++// The "error" attributes of the challenge (RFC 6750 cl. 3.1).
++const (
++	errorInvalidToken      = "invalid_token"
++	errorInsufficientScope = "insufficient_scope"
++)
++
++// TokenError is the refusal of an access token, with what TS 29.500
++// cl. 6.7.3 asks of the answer.
++type TokenError struct {
++	Status int      // 401 or 403
++	Code   string   // "error" of the challenge; empty without a token
++	Scope  string   // "scope" of the challenge, with insufficient_scope
++	Cause  string   // cause of the ProblemDetails
++	Claims []string // the claims of invalidParams
++	Reason string   // for the log and for the detail of the ProblemDetails
++}
++
++func (e *TokenError) Error() string {
++	return e.Reason
++}
++
++func invalidToken(format string, args ...any) *TokenError {
++	return &TokenError{Status: http.StatusUnauthorized, Code: errorInvalidToken, Reason: fmt.Sprintf(format, args...)}
++}
++
++func claimMismatch(claim string) *TokenError {
++	return &TokenError{
++		Status: http.StatusForbidden, Code: errorInvalidToken, Cause: causeClaimMismatch,
++		Claims: []string{claim}, Reason: "access token claim " + claim + " does not match",
++	}
++}
++
++// InsufficientScope is the refusal of an access token without scope.
++func InsufficientScope(scope string) *TokenError {
++	return &TokenError{
++		Status: http.StatusForbidden, Code: errorInsufficientScope, Scope: scope,
++		Reason: "access token without the scope " + scope,
++	}
++}
++
++// Grant is what an accepted access token gives.
++type Grant struct {
++	Scopes []string
++}
++
++// Has reports whether the access token has a scope.
++func (g *Grant) Has(scope string) bool {
++	for _, s := range g.Scopes {
++		if s == scope {
++			return true
++		}
++	}
++	return false
++}
++
++// VerifyOAuth is Verify without the check of "sub": the routers of the NFs
++// follow it with CheckTokenPeer.
++func VerifyOAuth(authorization, serviceName, certPath string) error {
++	_, err := Verify(authorization, serviceName, certPath, nil)
++	return err
++}
++
++// Verify checks an "Authorization" header value, in this order: its form, the
++// signature with the certificate of the NRF in certPath, the claims present,
++// the expiry, the values of iss, aud and, with peer, sub, and the scope. The
++// error is a *TokenError. Without the TLS of the SBI, that is, in the test
++// bench of free5GC, there is no chain to check and no identity of this NF to
++// compare with aud.
++func Verify(authorization, serviceName, certPath string, peer *tls.ConnectionState) (*Grant, error) {
++	raw, err := bearer(authorization)
++	if err != nil {
++		return nil, err
++	}
++	cert, err := signingCertificate(certPath)
++	if err != nil {
++		return nil, invalidToken("certificate of the access tokens: %v", err)
++	}
++	claims := jwt.MapClaims{}
++	if _, err = jwt.NewParser(jwt.WithValidMethods([]string{tokenAlg}), jwt.WithoutClaimsValidation()).
++		ParseWithClaims(raw, claims, keyOf(cert)); err != nil {
++		return nil, invalidToken("access token signature: %v", err)
++	}
++	if missing := missingClaims(claims); len(missing) > 0 {
++		return nil, &TokenError{
++			Status: http.StatusUnauthorized, Code: errorInvalidToken, Cause: causeClaimMissing,
++			Claims: missing, Reason: "access token without " + strings.Join(missing, ", "),
++		}
++	}
++	// TS 33.501 cl. 13.4.1.1.2: without tolerance, both ends run NTP.
++	if exp, _ := claims["exp"].(float64); float64(time.Now().Unix()) >= exp {
++		return nil, invalidToken("access token expired")
++	}
++	if err = checkValues(claims, cert, peer); err != nil {
++		return nil, err
++	}
++	scope, _ := claims["scope"].(string)
++	grant := &Grant{Scopes: strings.Fields(scope)}
++	if serviceName != "" && !grant.Has(serviceName) {
++		return nil, InsufficientScope(serviceName)
++	}
++	return grant, nil
++}
++
++// bearer returns the access token of an "Authorization" header value
++// (RFC 6750 cl. 2.1).
++func bearer(authorization string) (string, error) {
++	if strings.TrimSpace(authorization) == "" {
++		return "", &TokenError{Status: http.StatusUnauthorized, Reason: "request without an access token"}
++	}
++	fields := strings.Fields(authorization)
++	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") {
++		return "", invalidToken("the Authorization header is not a Bearer token")
++	}
++	return fields[1], nil
++}
++
++// signingCertificate reads the certificate of the NRF that signs the access
++// tokens (TS 33.310 table 6.1.3c.3-2) and checks that it can do so.
++func signingCertificate(certPath string) (*x509.Certificate, error) {
++	data, err := os.ReadFile(certPath)
++	if err != nil {
++		return nil, err
++	}
++	block, _ := pem.Decode(data)
++	if block == nil {
++		return nil, errors.New(certPath + ": not PEM")
++	}
++	cert, err := x509.ParseCertificate(block.Bytes)
++	if err != nil {
++		return nil, err
++	}
++	if pub, ok := cert.PublicKey.(*ecdsa.PublicKey); !ok || pub.Curve != elliptic.P256() {
++		return nil, errors.New(certPath + ": not an ECDSA P-256 key")
++	}
++	if !sbitls.SignsTokens(cert) {
++		return nil, errors.New(certPath + ": without id-kp-oauthAccessTokenSigning")
++	}
++	if c := sbitls.Current(); c != nil {
++		if err = c.VerifyTokenSigner(cert); err != nil {
++			return nil, err
++		}
++	}
++	return cert, nil
++}
++
++// keyOf returns the key of the signature, after the header parameters that
++// name it (TS 33.210 cl. 6.3.3.1 and 6.3.3.4). A JWS with "crit" is refused:
++// no extension is understood here (RFC 7515 cl. 4.1.11).
++func keyOf(cert *x509.Certificate) jwt.Keyfunc {
++	return func(t *jwt.Token) (any, error) {
++		pub, _ := cert.PublicKey.(*ecdsa.PublicKey)
++		if _, ok := t.Header["crit"]; ok {
++			return nil, errors.New("crit is not supported")
++		}
++		if v, ok := t.Header["kid"]; ok {
++			kid, err := keyThumbprint(pub)
++			if err != nil {
++				return nil, err
++			}
++			if s, _ := v.(string); s != kid {
++				return nil, errors.New("unknown kid")
++			}
++		}
++		if v, ok := t.Header["x5t#S256"]; ok {
++			if s, _ := v.(string); s != certThumbprint(cert) {
++				return nil, errors.New("x5t#S256 of another certificate")
++			}
++		}
++		return pub, nil
++	}
++}
++
++// missingClaims returns the mandatory claims that the access token lacks
++// (TS 29.510 table 6.3.5.2.4-1), and those that are empty or of another type.
++func missingClaims(claims jwt.MapClaims) []string {
++	var missing []string
++	for _, name := range []string{"iss", "sub", "scope"} {
++		if s, _ := claims[name].(string); s == "" {
++			missing = append(missing, name)
++		}
++	}
++	if len(audiences(claims["aud"])) == 0 {
++		missing = append(missing, "aud")
++	}
++	if exp, _ := claims["exp"].(float64); exp == 0 {
++		missing = append(missing, "exp")
++	}
++	return missing
++}
++
++// audiences returns the "aud" claim: an NF type or a list of NF instance IDs
++// (TS 29.510 table 6.3.5.2.4-1).
++func audiences(aud any) []string {
++	switch a := aud.(type) {
++	case string:
++		if a != "" {
++			return []string{a}
++		}
++	case []any:
++		var list []string
++		for _, v := range a {
++			if s, ok := v.(string); ok && s != "" {
++				list = append(list, s)
++			}
++		}
++		return list
++	}
++	return nil
++}
++
++// checkValues compares the claims with the certificates: iss with the NF
++// instance ID of the signing certificate, aud with this NF and sub with the
++// client of the session.
++func checkValues(claims jwt.MapClaims, cert *x509.Certificate, peer *tls.ConnectionState) error {
++	id, err := sbitls.NfInstanceId(cert)
++	if err != nil {
++		return invalidToken("certificate of the access tokens: %v", err)
++	}
++	if iss, _ := claims["iss"].(string); !strings.EqualFold(iss, id) {
++		return claimMismatch("iss")
++	}
++	if c := sbitls.Current(); c != nil && !audienceMatches(audiences(claims["aud"]), c) {
++		return claimMismatch("aud")
++	}
++	sub, _ := claims["sub"].(string)
++	return checkSubject(sub, peer)
++}
++
++func audienceMatches(list []string, c *sbitls.Context) bool {
++	for _, aud := range list {
++		if strings.EqualFold(aud, c.NfInstanceId()) {
++			return true
++		}
++		for _, nfType := range c.NfTypes() {
++			if strings.EqualFold(aud, nfType) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++// checkSubject compares "sub" with the NF instance ID of the client
++// certificate: direct communication (TS 33.501 cl. 13.4.1.1.2). Without TLS,
++// there is nothing to compare.
++func checkSubject(sub string, peer *tls.ConnectionState) error {
++	cert := sbitls.PeerCertificate(peer)
++	if cert == nil {
++		return nil
++	}
++	if id, err := sbitls.NfInstanceId(cert); err != nil || !strings.EqualFold(id, sub) {
++		return claimMismatch("sub")
++	}
++	return nil
++}
++
++// CheckTokenPeer ties an access token already verified to the TLS client of
++// the request. Without a token or without TLS, there is nothing to check.
++func CheckTokenPeer(authorization string, peer *tls.ConnectionState) error {
++	if strings.TrimSpace(authorization) == "" || sbitls.PeerCertificate(peer) == nil {
++		return nil
++	}
++	raw, err := bearer(authorization)
++	if err != nil {
++		return err
++	}
++	claims := jwt.MapClaims{}
++	if _, _, err = jwt.NewParser().ParseUnverified(raw, claims); err != nil {
++		return invalidToken("access token: %v", err)
++	}
++	sub, _ := claims["sub"].(string)
++	return checkSubject(sub, peer)
++}
++
++// WriteTokenError answers a request that the check of the access token
++// refused (TS 29.500 cl. 6.7.3).
++func WriteTokenError(w http.ResponseWriter, r *http.Request, err error) {
++	var refusal *TokenError
++	if !errors.As(err, &refusal) {
++		refusal = invalidToken("%v", err)
++	}
++	problem := models.ProblemDetails{
++		Title:  http.StatusText(refusal.Status),
++		Status: int32(refusal.Status),
++		Detail: refusal.Reason,
++		Cause:  refusal.Cause,
++	}
++	for _, claim := range refusal.Claims {
++		problem.InvalidParams = append(problem.InvalidParams, models.InvalidParam{Param: claim})
++	}
++	body, jsonErr := json.Marshal(problem)
++	if jsonErr != nil {
++		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
++		return
++	}
++	w.Header().Set("WWW-Authenticate", refusal.challenge(apiUri(r)))
++	w.Header().Set("Content-Type", "application/problem+json")
++	w.WriteHeader(refusal.Status)
++	_, _ = w.Write(body)
++}
++
++// challenge is the value of the WWW-Authenticate header.
++func (e *TokenError) challenge(realm string) string {
++	value := `Bearer realm="` + realm + `"`
++	if e.Code != "" {
++		value += `, error="` + e.Code + `"`
++	}
++	if e.Scope != "" {
++		value += `, scope="` + e.Scope + `"`
++	}
++	return value
++}
++
++// apiUri is the URI of the service of a request: "<apiRoot>/<apiName>/<apiVersion>"
++// (TS 29.501 cl. 4.4.1), for the realm of the challenge.
++func apiUri(r *http.Request) string {
++	scheme := "http"
++	if r.TLS != nil {
++		scheme = "https"
++	}
++	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 3)
++	if len(parts) > 2 {
++		parts = parts[:2]
++	}
++	uri := scheme + "://" + r.Host + "/" + strings.Join(parts, "/")
++	return strings.NewReplacer(`"`, "", `\`, "").Replace(uri)
++}
+diff --git a/oauth/verify_test.go b/oauth/verify_test.go
+new file mode 100644
+index 0000000..5e5a975
+--- /dev/null
++++ b/oauth/verify_test.go
+@@ -0,0 +1,508 @@
++package oauth
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"math/big"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/golang-jwt/jwt/v5"
++
++	"github.com/free5gc/openapi/sbitls"
++)
++
++const (
++	nrfId    = "cdee1983-45ab-41a6-8f5b-6f832d5206e8"
++	amfId    = "63db01ad-fce2-4fde-8b78-3a62c60f3b8e"
++	clientId = "0383f793-0b51-4fc6-996e-a9a8bafc4ce1"
++	otherId  = "5a6d7127-edf7-4edc-960c-e4105ff023d8"
++	service  = "namf-comm"
++)
++
++var oidNfTypes = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 34}
++
++type authority struct {
++	cert *x509.Certificate
++	key  *ecdsa.PrivateKey
++	file string
++}
++
++type leafOptions struct {
++	id      string
++	nfType  string
++	serial  int64
++	signing bool
++	crlUri  string
++}
++
++func writePem(t *testing.T, file, kind string, der []byte) {
++	t.Helper()
++	if err := os.WriteFile(file, pem.EncodeToMemory(&pem.Block{Type: kind, Bytes: der}), 0o600); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func newAuthority(t *testing.T, name string) *authority {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	template := &x509.Certificate{
++		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name},
++		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
++		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	file := filepath.Join(t.TempDir(), "ca.pem")
++	writePem(t, file, "CERTIFICATE", der)
++	return &authority{cert: cert, key: key, file: file}
++}
++
++// issue returns the files of a certificate and its key.
++func (a *authority) issue(t *testing.T, o leafOptions) (certFile, keyFile string, cert *x509.Certificate) {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	uri, err := url.Parse("urn:uuid:" + o.id)
++	if err != nil {
++		t.Fatal(err)
++	}
++	template := &x509.Certificate{
++		SerialNumber: big.NewInt(o.serial), Subject: pkix.Name{CommonName: o.id},
++		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
++		KeyUsage: x509.KeyUsageDigitalSignature, URIs: []*url.URL{uri},
++	}
++	if o.crlUri != "" {
++		template.CRLDistributionPoints = []string{o.crlUri}
++	}
++	if o.signing {
++		template.UnknownExtKeyUsage = []asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 39}}
++	} else {
++		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
++	}
++	if o.nfType != "" {
++		value, marshalErr := asn1.Marshal([]string{o.nfType})
++		if marshalErr != nil {
++			t.Fatal(marshalErr)
++		}
++		// IA5String, not the PrintableString of asn1.Marshal.
++		value[2] = asn1.TagIA5String
++		template.ExtraExtensions = []pkix.Extension{{Id: oidNfTypes, Value: value}}
++	}
++	der, err := x509.CreateCertificate(rand.Reader, template, a.cert, &key.PublicKey, a.key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if cert, err = x509.ParseCertificate(der); err != nil {
++		t.Fatal(err)
++	}
++	dir := t.TempDir()
++	certFile, keyFile = filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
++	writePem(t, certFile, "CERTIFICATE", der)
++	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	writePem(t, keyFile, "PRIVATE KEY", pkcs8)
++	return certFile, keyFile, cert
++}
++
++func (a *authority) crl(t *testing.T, revoked ...*x509.Certificate) []byte {
++	t.Helper()
++	template := &x509.RevocationList{
++		Number: big.NewInt(1), ThisUpdate: time.Now().Add(-time.Minute), NextUpdate: time.Now().Add(time.Hour),
++	}
++	for _, cert := range revoked {
++		template.RevokedCertificateEntries = append(template.RevokedCertificateEntries,
++			x509.RevocationListEntry{SerialNumber: cert.SerialNumber, RevocationTime: time.Now()})
++	}
++	der, err := x509.CreateRevocationList(rand.Reader, template, a.cert, a.key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return der
++}
++
++func claimsFor(aud any) jwt.MapClaims {
++	return jwt.MapClaims{
++		"iss": nrfId, "sub": clientId, "aud": aud, "scope": service + " other",
++		"exp": time.Now().Add(time.Minute).Unix(),
++	}
++}
++
++func peerOf(cert *x509.Certificate) *tls.ConnectionState {
++	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
++}
++
++func sign(t *testing.T, s *Signer, claims jwt.MapClaims) string {
++	t.Helper()
++	token, err := s.Sign(claims)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return "Bearer " + token
++}
++
++// wantRefusal checks a refusal of TS 29.500 cl. 6.7.3.
++func wantRefusal(t *testing.T, err error, status int, code, cause string, claims ...string) {
++	t.Helper()
++	var refusal *TokenError
++	if !errors.As(err, &refusal) {
++		t.Fatalf("error %v, want a TokenError", err)
++	}
++	if refusal.Status != status || refusal.Code != code || refusal.Cause != cause {
++		t.Fatalf("refusal %+v, want status %d, code %q, cause %q", refusal, status, code, cause)
++	}
++	if len(claims) > 0 && !reflect.DeepEqual(refusal.Claims, claims) {
++		t.Fatalf("claims %v, want %v", refusal.Claims, claims)
++	}
++}
++
++// Without the TLS of the SBI, as in the test bench of free5GC: this test runs
++// before any sbitls.Init of this package.
++func TestVerifyWithoutTls(t *testing.T) {
++	if sbitls.Current() != nil {
++		t.Fatal("this test has to run first")
++	}
++	ca := newAuthority(t, "CA")
++	certFile, keyFile, _ := ca.issue(t, leafOptions{id: nrfId, nfType: "NRF", serial: 2, signing: true})
++	signer, err := NewSigner(certFile, keyFile)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = VerifyOAuth(sign(t, signer, claimsFor("ANY")), service, certFile); err != nil {
++		t.Fatalf("access token refused: %v", err)
++	}
++	if err = CheckTokenPeer(sign(t, signer, claimsFor("ANY")), nil); err != nil {
++		t.Fatalf("no TLS, nothing to check: %v", err)
++	}
++	if err = CheckTokenPeer("", peerOf(ca.cert)); err != nil {
++		t.Fatalf("no token, nothing to check: %v", err)
++	}
++}
++
++type lab struct {
++	ca       *authority
++	certFile string
++	signer   *Signer
++	client   *x509.Certificate
++	revoked  string
++	revSign  *Signer
++}
++
++func newLab(t *testing.T) *lab {
++	t.Helper()
++	l := &lab{ca: newAuthority(t, "operator CA")}
++	var crl []byte
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		_, _ = w.Write(crl)
++	}))
++	t.Cleanup(server.Close)
++	uri := server.URL + "/ca.crl"
++
++	var keyFile string
++	var err error
++	l.certFile, keyFile, _ = l.ca.issue(t, leafOptions{id: nrfId, nfType: "NRF", serial: 2, signing: true, crlUri: uri})
++	if l.signer, err = NewSigner(l.certFile, keyFile); err != nil {
++		t.Fatal(err)
++	}
++	revokedKey := ""
++	var revoked *x509.Certificate
++	l.revoked, revokedKey, revoked = l.ca.issue(t, leafOptions{id: nrfId, nfType: "NRF", serial: 3, signing: true, crlUri: uri})
++	if l.revSign, err = NewSigner(l.revoked, revokedKey); err != nil {
++		t.Fatal(err)
++	}
++	crl = l.ca.crl(t, revoked)
++
++	nfCert, nfKey, _ := l.ca.issue(t, leafOptions{id: amfId, nfType: "AMF", serial: 4, crlUri: uri})
++	if err = sbitls.Init(sbitls.Config{Certificate: nfCert, Key: nfKey, CA: l.ca.file}); err != nil {
++		t.Fatal(err)
++	}
++	_, _, l.client = l.ca.issue(t, leafOptions{id: clientId, nfType: "SMF", serial: 5, crlUri: uri})
++	return l
++}
++
++func TestVerifyAccepted(t *testing.T) {
++	l := newLab(t)
++	for name, aud := range map[string]any{
++		"NF type":          "AMF",
++		"NF type, case":    "amf",
++		"NF instance ID":   amfId,
++		"list of NF types": []string{otherId, amfId},
++	} {
++		t.Run(name, func(t *testing.T) {
++			grant, err := Verify(sign(t, l.signer, claimsFor(aud)), service, l.certFile, peerOf(l.client))
++			if err != nil {
++				t.Fatalf("access token refused: %v", err)
++			}
++			if !grant.Has("other") || grant.Has("absent") {
++				t.Fatalf("scopes %v", grant.Scopes)
++			}
++		})
++	}
++}
++
++func TestVerifyForm(t *testing.T) {
++	l := newLab(t)
++	_, err := Verify("", service, l.certFile, nil)
++	wantRefusal(t, err, http.StatusUnauthorized, "", "")
++	for _, header := range []string{"Basic abc", "Bearer", "Bearer a b", "Bearer not-a-jws"} {
++		_, err = Verify(header, service, l.certFile, nil)
++		wantRefusal(t, err, http.StatusUnauthorized, errorInvalidToken, "")
++	}
++}
++
++func TestVerifySignature(t *testing.T) {
++	l := newLab(t)
++	claims := claimsFor("AMF")
++	valid := sign(t, l.signer, claims)
++
++	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
++	if err != nil {
++		t.Fatal(err)
++	}
++	rs512, err := jwt.NewWithClaims(jwt.SigningMethodRS512, claims).SignedString(rsaKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	none, err := jwt.NewWithClaims(jwt.SigningMethodNone, claims).SignedString(jwt.UnsafeAllowNoneSignatureType)
++	if err != nil {
++		t.Fatal(err)
++	}
++	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	withHeader := func(name, value string) string {
++		token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
++		token.Header[name] = value
++		signed, signErr := token.SignedString(l.signer.key)
++		if signErr != nil {
++			t.Fatal(signErr)
++		}
++		return signed
++	}
++	otherSignature, err := jwt.NewWithClaims(jwt.SigningMethodES256, claims).SignedString(otherKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	mid := len(valid) - 2
++	replacement := "A"
++	if valid[mid] == 'A' {
++		replacement = "B"
++	}
++	for name, token := range map[string]string{
++		"RS512":          "Bearer " + rs512,
++		"none":           "Bearer " + none,
++		"another key":    "Bearer " + otherSignature,
++		"tampered":       valid[:mid] + replacement + valid[mid+1:],
++		"unknown kid":    "Bearer " + withHeader("kid", "unknown"),
++		"other x5t#S256": "Bearer " + withHeader("x5t#S256", "unknown"),
++		"crit":           "Bearer " + withHeader("crit", "exp"),
++	} {
++		t.Run(name, func(t *testing.T) {
++			_, err := Verify(token, service, l.certFile, nil)
++			wantRefusal(t, err, http.StatusUnauthorized, errorInvalidToken, "")
++		})
++	}
++}
++
++func TestVerifySigningCertificate(t *testing.T) {
++	l := newLab(t)
++	token := sign(t, l.signer, claimsFor("AMF"))
++
++	other := newAuthority(t, "another CA")
++	otherFile, _, _ := other.issue(t, leafOptions{id: nrfId, serial: 2, signing: true})
++	nfFile, _, _ := l.ca.issue(t, leafOptions{id: nrfId, nfType: "NRF", serial: 6})
++	for name, file := range map[string]string{
++		"of another CA":                       otherFile,
++		"without oauthAccessTokenSigning":     nfFile,
++		"missing":                             filepath.Join(t.TempDir(), "absent.pem"),
++		"revoked, with the token of this key": l.revoked,
++	} {
++		t.Run(name, func(t *testing.T) {
++			if file == l.revoked {
++				token = sign(t, l.revSign, claimsFor("AMF"))
++			}
++			_, err := Verify(token, service, file, nil)
++			wantRefusal(t, err, http.StatusUnauthorized, errorInvalidToken, "")
++		})
++	}
++}
++
++func TestVerifyClaims(t *testing.T) {
++	l := newLab(t)
++	for _, claim := range []string{"iss", "sub", "aud", "scope", "exp"} {
++		t.Run(claim, func(t *testing.T) {
++			claims := claimsFor("AMF")
++			delete(claims, claim)
++			_, err := Verify(sign(t, l.signer, claims), service, l.certFile, nil)
++			wantRefusal(t, err, http.StatusUnauthorized, errorInvalidToken, causeClaimMissing, claim)
++		})
++	}
++	t.Run("all", func(t *testing.T) {
++		_, err := Verify(sign(t, l.signer, jwt.MapClaims{"jti": "x"}), service, l.certFile, nil)
++		wantRefusal(t, err, http.StatusUnauthorized, errorInvalidToken, causeClaimMissing, "iss", "sub", "scope", "aud", "exp")
++	})
++	t.Run("expired", func(t *testing.T) {
++		claims := claimsFor("AMF")
++		claims["exp"] = time.Now().Unix()
++		_, err := Verify(sign(t, l.signer, claims), service, l.certFile, nil)
++		wantRefusal(t, err, http.StatusUnauthorized, errorInvalidToken, "")
++	})
++}
++
++func TestVerifyValues(t *testing.T) {
++	l := newLab(t)
++	cases := map[string]struct {
++		change func(jwt.MapClaims)
++		claim  string
++	}{
++		"iss":              {func(c jwt.MapClaims) { c["iss"] = otherId }, "iss"},
++		"aud":              {func(c jwt.MapClaims) { c["aud"] = "UDM" }, "aud"},
++		"aud of an NF":     {func(c jwt.MapClaims) { c["aud"] = []string{otherId} }, "aud"},
++		"sub":              {func(c jwt.MapClaims) { c["sub"] = otherId }, "sub"},
++		"aud before sub":   {func(c jwt.MapClaims) { c["aud"] = "UDM"; c["sub"] = otherId }, "aud"},
++		"iss before aud":   {func(c jwt.MapClaims) { c["iss"] = otherId; c["aud"] = "UDM" }, "iss"},
++		"sub before scope": {func(c jwt.MapClaims) { c["sub"] = otherId; c["scope"] = "other" }, "sub"},
++	}
++	for name, tc := range cases {
++		t.Run(name, func(t *testing.T) {
++			claims := claimsFor("AMF")
++			tc.change(claims)
++			_, err := Verify(sign(t, l.signer, claims), service, l.certFile, peerOf(l.client))
++			wantRefusal(t, err, http.StatusForbidden, errorInvalidToken, causeClaimMismatch, tc.claim)
++		})
++	}
++}
++
++func TestVerifyScope(t *testing.T) {
++	l := newLab(t)
++	claims := claimsFor("AMF")
++	claims["scope"] = "other"
++	_, err := Verify(sign(t, l.signer, claims), service, l.certFile, nil)
++	wantRefusal(t, err, http.StatusForbidden, errorInsufficientScope, "")
++	var refusal *TokenError
++	if !errors.As(err, &refusal) || refusal.Scope != service {
++		t.Fatalf("scope of the refusal: %+v", refusal)
++	}
++}
++
++func TestCheckTokenPeer(t *testing.T) {
++	l := newLab(t)
++	valid := sign(t, l.signer, claimsFor("AMF"))
++	if err := CheckTokenPeer(valid, peerOf(l.client)); err != nil {
++		t.Fatalf("the client of the token refused: %v", err)
++	}
++	claims := claimsFor("AMF")
++	claims["sub"] = otherId
++	wantRefusal(t, CheckTokenPeer(sign(t, l.signer, claims), peerOf(l.client)),
++		http.StatusForbidden, errorInvalidToken, causeClaimMismatch, "sub")
++
++	// A client certificate without an NF instance ID, such as the one of an
++	// API invoker.
++	invoker := &x509.Certificate{Subject: pkix.Name{CommonName: clientId}}
++	wantRefusal(t, CheckTokenPeer(valid, peerOf(invoker)), http.StatusForbidden, errorInvalidToken, causeClaimMismatch, "sub")
++}
++
++func TestWriteTokenError(t *testing.T) {
++	const realm = `Bearer realm="http://amf.example:8000/namf-comm/v1"`
++	cases := map[string]struct {
++		err       error
++		status    int
++		challenge string
++		cause     string
++		params    []string
++	}{
++		"no token":      {&TokenError{Status: 401, Reason: "x"}, 401, realm, "", nil},
++		"invalid":       {invalidToken("expired"), 401, realm + `, error="invalid_token"`, "", nil},
++		"another error": {errors.New("x"), 401, realm + `, error="invalid_token"`, "", nil},
++		"missing": {&TokenError{Status: 401, Code: errorInvalidToken, Cause: causeClaimMissing, Claims: []string{"sub"}},
++			401, realm + `, error="invalid_token"`, causeClaimMissing, []string{"sub"}},
++		"mismatch": {claimMismatch("aud"), 403, realm + `, error="invalid_token"`, causeClaimMismatch, []string{"aud"}},
++		"scope":    {InsufficientScope("namf-comm"), 403, realm + `, error="insufficient_scope", scope="namf-comm"`, "", nil},
++	}
++	for name, tc := range cases {
++		t.Run(name, func(t *testing.T) {
++			r := httptest.NewRequest(http.MethodPost, "http://amf.example:8000/namf-comm/v1/ue-contexts/x", nil)
++			w := httptest.NewRecorder()
++			WriteTokenError(w, r, tc.err)
++			if w.Code != tc.status {
++				t.Fatalf("status %d", w.Code)
++			}
++			if got := w.Header().Get("WWW-Authenticate"); got != tc.challenge {
++				t.Fatalf("challenge %s", got)
++			}
++			if got := w.Header().Get("Content-Type"); got != "application/problem+json" {
++				t.Fatalf("Content-Type %s", got)
++			}
++			var pd struct {
++				Status        int    `json:"status"`
++				Cause         string `json:"cause"`
++				InvalidParams []struct {
++					Param string `json:"param"`
++				} `json:"invalidParams"`
++			}
++			if err := json.Unmarshal(w.Body.Bytes(), &pd); err != nil {
++				t.Fatal(err)
++			}
++			var params []string
++			for _, p := range pd.InvalidParams {
++				params = append(params, p.Param)
++			}
++			if pd.Status != tc.status || pd.Cause != tc.cause || !reflect.DeepEqual(params, tc.params) {
++				t.Fatalf("problem %+v", pd)
++			}
++		})
++	}
++}
++
++func TestSigner(t *testing.T) {
++	l := newLab(t)
++	if l.signer.Issuer() != nrfId {
++		t.Fatalf("issuer %s", l.signer.Issuer())
++	}
++	raw := strings.TrimPrefix(sign(t, l.signer, claimsFor("AMF")), "Bearer ")
++	token, _, err := jwt.NewParser().ParseUnverified(raw, jwt.MapClaims{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if token.Header["alg"] != tokenAlg || token.Header["typ"] != "JWT" {
++		t.Fatalf("header %v", token.Header)
++	}
++	if token.Header["kid"] != l.signer.kid || token.Header["x5t#S256"] != l.signer.x5t {
++		t.Fatalf("header %v", token.Header)
++	}
++
++	nfFile, nfKey, _ := l.ca.issue(t, leafOptions{id: nrfId, nfType: "NRF", serial: 7})
++	if _, err = NewSigner(nfFile, nfKey); err == nil {
++		t.Fatal("a certificate without oauthAccessTokenSigning signs access tokens")
++	}
++}
+diff --git a/sbitls/identity.go b/sbitls/identity.go
+index 3351bea..198c3e2 100644
+--- a/sbitls/identity.go
++++ b/sbitls/identity.go
+@@ -11,6 +11,9 @@ import (
+ // oidNfTypes is id-pe-nftype (RFC 9310 cl. 3).
+ var oidNfTypes = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 34}
+ 
++// oidTokenSigning is id-kp-oauthAccessTokenSigning (RFC 9509 cl. 3).
++var oidTokenSigning = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 39}
++
+ // NfInstanceId returns the NF instance ID of a certificate: the URI-ID
+ // "urn:uuid:<id>" of the subjectAltName (TS 33.310 cl. 6.1.3c.3). A certificate
+ // with more than one is refused: it has no single identity.
+@@ -50,6 +53,17 @@ func NfTypes(cert *x509.Certificate) ([]string, error) {
+ 	return nil, errors.New("certificate without the NFTypes extension")
+ }
+ 
++// SignsTokens reports whether a certificate has the extended key usage of the
++// access tokens (TS 33.310 table 6.1.3c.3-2).
++func SignsTokens(cert *x509.Certificate) bool {
++	for _, oid := range cert.UnknownExtKeyUsage {
++		if oid.Equal(oidTokenSigning) {
++			return true
++		}
++	}
++	return false
++}
++
+ // PeerCertificate returns the certificate of the other end of a connection, nil
+ // without TLS.
+ func PeerCertificate(state *tls.ConnectionState) *x509.Certificate {
+diff --git a/sbitls/sbitls.go b/sbitls/sbitls.go
+index bed3691..4c24174 100644
+--- a/sbitls/sbitls.go
++++ b/sbitls/sbitls.go
+@@ -277,6 +277,20 @@ func (c *Context) verifyPeer(state tls.ConnectionState) error {
+ 	return c.crls.check(peer, issuer)
+ }
+ 
++// VerifyTokenSigner checks the certificate that signs the access tokens of the
++// NRF: the chain to the CA of the operator, the validity and the CRL
++// (TS 33.310 cl. 6.3.1).
++func (c *Context) VerifyTokenSigner(cert *x509.Certificate) error {
++	chains, err := cert.Verify(x509.VerifyOptions{
++		Roots:     c.roots,
++		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
++	})
++	if err != nil {
++		return err
++	}
++	return c.crls.check(cert, chains[0][1])
++}
++
+ // IsExtraClient reports whether the client of a connection came with a
+ // certificate of Config.ExtraClientCA.
+ func IsExtraClient(state *tls.ConnectionState) bool {

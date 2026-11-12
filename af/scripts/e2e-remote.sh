@@ -6,7 +6,15 @@
 #   --keep  leave free5GC, the gNB and the UE running at the end
 #
 # Steps:
-#   R1  free5GC (run.sh -aanf), gNB, UE in its namespace, subscriber provisioned
+#   R1  CRL signed again; free5GC (run.sh -crl -aanf -ccf), gNB, UE in its
+#       namespace, subscriber provisioned; the onboarding credential of the
+#       CAPIF core function (CCF) issued for the AF machine
+#   R1s mutual TLS of the SBI: each port of the SBI and the internal server
+#       of the CCF, the identity of the certificates in the access tokens and
+#       in the policies, the profiles
+#       of the certificates, and the seed tool against a server of OpenSSL;
+#       the Retrieve Key Request of the NRF, an old NEF profile that does not
+#       block a token (F27) and the FQDN required with https (F24)
 #   R2  registration; A-KID of the UE = AUSF = AAnF; Ua* from the UE
 #   R2k AKMA key service of the ME: K_AF only to the application of the AF_ID
 #   R2t Ua* from the UE over the TLS profiles: K.2 in TLS 1.3 and 1.2, PSK
@@ -16,18 +24,26 @@
 #   R2o Ua* from the UE over OSCORE: POST /akma, requests protected with the
 #       context, renewal (RFC 8613 Appendix B.2), a new POST per request
 #       -> sync A (checks from the AF machine)
+#   R2n Ua* from the UE to the AFs outside the operator network (NEF) and
+#       with anonymous access, started in group A; the User-Agent of the AUSF
+#       and of the NEF at the AAnF, the NEF without anonInd, the reuse of the
+#       discovery of the AAnF
+#   R2c Ua* from the UE to the AF outside the operator network as API
+#       invoker of CAPIF (TS 29.522 cl. 7.2), started in group A
 #   R3  new authentication: new A-KID; Ua* with it; Ua* with the previous
 #       A-KID and K_AF, still valid at the AF until expiry
 #       -> sync B
-#   R4  AAnF down during a primary authentication: the authentication
-#       succeeds and the registration in the AAnF fails (TS 33.535 cl. 6.1)
+#   R4  the heart-beat of the AAnF; AAnF down during a primary
+#       authentication: the authentication succeeds and the registration in
+#       the AAnF fails (TS 33.535 cl. 6.1)
 #   R5  subscriber without AKMA subscription, then restored
 #   R6  remove-context
 #   R6r refresh of K_AKMA by the AAnF (TS 33.535 cl. 6.4.4): the AAnF, with
 #       kakmaRefresh 20s, asks the UDM for a new primary authentication on a
 #       K_AF request; the AMF re-authenticates the registered UE; new A-KID
 #       -> sync C
-#   R7  no key in the logs; logs copied; stop
+#   R7  no key, access token, credential or private key in the logs, and no
+#       file of TLS secrets; logs copied; stop
 #
 # Results: PASS/FAIL lines in <run>/remote-results.txt; A-KIDs in <run>/state.
 set -uo pipefail
@@ -39,7 +55,9 @@ f5="$HOME/free5gc"
 uer="$HOME/UERANSIM"
 netns="$repo/af/scripts/ue-netns.sh"
 seed="$HOME/akma-tools/seed"
-nrf="http://127.0.0.10:8000"
+entities="$repo/free5gc/config/sba-entities.conf"
+sba="$f5/cert/sba" # the certificates of the SBI
+nrf="https://$(awk '$1 == "nf" && $2 == "nrf" { print $4 ":" $6 }' "$entities")"
 supi="imsi-208930000000001"
 fqdn="af1.akma.example"
 af_ip="${AF_IP:-192.168.16.129}" # the AF machine; the extra AFs of the NEF group listen there
@@ -47,12 +65,22 @@ ca="${CA:-$repo/af/build/cert/ca.pem}" # the test CA of the certificate of the A
 # Where the AAnF listens: sbi.bindingIPv4 and sbi.port of its configuration
 aanf="$(sed -n 's/^ *bindingIPv4: *\([0-9.]*\).*/\1/p' "$f5/config/aanfcfg.yaml" | head -1):$(
     sed -n 's/^ *port: *\([0-9]*\).*/\1/p' "$f5/config/aanfcfg.yaml" | head -1)"
+# Its name and apiRoot: sbi.fqdn of its configuration
+aanf_name="$(sed -n 's/^ *fqdn: *\([^ #]*\).*/\1/p' "$f5/config/aanfcfg.yaml" | head -1)"
+aanf_uri="https://$aanf_name:${aanf##*:}"
+# Where the service of the CRL listens
+crl="$(sed -n 's/^ *bindingIPv4: *\([0-9.]*\).*/\1/p' "$f5/config/crlcfg.yaml" | head -1):$(
+    sed -n 's/^ *port: *\([0-9]*\).*/\1/p' "$f5/config/crlcfg.yaml" | head -1)"
+# Where the CCF listens for the API invokers: capif1e of its configuration
+ccf="$(sed -n '/^  capif1e:/,/^  [a-z]/s/^ *bindingIPv4: *\([0-9.]*\).*/\1/p' "$f5/config/ccfcfg.yaml" | head -1):$(
+    sed -n '/^  capif1e:/,/^  [a-z]/s/^ *port: *\([0-9]*\).*/\1/p' "$f5/config/ccfcfg.yaml" | head -1)"
 
 mkdir -p "$run"
 results="$run/remote-results.txt"
 state="$run/state"
 : >"$results"
 : >"$state"
+: >"$run/.started"
 
 pass() { echo "PASS $1 $2" | tee -a "$results"; }
 fail() { echo "FAIL $1 $2" | tee -a "$results"; }
@@ -93,6 +121,29 @@ sync_point() {
         sleep 1
     done
     fail "sync-$1" "the AF machine did not finish its checks in 15 min"
+}
+
+# sba_pki <crl|check>: make-sba-certs.sh on the certificates of the SBI
+sba_pki() { "$repo/free5gc/scripts/make-sba-certs.sh" "$sba" "$entities" "$1" >"$run/sba-$1.out" 2>&1; }
+# seed_against <certificate> <key> <name of the outputs>: the seed tool, a client
+# of the SBI, against a server of OpenSSL with that certificate, at the name of
+# the AAnF.
+seed_against() {
+    local pid
+    timeout 15 openssl s_server -accept "${aanf%:*}:8097" -cert "$1" -key "$2" -cert2 "$1" -key2 "$2" \
+        -servername "$aanf_name" -www -naccept 1 >"$run/s-server-$3.out" 2>&1 </dev/null &
+    pid=$!
+    sleep 1
+    "$seed" retrieve --aanf "https://$aanf_name:8097" --af-id "$fqdn.FF00000001" --akid none >"$run/s-seed-$3.out" 2>&1
+    wait "$pid"
+}
+# other_ca_certificate: a server certificate with the name of the AAnF, signed by
+# the other CA of the negative tests: the client can only refuse it for the CA.
+other_ca_certificate() {
+    printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\n' "$aanf_name" >"$run/s-other-ca.ext"
+    openssl req -new -key "$sba/other-ca.key" -subj "/CN=$aanf_name" 2>/dev/null |
+        openssl x509 -req -CA "$sba/other-ca-ca.pem" -CAkey "$sba/other-ca-ca.key" -set_serial 1 -days 1 \
+            -extfile "$run/s-other-ca.ext" -out "$run/s-other-ca.pem" 2>/dev/null
 }
 
 ue_akid() { grep -ao 'AKMA key material derived, A-KID\[[^]]*\]' "$run/ue.log" | tail -1 | sed 's/.*A-KID\[//; s/\]$//'; }
@@ -150,23 +201,102 @@ check R1.gnb-link "gNB radio link on the veth (linkIp: 10.100.0.1)" \
 "$repo/free5gc/scripts/provision-akma-subscriber.sh" "$supi" 0000 >"$run/provision.out" 2>&1
 check R1.subscriber "AKMA subscription of $supi provisioned (akmaAllowed, routingId 0000)" \
     grep -q "routingId: '0000'" "$run/provision.out"
+check R1.crl-signed "CRL of the operator signed for this run (TS 33.310 cl. 6.1a)" sba_pki crl
+
+# Only the NFs of this run at the NRF. A test bench that stops without
+# deregistering leaves its profiles in MongoDB; with nrf/0006 they no longer
+# block a token (F27, checked in G05), but a clean NRF keeps the run alone.
+no_old_profiles() {
+    [ "$(mongosh --quiet mongodb://127.0.0.1:27017/free5gc \
+        --eval 'db.NfProfile.deleteMany({}); db.NfProfile.countDocuments({})')" = 0 ]
+}
+check R1.profiles "no NF profile of an earlier run at the NRF" no_old_profiles
 
 # free5GC in a process group of its own, which the stop at the end signals;
 # in the same terminal, for the sudo of run.sh.
 set -m
-./run.sh -aanf >"$run/run.out" 2>&1 </dev/null &
+./run.sh -crl -aanf -ccf >"$run/run.out" 2>&1 </dev/null &
 runpid=$!
 set +m
 wait_for "$run/run.out" "log path:" 20
 f5log="$f5/$(sed -n 's/^log path: \.\///p' "$run/run.out" | head -1)free5gc.log"
 setstate FREE5GC_LOG "$f5log"
+check R1.crl "service of the CRL up on $crl (TS 33.310 cl. 7.1)" \
+    wait_for "$f5log" "msg=\"Start CRL service (http, listen on $crl)\" CAT=\"Main\" NF=\"CRL\"" 10
 check R1.free5gc "free5GC up with the AAnF registered at the NRF" \
     wait_for "$f5log" "msg=\"Start SBI server (listen on $aanf)\" CAT=\"SBI\" NF=\"AANF\"" 90
+check R1.ccf "CCF up, CAPIF-1e over HTTPS on $ccf" \
+    wait_for "$f5log" "msg=\"Start CAPIF-1e server (https, listen on $ccf)\" CAT=\"SBI\" NF=\"CCF\"" 30
+check R1.nef-published "the NEF published 3gpp-akma at the CCF (TS 29.222 cl. 5.3.2.2)" \
+    wait_for "$f5log" "3gpp-akma published at the CCF as" 30
+# The enrolment information of the AF machine (TS 33.122 cl. 6.1 step 1): the
+# CA of the CCF and an onboarding credential valid for the run.
+cp "$f5/cert/ccf-ca.pem" "$run/ccf-ca.pem"
+"$f5/bin/ccf" credential -c "$f5/config/ccfcfg.yaml" --profile af1-external --validity 2h \
+    >"$run/af1-external.jwt" 2>"$run/ccf-credential.out"
+check R1.credential "onboarding credential of the profile af1-external issued" test -s "$run/af1-external.jwt"
 
 "$uer/build/nr-gnb" -c "$uer/config/free5gc-gnb.yaml" >"$run/gnb.log" 2>&1 </dev/null &
 check R1.gnb "gNB NG Setup" wait_for "$run/gnb.log" "NG Setup procedure is successful" 30
 : >"$run/ue.log"
 check R1.ue "UE registered with a PDU session, in its namespace" start_ue
+
+# ---------------------------------------------------------------- R1s
+# The mutual TLS of the SBI (TS 33.501 cl. 13.1.0), with tools independent of
+# the Go code of the repository: the Python of sbi_tls.py at each port of the
+# SBI and of sbi_token.py at the NRF, at the AAnF and at the CCF, and OpenSSL as
+# the server of the seed tool. BSF: not started in this laboratory.
+step "R1s TLS of the SBI"
+python3 -I "$repo/af/scripts/negative/sbi_tls.py" "$entities" "$sba" seed-af free5gc \
+    nrf amf smf udr pcf udm nssf ausf chf nef aanf ccf-internal | tee -a "$results"
+python3 -I "$repo/af/scripts/negative/sbi_token.py" "$entities" "$sba" | tee -a "$results"
+check S05 "every certificate matches its profile (TS 33.310 cl. 6.1.3c.3, 6.1.4a, 6.1.3a)" sba_pki check
+seed_against "$sba/udm.pem" "$sba/udm.key" udm
+check S08.name "the client refuses the certificate of the UDM at the name of the AAnF (TS 33.310 cl. 6.1.3c.3)" \
+    grep -q "certificate is valid for" "$run/s-seed-udm.out"
+other_ca_certificate
+seed_against "$run/s-other-ca.pem" "$sba/other-ca.key" other-ca
+check S08.ca "the client refuses a server certificate of another CA, with the right name (TS 33.310 cl. 6.1.3c.3)" \
+    grep -q "unknown authority" "$run/s-seed-other-ca.out"
+seed_against "$sba/aanf.pem" "$sba/aanf.key" aanf
+check S09 "the client sends the name of the server in the SNI (RFC 6066 cl. 3)" \
+    grep -aqF "Hostname in TLS extension: \"$aanf_name\"" "$run/s-server-aanf.out"
+
+# F27: an old NEF profile without 3gpp-akma, put first in
+# MongoDB, where the NRF looked at it alone, no longer blocks the token for
+# 3gpp-akma (TS 33.501 cl. 13.4.1.1.2 step 2).
+stale_nef_profile() {
+    local stale=0d6b5a4c-3f2e-4d1c-8b0a-9f8e7d6c5b4a db=mongodb://127.0.0.1:27017/free5gc rc
+    mongosh --quiet "$db" --eval "const nef = db.NfProfile.findOne({nfType: 'NEF'});
+        db.NfProfile.deleteOne({_id: nef._id});
+        db.NfProfile.insertOne({nfInstanceId: '$stale', nfType: 'NEF', nfStatus: 'REGISTERED', nfServices: []});
+        db.NfProfile.insertOne(nef);" >"$run/g05.out" 2>&1 || return 1
+    [ "$(mongosh --quiet "$db" --eval "db.NfProfile.find({nfType: 'NEF'}).limit(1).next().nfInstanceId")" = "$stale" ] ||
+        return 1
+    "$seed" token --nrf "$nrf" --target NEF --scope 3gpp-akma >/dev/null 2>>"$run/g05.out"
+    rc=$?
+    mongosh --quiet "$db" --eval "db.NfProfile.deleteOne({nfInstanceId: '$stale'})" >/dev/null 2>&1
+    return $rc
+}
+check G05 "an old NEF profile without 3gpp-akma, first in MongoDB, does not block the token (F27)" stale_nef_profile
+
+# F24: with https, no NF starts without its FQDN (TS 29.510
+# table 6.1.6.2.2-1 NOTE 1). The configuration without the fqdn lines.
+# The NF has to end by itself, before the timeout (exit status 124), with the
+# message: the NFs of free5GC log a start error and exit with status 0.
+without_fqdn() { # binary configuration message
+    local cfg="$run/no-fqdn-$(basename "$2")" rc
+    sed '/^ *fqdn: /d' "$2" >"$cfg"
+    timeout 15 "$1" -c "$cfg" >"$cfg.out" 2>&1
+    rc=$?
+    [ "$rc" -ne 124 ] && grep -aqF "$3" "$cfg.out"
+}
+check G06.aanf "the AAnF does not start with https and without sbi.fqdn" \
+    without_fqdn "$f5/bin/aanf" "$f5/config/aanfcfg.yaml" "sbi.fqdn is required with https"
+check G06.nrf "the NRF does not start with https and without sbi.fqdn" \
+    without_fqdn "$f5/bin/nrf" "$f5/config/nrfcfg.yaml" "sbi.fqdn is required with https"
+check G06.ccf "the CCF does not start with TLS on CAPIF-3/4 and without internal.fqdn" \
+    without_fqdn "$f5/bin/ccf" "$f5/config/ccfcfg.yaml" "fqdn is required with TLS"
 
 # ---------------------------------------------------------------- R2
 step "R2 registration and Ua* from the UE"
@@ -305,6 +435,32 @@ check R2n.nef-psk-relayed "the NEF relays the K_AF of the AF_ID of the PSK profi
     grep -aqF "K_AF for A-KID $akid1 relayed to AF_ID $fqdn.0100000007" "$f5log"
 check R2n.nef-no-supi "no SUPI in the AKMA lines of the NEF (cl. 6.3 step 5)" \
     bash -c '! grep -a "CAT=\"AKMA\" NF=\"NEF\"" "$1" | grep -q "imsi-"' _ "$f5log"
+# The NEF asks with Naanf_AKMA_ApplicationKey_Get, without
+# anonInd, even for the anonymous AF (TS 33.535 cl. 6.3 step 3): the AAnF
+# gives it the SUPI, which the NEF keeps (R2n.nef-no-supi).
+check G09 "the NEF never asks the AAnF with anonInd: every K_AF through the NEF with the SUPI" \
+    bash -c 'grep -aF "through the NEF at" "$1" | grep -q . && ! grep -aF "through the NEF at" "$1" |
+        grep -qF "without the SUPI"' _ "$f5log"
+# The NF type of the consumers, in the User-Agent, and
+# 3gpp-Sbi-NF-Peer-Info (TS 29.500 table 5.2.2.2-1 and cl. 5.2.3.2.21).
+check G08.ausf "the AUSF tells its NF type to the AAnF: User-Agent AUSF-<NF instance>" \
+    grep -aqE "register-anchorkey, User-Agent AUSF-[0-9a-f-]{36}, 3gpp-Sbi-NF-Peer-Info srcinst=" "$f5log"
+check G08.nef "the NEF tells its NF type to the AAnF: User-Agent NEF-<NF instance>" \
+    grep -aqE "retrieve-applicationkey, User-Agent NEF-[0-9a-f-]{36}, 3gpp-Sbi-NF-Peer-Info srcinst=" "$f5log"
+# The NEF reuses the AAnF found at the NRF during the
+# validity period of the result (TS 29.510 cl. 5.3.2.2.1).
+check G11 "the NEF reuses the result of the discovery of the AAnF" \
+    bash -c 'grep -a "NF=\"NEF\"" "$1" | grep -qF "(search result reused)"' _ "$f5log"
+
+# ---------------------------------------------------------------- R2c
+# The AF machine has started, in group A, an AF outside the operator network
+# as API invoker of CAPIF (8086).
+step "R2c AF outside the operator network as API invoker of CAPIF"
+ua -connect "$af_ip:8086" -n 1 >"$run/ua-capif.out" 2>&1
+check R2c.ua-capif "Ua* with the AF as API invoker, K_AF through the NEF with the token of the CCF (TS 29.522 cl. 7.2)" \
+    grep -q "session established (nc 00000001)" "$run/ua-capif.out"
+check R2c.nef-capif "the NEF accepted the access token of the CCF for AF_ID $fqdn.FF00000001" \
+    grep -aqF "accepted for AF_ID $fqdn.FF00000001" "$f5log"
 
 # ---------------------------------------------------------------- R3
 step "R3 new primary authentication"
@@ -336,6 +492,9 @@ sync_point B
 
 # ---------------------------------------------------------------- R4
 step "R4 AAnF down during a primary authentication"
+# F29: the heart-beat of the AAnF (TS 29.510 cl. 5.2.2.3.2), sent
+# at the interval of its registration, 60 s, before it is stopped.
+check G07 "the AAnF sends its heart-beat to the NRF" wait_for "$f5log" "Heart-beat sent to the NRF" 70
 failed_before="$(count "$f5log" "Naanf_AKMA_AnchorKey_Register for $supi failed")"
 pkill -INT -x aanf
 for ((i = 0; i < 15; i++)); do pgrep -x aanf >/dev/null || break; sleep 1; done
@@ -374,9 +533,9 @@ check R5.ua-restored "Ua* again with the restored subscription" grep -q "session
 
 # ---------------------------------------------------------------- R6
 step "R6 remove-context"
-"$seed" remove --nrf "$nrf" --aanf "http://$aanf" --supi "$supi" >"$run/remove-1.out" 2>&1
+"$seed" remove --nrf "$nrf" --aanf "$aanf_uri" --supi "$supi" >"$run/remove-1.out" 2>&1
 check R6.removed "Naanf_AKMA_ContextRemove: removed (204)" grep -q "^removed" "$run/remove-1.out"
-"$seed" remove --nrf "$nrf" --aanf "http://$aanf" --supi "$supi" >"$run/remove-2.out" 2>&1
+"$seed" remove --nrf "$nrf" --aanf "$aanf_uri" --supi "$supi" >"$run/remove-2.out" 2>&1
 check R6.not-found "remove-context again: 404 AKMA_CONTEXT_NOT_FOUND" \
     grep -q "404 (AKMA_CONTEXT_NOT_FOUND)" "$run/remove-2.out"
 
@@ -460,6 +619,13 @@ cp "$f5log" "$run/free5gc.log"
 for f in free5gc.log ue.log gnb.log; do
     check "R7.no-key-$f" "no 64-hexadecimal string in $f" bash -c "! grep -aEq '[0-9a-fA-F]{64}' '$run/$f'"
 done
+check CP20.free5gc "no access token, onboarding credential or private key in the log of free5GC (CCF, NEF)" \
+    bash -c '! grep -aqE "eyJ[A-Za-z0-9_-]{8,}" "$1" && ! grep -aqF "PRIVATE KEY" "$1"' _ "$run/free5gc.log"
+check S19.free5gc "no private key or TLS secret in the logs of free5GC, the gNB and the UE" \
+    bash -c '! grep -aqE "PRIVATE KEY|_TRAFFIC_SECRET|CLIENT_RANDOM|EXPORTER_SECRET" "$@"' _ \
+    "$run/free5gc.log" "$run/gnb.log" "$run/ue.log"
+check S19.key-log "no file of TLS secrets written in this run (F22)" \
+    bash -c '[ -z "$(find "$1" -name "*sslkey*" -size +0 -newer "$2" 2>/dev/null)" ]' _ "$f5" "$run/.started"
 
 if [ "$keep" != --keep ]; then
     step "stop"
@@ -468,6 +634,8 @@ if [ "$keep" != --keep ]; then
     sudo kill -INT -- "-$runpid" 2>/dev/null
     for ((i = 0; i < 30; i++)); do kill -0 "$runpid" 2>/dev/null || break; sleep 1; done
     pkill -INT -x aanf
+    pkill -INT -x ccf
+    pkill -INT -x crl
     sleep 2
     sudo ./force_kill.sh >/dev/null 2>&1
     echo "free5GC, gNB and UE stopped; the UE namespace and the N6 rules are kept"

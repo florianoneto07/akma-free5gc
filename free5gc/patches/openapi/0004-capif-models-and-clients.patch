@@ -1,0 +1,2779 @@
+diff -ruN a/capif/AEFSecurity/api_check_authentication_request.go b/capif/AEFSecurity/api_check_authentication_request.go
+--- a/capif/AEFSecurity/api_check_authentication_request.go
++++ b/capif/AEFSecurity/api_check_authentication_request.go
+@@ -0,0 +1,67 @@
++/*
++ * AEF_Security_API
++ *
++ * API for AEF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package AEFSecurity
++
++import (
++	"context"
++	"net/http"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type CheckAuthenticationRequestApiService service
++
++// CheckAuthReqRequest
++type CheckAuthReqRequest struct {
++	CheckAuthenticationReq *models.CapifCheckAuthenticationReq
++}
++
++func (r *CheckAuthReqRequest) SetCheckAuthenticationReq(CheckAuthenticationReq models.CapifCheckAuthenticationReq) {
++	r.CheckAuthenticationReq = &CheckAuthenticationReq
++}
++
++type CheckAuthReqResponse struct {
++	CheckAuthenticationRsp models.CapifCheckAuthenticationRsp
++}
++
++/*
++CheckAuthReq asks an API exposing function to make sure it has the data to
++authenticate the API invoker (Initiate_Authentication):
++POST {apiRoot}/aef-security/v1/check-authentication (TS 29.222 clauses
++6.2.2.2 and 9.1.2A.2).
++
++@return CheckAuthReqResponse
++*/
++func (a *CheckAuthenticationRequestApiService) CheckAuthReq(
++	ctx context.Context, request *CheckAuthReqRequest,
++) (*CheckAuthReqResponse, error) {
++	var localVarReturnValue CheckAuthReqResponse
++
++	body, resp, err := do(ctx, a.client.cfg, http.MethodPost, "/check-authentication",
++		request.CheckAuthenticationReq, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 200 {
++		err = openapi.Deserialize(&localVarReturnValue.CheckAuthenticationRsp, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in CheckAuthReq", resp.StatusCode)
++}
+diff -ruN a/capif/AEFSecurity/api_common.go b/capif/AEFSecurity/api_common.go
+--- a/capif/AEFSecurity/api_common.go
++++ b/capif/AEFSecurity/api_common.go
+@@ -0,0 +1,99 @@
++/*
++ * AEF_Security_API
++ *
++ * API for AEF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package AEFSecurity
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++// OperationError carries the error representation of a CAPIF operation: a
++// ProblemDetails for the error status codes of TS 29.122 table 5.2.6-1
++// (TS 29.222 clause 7.7), or the Location header of a 307/308 redirection
++// (TS 29.122 clause 5.2.10).
++type OperationError struct {
++	Location       string
++	ProblemDetails models.ProblemDetails
++}
++
++// mandatoryErrorCodes are the error status codes of TS 29.122 table 5.2.6-1,
++// plus 414 of the GET methods of TS 29.222.
++var mandatoryErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 406: true, 411: true, 413: true,
++	414: true, 415: true, 429: true, 500: true, 503: true,
++}
++
++// do sends a request with an optional JSON body and returns the raw response.
++func do(ctx context.Context, cfg *Configuration, method, path string, body interface{},
++	query url.Values,
++) ([]byte, *http.Response, error) {
++	localVarHeaderParams := map[string]string{
++		"Accept": "application/json, application/problem+json",
++	}
++	if body != nil {
++		localVarHeaderParams["Content-Type"] = "application/json"
++	}
++	if query == nil {
++		query = url.Values{}
++	}
++
++	r, err := openapi.PrepareRequest(ctx, cfg, cfg.BasePath()+path, method, body,
++		localVarHeaderParams, query, url.Values{}, "", "", nil)
++	if err != nil {
++		return nil, nil, err
++	}
++	return send(cfg, r)
++}
++
++func send(cfg *Configuration, r *http.Request) ([]byte, *http.Response, error) {
++	localVarHTTPResponse, err := openapi.CallAPI(cfg, r)
++	if err != nil || localVarHTTPResponse == nil {
++		return nil, nil, err
++	}
++
++	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
++	if err != nil {
++		return nil, nil, err
++	}
++	if err = localVarHTTPResponse.Body.Close(); err != nil {
++		return nil, nil, err
++	}
++	return localVarBody, localVarHTTPResponse, nil
++}
++
++// decodeError builds the GenericOpenAPIError for a non-successful status, or
++// returns false if the status is not declared for the operation.
++func decodeError(body []byte, resp *http.Response) (error, bool) {
++	apiError := openapi.GenericOpenAPIError{
++		RawBody:     body,
++		ErrorStatus: resp.StatusCode,
++	}
++	var v OperationError
++	switch {
++	case resp.StatusCode == 307 || resp.StatusCode == 308:
++		v.Location = resp.Header.Get("Location")
++	case mandatoryErrorCodes[resp.StatusCode]:
++		if len(body) > 0 {
++			// A body that is not a ProblemDetails is kept only in RawBody.
++			_ = openapi.Deserialize(&v.ProblemDetails, body, resp.Header.Get("Content-Type"))
++		}
++	default:
++		return nil, false
++	}
++	apiError.ErrorModel = v
++	return apiError, true
++}
+diff -ruN a/capif/AEFSecurity/client.go b/capif/AEFSecurity/client.go
+--- a/capif/AEFSecurity/client.go
++++ b/capif/AEFSecurity/client.go
+@@ -0,0 +1,38 @@
++/*
++ * AEF_Security_API
++ *
++ * API for AEF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package AEFSecurity
++
++// APIClient manages communication with the AEFSecurity API v1.4.0.
++// In most cases there should be only one, shared, APIClient.
++type APIClient struct {
++	cfg    *Configuration
++	common service // Reuse a single struct instead of allocating one for each service on the heap.
++
++	// API Services
++	CheckAuthenticationRequestApi *CheckAuthenticationRequestApiService
++}
++
++type service struct {
++	client *APIClient
++}
++
++// NewAPIClient creates a new API client.
++func NewAPIClient(cfg *Configuration) *APIClient {
++	c := &APIClient{}
++	c.cfg = cfg
++	c.common.client = c
++
++	// API Services
++	c.CheckAuthenticationRequestApi = (*CheckAuthenticationRequestApiService)(&c.common)
++
++	return c
++}
+diff -ruN a/capif/AEFSecurity/configuration.go b/capif/AEFSecurity/configuration.go
+--- a/capif/AEFSecurity/configuration.go
++++ b/capif/AEFSecurity/configuration.go
+@@ -0,0 +1,93 @@
++/*
++ * AEF_Security_API
++ *
++ * API for AEF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package AEFSecurity
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/free5gc/openapi"
++)
++
++type Configuration struct {
++	url           string
++	basePath      string
++	host          string
++	defaultHeader map[string]string
++	userAgent     string
++	httpClient    *http.Client
++	MetricsHook   openapi.RequestMetricsHook
++}
++
++func NewConfiguration() *Configuration {
++	cfg := &Configuration{
++		basePath:      "https://example.com/aef-security/v1",
++		url:           "{apiRoot}/aef-security/v1",
++		defaultHeader: make(map[string]string),
++		userAgent:     "OpenAPI-Generator/1.0.0/go",
++		MetricsHook:   nil, // no-op unless the caller sets it
++	}
++	return cfg
++}
++
++func (c *Configuration) SetBasePath(apiRoot string) {
++	url := c.url
++
++	// Replace apiRoot
++	url = strings.Replace(url, "{"+"apiRoot"+"}", apiRoot, -1)
++
++	c.basePath = url
++}
++
++func (c *Configuration) BasePath() string {
++	return c.basePath
++}
++
++func (c *Configuration) Host() string {
++	return c.host
++}
++
++func (c *Configuration) SetHost(host string) {
++	c.host = host
++}
++
++func (c *Configuration) UserAgent() string {
++	return c.userAgent
++}
++
++func (c *Configuration) SetUserAgent(userAgent string) {
++	c.userAgent = userAgent
++}
++
++func (c *Configuration) DefaultHeader() map[string]string {
++	return c.defaultHeader
++}
++
++func (c *Configuration) AddDefaultHeader(key string, value string) {
++	c.defaultHeader[key] = value
++}
++
++func (c *Configuration) HTTPClient() *http.Client {
++	return c.httpClient
++}
++
++func (c *Configuration) SetHTTPClient(client *http.Client) {
++	c.httpClient = client
++}
++
++func (c *Configuration) Metrics() openapi.RequestMetricsHook {
++	return c.MetricsHook
++}
++
++func (c *Configuration) SetMetrics(h openapi.RequestMetricsHook) {
++	c.MetricsHook = h
++}
+diff -ruN a/capif/APIInvokerManagement/api_common.go b/capif/APIInvokerManagement/api_common.go
+--- a/capif/APIInvokerManagement/api_common.go
++++ b/capif/APIInvokerManagement/api_common.go
+@@ -0,0 +1,99 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package APIInvokerManagement
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++// OperationError carries the error representation of a CAPIF operation: a
++// ProblemDetails for the error status codes of TS 29.122 table 5.2.6-1
++// (TS 29.222 clause 7.7), or the Location header of a 307/308 redirection
++// (TS 29.122 clause 5.2.10).
++type OperationError struct {
++	Location       string
++	ProblemDetails models.ProblemDetails
++}
++
++// mandatoryErrorCodes are the error status codes of TS 29.122 table 5.2.6-1,
++// plus 414 of the GET methods of TS 29.222.
++var mandatoryErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 406: true, 411: true, 413: true,
++	414: true, 415: true, 429: true, 500: true, 503: true,
++}
++
++// do sends a request with an optional JSON body and returns the raw response.
++func do(ctx context.Context, cfg *Configuration, method, path string, body interface{},
++	query url.Values,
++) ([]byte, *http.Response, error) {
++	localVarHeaderParams := map[string]string{
++		"Accept": "application/json, application/problem+json",
++	}
++	if body != nil {
++		localVarHeaderParams["Content-Type"] = "application/json"
++	}
++	if query == nil {
++		query = url.Values{}
++	}
++
++	r, err := openapi.PrepareRequest(ctx, cfg, cfg.BasePath()+path, method, body,
++		localVarHeaderParams, query, url.Values{}, "", "", nil)
++	if err != nil {
++		return nil, nil, err
++	}
++	return send(cfg, r)
++}
++
++func send(cfg *Configuration, r *http.Request) ([]byte, *http.Response, error) {
++	localVarHTTPResponse, err := openapi.CallAPI(cfg, r)
++	if err != nil || localVarHTTPResponse == nil {
++		return nil, nil, err
++	}
++
++	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
++	if err != nil {
++		return nil, nil, err
++	}
++	if err = localVarHTTPResponse.Body.Close(); err != nil {
++		return nil, nil, err
++	}
++	return localVarBody, localVarHTTPResponse, nil
++}
++
++// decodeError builds the GenericOpenAPIError for a non-successful status, or
++// returns false if the status is not declared for the operation.
++func decodeError(body []byte, resp *http.Response) (error, bool) {
++	apiError := openapi.GenericOpenAPIError{
++		RawBody:     body,
++		ErrorStatus: resp.StatusCode,
++	}
++	var v OperationError
++	switch {
++	case resp.StatusCode == 307 || resp.StatusCode == 308:
++		v.Location = resp.Header.Get("Location")
++	case mandatoryErrorCodes[resp.StatusCode]:
++		if len(body) > 0 {
++			// A body that is not a ProblemDetails is kept only in RawBody.
++			_ = openapi.Deserialize(&v.ProblemDetails, body, resp.Header.Get("Content-Type"))
++		}
++	default:
++		return nil, false
++	}
++	apiError.ErrorModel = v
++	return apiError, true
++}
+diff -ruN a/capif/APIInvokerManagement/api_individual_onboarded_api_invoker_document.go b/capif/APIInvokerManagement/api_individual_onboarded_api_invoker_document.go
+--- a/capif/APIInvokerManagement/api_individual_onboarded_api_invoker_document.go
++++ b/capif/APIInvokerManagement/api_individual_onboarded_api_invoker_document.go
+@@ -0,0 +1,61 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package APIInvokerManagement
++
++import (
++	"context"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++)
++
++type IndividualOnboardedAPIInvokerDocumentApiService service
++
++// DeleteIndOnboardedAPIInvokerRequest
++type DeleteIndOnboardedAPIInvokerRequest struct {
++	OnboardingId *string
++}
++
++func (r *DeleteIndOnboardedAPIInvokerRequest) SetOnboardingId(OnboardingId string) {
++	r.OnboardingId = &OnboardingId
++}
++
++type DeleteIndOnboardedAPIInvokerResponse struct{}
++
++/*
++DeleteIndOnboardedAPIInvoker offboards an API invoker:
++DELETE {apiRoot}/api-invoker-management/v1/onboardedInvokers/{onboardingId}
++(TS 29.222 clause 8.4.2.3.3.1).
++
++@return DeleteIndOnboardedAPIInvokerResponse
++*/
++func (a *IndividualOnboardedAPIInvokerDocumentApiService) DeleteIndOnboardedAPIInvoker(
++	ctx context.Context, request *DeleteIndOnboardedAPIInvokerRequest,
++) (*DeleteIndOnboardedAPIInvokerResponse, error) {
++	if request.OnboardingId == nil {
++		return nil, openapi.ReportError("onboardingId is required and must be specified")
++	}
++	body, resp, err := do(ctx, a.client.cfg, http.MethodDelete,
++		"/onboardedInvokers/"+url.PathEscape(*request.OnboardingId), nil, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 204 {
++		return &DeleteIndOnboardedAPIInvokerResponse{}, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in DeleteIndOnboardedAPIInvoker", resp.StatusCode)
++}
+diff -ruN a/capif/APIInvokerManagement/api_onboarded_api_invokers_collection.go b/capif/APIInvokerManagement/api_onboarded_api_invokers_collection.go
+--- a/capif/APIInvokerManagement/api_onboarded_api_invokers_collection.go
++++ b/capif/APIInvokerManagement/api_onboarded_api_invokers_collection.go
+@@ -0,0 +1,80 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package APIInvokerManagement
++
++import (
++	"context"
++	"net/http"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type OnboardedAPIInvokersCollectionApiService service
++
++// CreateOnboardedAPIInvokerRequest
++type CreateOnboardedAPIInvokerRequest struct {
++	APIInvokerEnrolmentDetails *models.CapifApiInvokerEnrolmentDetails
++}
++
++func (r *CreateOnboardedAPIInvokerRequest) SetAPIInvokerEnrolmentDetails(
++	APIInvokerEnrolmentDetails models.CapifApiInvokerEnrolmentDetails,
++) {
++	r.APIInvokerEnrolmentDetails = &APIInvokerEnrolmentDetails
++}
++
++type CreateOnboardedAPIInvokerResponse struct {
++	// URI of the "Individual On-boarded API Invoker" resource (201 Created).
++	Location string
++	// True for 202 Accepted: the CCF processes the request and notifies later.
++	Accepted                   bool
++	APIInvokerEnrolmentDetails models.CapifApiInvokerEnrolmentDetails
++}
++
++/*
++CreateOnboardedAPIInvoker onboards an API invoker at the CAPIF core function:
++POST {apiRoot}/api-invoker-management/v1/onboardedInvokers (TS 29.222 clause
++8.4.2.2.3.1). The onboarding credential goes in the Authorization header
++(TS 29.222 clause 5.5.2.2.2 NOTE 4): put it in ctx under
++openapi.ContextAccessToken to send it as a bearer credential.
++
++@return CreateOnboardedAPIInvokerResponse
++*/
++func (a *OnboardedAPIInvokersCollectionApiService) CreateOnboardedAPIInvoker(
++	ctx context.Context, request *CreateOnboardedAPIInvokerRequest,
++) (*CreateOnboardedAPIInvokerResponse, error) {
++	var localVarReturnValue CreateOnboardedAPIInvokerResponse
++
++	body, resp, err := do(ctx, a.client.cfg, http.MethodPost, "/onboardedInvokers",
++		request.APIInvokerEnrolmentDetails, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	switch resp.StatusCode {
++	case 201:
++		err = openapi.Deserialize(&localVarReturnValue.APIInvokerEnrolmentDetails, body,
++			resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		localVarReturnValue.Location = resp.Header.Get("Location")
++		return &localVarReturnValue, nil
++	case 202:
++		localVarReturnValue.Accepted = true
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in CreateOnboardedAPIInvoker", resp.StatusCode)
++}
+diff -ruN a/capif/APIInvokerManagement/client.go b/capif/APIInvokerManagement/client.go
+--- a/capif/APIInvokerManagement/client.go
++++ b/capif/APIInvokerManagement/client.go
+@@ -0,0 +1,40 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package APIInvokerManagement
++
++// APIClient manages communication with the APIInvokerManagement API v1.4.0.
++// In most cases there should be only one, shared, APIClient.
++type APIClient struct {
++	cfg    *Configuration
++	common service // Reuse a single struct instead of allocating one for each service on the heap.
++
++	// API Services
++	OnboardedAPIInvokersCollectionApi        *OnboardedAPIInvokersCollectionApiService
++	IndividualOnboardedAPIInvokerDocumentApi *IndividualOnboardedAPIInvokerDocumentApiService
++}
++
++type service struct {
++	client *APIClient
++}
++
++// NewAPIClient creates a new API client.
++func NewAPIClient(cfg *Configuration) *APIClient {
++	c := &APIClient{}
++	c.cfg = cfg
++	c.common.client = c
++
++	// API Services
++	c.OnboardedAPIInvokersCollectionApi = (*OnboardedAPIInvokersCollectionApiService)(&c.common)
++	c.IndividualOnboardedAPIInvokerDocumentApi = (*IndividualOnboardedAPIInvokerDocumentApiService)(&c.common)
++
++	return c
++}
+diff -ruN a/capif/APIInvokerManagement/configuration.go b/capif/APIInvokerManagement/configuration.go
+--- a/capif/APIInvokerManagement/configuration.go
++++ b/capif/APIInvokerManagement/configuration.go
+@@ -0,0 +1,93 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package APIInvokerManagement
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/free5gc/openapi"
++)
++
++type Configuration struct {
++	url           string
++	basePath      string
++	host          string
++	defaultHeader map[string]string
++	userAgent     string
++	httpClient    *http.Client
++	MetricsHook   openapi.RequestMetricsHook
++}
++
++func NewConfiguration() *Configuration {
++	cfg := &Configuration{
++		basePath:      "https://example.com/api-invoker-management/v1",
++		url:           "{apiRoot}/api-invoker-management/v1",
++		defaultHeader: make(map[string]string),
++		userAgent:     "OpenAPI-Generator/1.0.0/go",
++		MetricsHook:   nil, // no-op unless the caller sets it
++	}
++	return cfg
++}
++
++func (c *Configuration) SetBasePath(apiRoot string) {
++	url := c.url
++
++	// Replace apiRoot
++	url = strings.Replace(url, "{"+"apiRoot"+"}", apiRoot, -1)
++
++	c.basePath = url
++}
++
++func (c *Configuration) BasePath() string {
++	return c.basePath
++}
++
++func (c *Configuration) Host() string {
++	return c.host
++}
++
++func (c *Configuration) SetHost(host string) {
++	c.host = host
++}
++
++func (c *Configuration) UserAgent() string {
++	return c.userAgent
++}
++
++func (c *Configuration) SetUserAgent(userAgent string) {
++	c.userAgent = userAgent
++}
++
++func (c *Configuration) DefaultHeader() map[string]string {
++	return c.defaultHeader
++}
++
++func (c *Configuration) AddDefaultHeader(key string, value string) {
++	c.defaultHeader[key] = value
++}
++
++func (c *Configuration) HTTPClient() *http.Client {
++	return c.httpClient
++}
++
++func (c *Configuration) SetHTTPClient(client *http.Client) {
++	c.httpClient = client
++}
++
++func (c *Configuration) Metrics() openapi.RequestMetricsHook {
++	return c.MetricsHook
++}
++
++func (c *Configuration) SetMetrics(h openapi.RequestMetricsHook) {
++	c.MetricsHook = h
++}
+diff -ruN a/capif/DiscoverService/api_all_published_service_apis_collection.go b/capif/DiscoverService/api_all_published_service_apis_collection.go
+--- a/capif/DiscoverService/api_all_published_service_apis_collection.go
++++ b/capif/DiscoverService/api_all_published_service_apis_collection.go
+@@ -0,0 +1,132 @@
++/*
++ * CAPIF_Discover_Service_API
++ *
++ * API for discovering service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package DiscoverService
++
++import (
++	"context"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type AllPublishedServiceAPIsCollectionApiService service
++
++// GetPubServAPIsRequest carries the query parameters of table
++// 8.1.2.2.3.1-1 that have no feature: only ApiInvokerId is mandatory.
++type GetPubServAPIsRequest struct {
++	ApiInvokerId      *string
++	ApiName           *string
++	ApiVersion        *string
++	CommType          *models.CapifCommunicationType
++	Protocol          *models.CapifProtocol
++	AefId             *string
++	DataFormat        *models.CapifDataFormat
++	ApiCat            *string
++	SupportedFeatures *string
++}
++
++func (r *GetPubServAPIsRequest) SetApiInvokerId(ApiInvokerId string) {
++	r.ApiInvokerId = &ApiInvokerId
++}
++
++func (r *GetPubServAPIsRequest) SetApiName(ApiName string) {
++	r.ApiName = &ApiName
++}
++
++func (r *GetPubServAPIsRequest) SetApiVersion(ApiVersion string) {
++	r.ApiVersion = &ApiVersion
++}
++
++func (r *GetPubServAPIsRequest) SetCommType(CommType models.CapifCommunicationType) {
++	r.CommType = &CommType
++}
++
++func (r *GetPubServAPIsRequest) SetProtocol(Protocol models.CapifProtocol) {
++	r.Protocol = &Protocol
++}
++
++func (r *GetPubServAPIsRequest) SetAefId(AefId string) {
++	r.AefId = &AefId
++}
++
++func (r *GetPubServAPIsRequest) SetDataFormat(DataFormat models.CapifDataFormat) {
++	r.DataFormat = &DataFormat
++}
++
++func (r *GetPubServAPIsRequest) SetApiCat(ApiCat string) {
++	r.ApiCat = &ApiCat
++}
++
++func (r *GetPubServAPIsRequest) SetSupportedFeatures(SupportedFeatures string) {
++	r.SupportedFeatures = &SupportedFeatures
++}
++
++type GetPubServAPIsResponse struct {
++	DiscoveredAPIs models.CapifDiscoveredApis
++}
++
++/*
++GetPubServAPIs discovers the service APIs published at the CAPIF core
++function: GET {apiRoot}/service-apis/v1/allServiceAPIs (TS 29.222 clause
++8.1.2.2.3.1).
++
++@return GetPubServAPIsResponse
++*/
++func (a *AllPublishedServiceAPIsCollectionApiService) GetPubServAPIs(
++	ctx context.Context, request *GetPubServAPIsRequest,
++) (*GetPubServAPIsResponse, error) {
++	var localVarReturnValue GetPubServAPIsResponse
++
++	if request.ApiInvokerId == nil {
++		return nil, openapi.ReportError("api-invoker-id is required and must be specified")
++	}
++	query := url.Values{}
++	query.Add("api-invoker-id", *request.ApiInvokerId)
++	add := func(name string, v *string) {
++		if v != nil {
++			query.Add(name, *v)
++		}
++	}
++	add("api-name", request.ApiName)
++	add("api-version", request.ApiVersion)
++	if request.CommType != nil {
++		query.Add("comm-type", string(*request.CommType))
++	}
++	if request.Protocol != nil {
++		query.Add("protocol", string(*request.Protocol))
++	}
++	add("aef-id", request.AefId)
++	if request.DataFormat != nil {
++		query.Add("data-format", string(*request.DataFormat))
++	}
++	add("api-cat", request.ApiCat)
++	add("supported-features", request.SupportedFeatures)
++
++	body, resp, err := do(ctx, a.client.cfg, http.MethodGet, "/allServiceAPIs", nil, query)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 200 {
++		err = openapi.Deserialize(&localVarReturnValue.DiscoveredAPIs, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in GetPubServAPIs", resp.StatusCode)
++}
+diff -ruN a/capif/DiscoverService/api_common.go b/capif/DiscoverService/api_common.go
+--- a/capif/DiscoverService/api_common.go
++++ b/capif/DiscoverService/api_common.go
+@@ -0,0 +1,99 @@
++/*
++ * CAPIF_Discover_Service_API
++ *
++ * API for discovering service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package DiscoverService
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++// OperationError carries the error representation of a CAPIF operation: a
++// ProblemDetails for the error status codes of TS 29.122 table 5.2.6-1
++// (TS 29.222 clause 7.7), or the Location header of a 307/308 redirection
++// (TS 29.122 clause 5.2.10).
++type OperationError struct {
++	Location       string
++	ProblemDetails models.ProblemDetails
++}
++
++// mandatoryErrorCodes are the error status codes of TS 29.122 table 5.2.6-1,
++// plus 414 of the GET methods of TS 29.222.
++var mandatoryErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 406: true, 411: true, 413: true,
++	414: true, 415: true, 429: true, 500: true, 503: true,
++}
++
++// do sends a request with an optional JSON body and returns the raw response.
++func do(ctx context.Context, cfg *Configuration, method, path string, body interface{},
++	query url.Values,
++) ([]byte, *http.Response, error) {
++	localVarHeaderParams := map[string]string{
++		"Accept": "application/json, application/problem+json",
++	}
++	if body != nil {
++		localVarHeaderParams["Content-Type"] = "application/json"
++	}
++	if query == nil {
++		query = url.Values{}
++	}
++
++	r, err := openapi.PrepareRequest(ctx, cfg, cfg.BasePath()+path, method, body,
++		localVarHeaderParams, query, url.Values{}, "", "", nil)
++	if err != nil {
++		return nil, nil, err
++	}
++	return send(cfg, r)
++}
++
++func send(cfg *Configuration, r *http.Request) ([]byte, *http.Response, error) {
++	localVarHTTPResponse, err := openapi.CallAPI(cfg, r)
++	if err != nil || localVarHTTPResponse == nil {
++		return nil, nil, err
++	}
++
++	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
++	if err != nil {
++		return nil, nil, err
++	}
++	if err = localVarHTTPResponse.Body.Close(); err != nil {
++		return nil, nil, err
++	}
++	return localVarBody, localVarHTTPResponse, nil
++}
++
++// decodeError builds the GenericOpenAPIError for a non-successful status, or
++// returns false if the status is not declared for the operation.
++func decodeError(body []byte, resp *http.Response) (error, bool) {
++	apiError := openapi.GenericOpenAPIError{
++		RawBody:     body,
++		ErrorStatus: resp.StatusCode,
++	}
++	var v OperationError
++	switch {
++	case resp.StatusCode == 307 || resp.StatusCode == 308:
++		v.Location = resp.Header.Get("Location")
++	case mandatoryErrorCodes[resp.StatusCode]:
++		if len(body) > 0 {
++			// A body that is not a ProblemDetails is kept only in RawBody.
++			_ = openapi.Deserialize(&v.ProblemDetails, body, resp.Header.Get("Content-Type"))
++		}
++	default:
++		return nil, false
++	}
++	apiError.ErrorModel = v
++	return apiError, true
++}
+diff -ruN a/capif/DiscoverService/client.go b/capif/DiscoverService/client.go
+--- a/capif/DiscoverService/client.go
++++ b/capif/DiscoverService/client.go
+@@ -0,0 +1,38 @@
++/*
++ * CAPIF_Discover_Service_API
++ *
++ * API for discovering service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package DiscoverService
++
++// APIClient manages communication with the DiscoverService API v1.4.0.
++// In most cases there should be only one, shared, APIClient.
++type APIClient struct {
++	cfg    *Configuration
++	common service // Reuse a single struct instead of allocating one for each service on the heap.
++
++	// API Services
++	AllPublishedServiceAPIsCollectionApi *AllPublishedServiceAPIsCollectionApiService
++}
++
++type service struct {
++	client *APIClient
++}
++
++// NewAPIClient creates a new API client.
++func NewAPIClient(cfg *Configuration) *APIClient {
++	c := &APIClient{}
++	c.cfg = cfg
++	c.common.client = c
++
++	// API Services
++	c.AllPublishedServiceAPIsCollectionApi = (*AllPublishedServiceAPIsCollectionApiService)(&c.common)
++
++	return c
++}
+diff -ruN a/capif/DiscoverService/configuration.go b/capif/DiscoverService/configuration.go
+--- a/capif/DiscoverService/configuration.go
++++ b/capif/DiscoverService/configuration.go
+@@ -0,0 +1,93 @@
++/*
++ * CAPIF_Discover_Service_API
++ *
++ * API for discovering service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package DiscoverService
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/free5gc/openapi"
++)
++
++type Configuration struct {
++	url           string
++	basePath      string
++	host          string
++	defaultHeader map[string]string
++	userAgent     string
++	httpClient    *http.Client
++	MetricsHook   openapi.RequestMetricsHook
++}
++
++func NewConfiguration() *Configuration {
++	cfg := &Configuration{
++		basePath:      "https://example.com/service-apis/v1",
++		url:           "{apiRoot}/service-apis/v1",
++		defaultHeader: make(map[string]string),
++		userAgent:     "OpenAPI-Generator/1.0.0/go",
++		MetricsHook:   nil, // no-op unless the caller sets it
++	}
++	return cfg
++}
++
++func (c *Configuration) SetBasePath(apiRoot string) {
++	url := c.url
++
++	// Replace apiRoot
++	url = strings.Replace(url, "{"+"apiRoot"+"}", apiRoot, -1)
++
++	c.basePath = url
++}
++
++func (c *Configuration) BasePath() string {
++	return c.basePath
++}
++
++func (c *Configuration) Host() string {
++	return c.host
++}
++
++func (c *Configuration) SetHost(host string) {
++	c.host = host
++}
++
++func (c *Configuration) UserAgent() string {
++	return c.userAgent
++}
++
++func (c *Configuration) SetUserAgent(userAgent string) {
++	c.userAgent = userAgent
++}
++
++func (c *Configuration) DefaultHeader() map[string]string {
++	return c.defaultHeader
++}
++
++func (c *Configuration) AddDefaultHeader(key string, value string) {
++	c.defaultHeader[key] = value
++}
++
++func (c *Configuration) HTTPClient() *http.Client {
++	return c.httpClient
++}
++
++func (c *Configuration) SetHTTPClient(client *http.Client) {
++	c.httpClient = client
++}
++
++func (c *Configuration) Metrics() openapi.RequestMetricsHook {
++	return c.MetricsHook
++}
++
++func (c *Configuration) SetMetrics(h openapi.RequestMetricsHook) {
++	c.MetricsHook = h
++}
+diff -ruN a/capif/PublishService/api_apf_published_apis_collection.go b/capif/PublishService/api_apf_published_apis_collection.go
+--- a/capif/PublishService/api_apf_published_apis_collection.go
++++ b/capif/PublishService/api_apf_published_apis_collection.go
+@@ -0,0 +1,125 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package PublishService
++
++import (
++	"context"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type APFPublishedAPIsCollectionApiService service
++
++// CreateAPFPubAPIsRequest
++type CreateAPFPubAPIsRequest struct {
++	ApfId                 *string
++	ServiceAPIDescription *models.CapifServiceApiDescription
++}
++
++func (r *CreateAPFPubAPIsRequest) SetApfId(ApfId string) {
++	r.ApfId = &ApfId
++}
++
++func (r *CreateAPFPubAPIsRequest) SetServiceAPIDescription(ServiceAPIDescription models.CapifServiceApiDescription) {
++	r.ServiceAPIDescription = &ServiceAPIDescription
++}
++
++type CreateAPFPubAPIsResponse struct {
++	// URI of the "Individual APF published API" resource.
++	Location              string
++	ServiceAPIDescription models.CapifServiceApiDescription
++}
++
++/*
++CreateAPFPubAPIs publishes a service API at the CAPIF core function:
++POST {apiRoot}/published-apis/v1/{apfId}/service-apis (TS 29.222 clause
++8.2.2.2.3.1).
++
++@return CreateAPFPubAPIsResponse
++*/
++func (a *APFPublishedAPIsCollectionApiService) CreateAPFPubAPIs(
++	ctx context.Context, request *CreateAPFPubAPIsRequest,
++) (*CreateAPFPubAPIsResponse, error) {
++	var localVarReturnValue CreateAPFPubAPIsResponse
++
++	if request.ApfId == nil {
++		return nil, openapi.ReportError("apfId is required and must be specified")
++	}
++	body, resp, err := do(ctx, a.client.cfg, http.MethodPost,
++		"/"+url.PathEscape(*request.ApfId)+"/service-apis", request.ServiceAPIDescription, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 201 {
++		err = openapi.Deserialize(&localVarReturnValue.ServiceAPIDescription, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		localVarReturnValue.Location = resp.Header.Get("Location")
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in CreateAPFPubAPIs", resp.StatusCode)
++}
++
++// GetAPFPubAPIsRequest
++type GetAPFPubAPIsRequest struct {
++	ApfId *string
++}
++
++func (r *GetAPFPubAPIsRequest) SetApfId(ApfId string) {
++	r.ApfId = &ApfId
++}
++
++type GetAPFPubAPIsResponse struct {
++	ServiceAPIDescriptions []models.CapifServiceApiDescription
++}
++
++/*
++GetAPFPubAPIs retrieves the service APIs published by an API publishing
++function: GET {apiRoot}/published-apis/v1/{apfId}/service-apis (TS 29.222
++clause 8.2.2.2.3.2).
++
++@return GetAPFPubAPIsResponse
++*/
++func (a *APFPublishedAPIsCollectionApiService) GetAPFPubAPIs(
++	ctx context.Context, request *GetAPFPubAPIsRequest,
++) (*GetAPFPubAPIsResponse, error) {
++	var localVarReturnValue GetAPFPubAPIsResponse
++
++	if request.ApfId == nil {
++		return nil, openapi.ReportError("apfId is required and must be specified")
++	}
++	body, resp, err := do(ctx, a.client.cfg, http.MethodGet,
++		"/"+url.PathEscape(*request.ApfId)+"/service-apis", nil, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 200 {
++		err = openapi.Deserialize(&localVarReturnValue.ServiceAPIDescriptions, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in GetAPFPubAPIs", resp.StatusCode)
++}
+diff -ruN a/capif/PublishService/api_common.go b/capif/PublishService/api_common.go
+--- a/capif/PublishService/api_common.go
++++ b/capif/PublishService/api_common.go
+@@ -0,0 +1,99 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package PublishService
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++// OperationError carries the error representation of a CAPIF operation: a
++// ProblemDetails for the error status codes of TS 29.122 table 5.2.6-1
++// (TS 29.222 clause 7.7), or the Location header of a 307/308 redirection
++// (TS 29.122 clause 5.2.10).
++type OperationError struct {
++	Location       string
++	ProblemDetails models.ProblemDetails
++}
++
++// mandatoryErrorCodes are the error status codes of TS 29.122 table 5.2.6-1,
++// plus 414 of the GET methods of TS 29.222.
++var mandatoryErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 406: true, 411: true, 413: true,
++	414: true, 415: true, 429: true, 500: true, 503: true,
++}
++
++// do sends a request with an optional JSON body and returns the raw response.
++func do(ctx context.Context, cfg *Configuration, method, path string, body interface{},
++	query url.Values,
++) ([]byte, *http.Response, error) {
++	localVarHeaderParams := map[string]string{
++		"Accept": "application/json, application/problem+json",
++	}
++	if body != nil {
++		localVarHeaderParams["Content-Type"] = "application/json"
++	}
++	if query == nil {
++		query = url.Values{}
++	}
++
++	r, err := openapi.PrepareRequest(ctx, cfg, cfg.BasePath()+path, method, body,
++		localVarHeaderParams, query, url.Values{}, "", "", nil)
++	if err != nil {
++		return nil, nil, err
++	}
++	return send(cfg, r)
++}
++
++func send(cfg *Configuration, r *http.Request) ([]byte, *http.Response, error) {
++	localVarHTTPResponse, err := openapi.CallAPI(cfg, r)
++	if err != nil || localVarHTTPResponse == nil {
++		return nil, nil, err
++	}
++
++	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
++	if err != nil {
++		return nil, nil, err
++	}
++	if err = localVarHTTPResponse.Body.Close(); err != nil {
++		return nil, nil, err
++	}
++	return localVarBody, localVarHTTPResponse, nil
++}
++
++// decodeError builds the GenericOpenAPIError for a non-successful status, or
++// returns false if the status is not declared for the operation.
++func decodeError(body []byte, resp *http.Response) (error, bool) {
++	apiError := openapi.GenericOpenAPIError{
++		RawBody:     body,
++		ErrorStatus: resp.StatusCode,
++	}
++	var v OperationError
++	switch {
++	case resp.StatusCode == 307 || resp.StatusCode == 308:
++		v.Location = resp.Header.Get("Location")
++	case mandatoryErrorCodes[resp.StatusCode]:
++		if len(body) > 0 {
++			// A body that is not a ProblemDetails is kept only in RawBody.
++			_ = openapi.Deserialize(&v.ProblemDetails, body, resp.Header.Get("Content-Type"))
++		}
++	default:
++		return nil, false
++	}
++	apiError.ErrorModel = v
++	return apiError, true
++}
+diff -ruN a/capif/PublishService/api_individual_apf_published_api_document.go b/capif/PublishService/api_individual_apf_published_api_document.go
+--- a/capif/PublishService/api_individual_apf_published_api_document.go
++++ b/capif/PublishService/api_individual_apf_published_api_document.go
+@@ -0,0 +1,112 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package PublishService
++
++import (
++	"context"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type IndividualAPFPublishedAPIDocumentApiService service
++
++// IndAPFPubAPIRequest identifies an "Individual APF published API" resource.
++type IndAPFPubAPIRequest struct {
++	ApfId        *string
++	ServiceApiId *string
++}
++
++func (r *IndAPFPubAPIRequest) SetApfId(ApfId string) {
++	r.ApfId = &ApfId
++}
++
++func (r *IndAPFPubAPIRequest) SetServiceApiId(ServiceApiId string) {
++	r.ServiceApiId = &ServiceApiId
++}
++
++func (r *IndAPFPubAPIRequest) path() (string, error) {
++	if r.ApfId == nil || r.ServiceApiId == nil {
++		return "", openapi.ReportError("apfId and serviceApiId are required and must be specified")
++	}
++	return "/" + url.PathEscape(*r.ApfId) + "/service-apis/" + url.PathEscape(*r.ServiceApiId), nil
++}
++
++type GetIndAPFPubAPIResponse struct {
++	ServiceAPIDescription models.CapifServiceApiDescription
++}
++
++/*
++GetIndAPFPubAPI retrieves a published service API:
++GET {apiRoot}/published-apis/v1/{apfId}/service-apis/{serviceApiId}
++(TS 29.222 clause 8.2.2.3.3.1).
++
++@return GetIndAPFPubAPIResponse
++*/
++func (a *IndividualAPFPublishedAPIDocumentApiService) GetIndAPFPubAPI(
++	ctx context.Context, request *IndAPFPubAPIRequest,
++) (*GetIndAPFPubAPIResponse, error) {
++	var localVarReturnValue GetIndAPFPubAPIResponse
++
++	path, err := request.path()
++	if err != nil {
++		return nil, err
++	}
++	body, resp, err := do(ctx, a.client.cfg, http.MethodGet, path, nil, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 200 {
++		err = openapi.Deserialize(&localVarReturnValue.ServiceAPIDescription, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in GetIndAPFPubAPI", resp.StatusCode)
++}
++
++type DeleteIndAPFPubAPIResponse struct{}
++
++/*
++DeleteIndAPFPubAPI unpublishes a service API:
++DELETE {apiRoot}/published-apis/v1/{apfId}/service-apis/{serviceApiId}
++(TS 29.222 clause 8.2.2.3.3.3).
++
++@return DeleteIndAPFPubAPIResponse
++*/
++func (a *IndividualAPFPublishedAPIDocumentApiService) DeleteIndAPFPubAPI(
++	ctx context.Context, request *IndAPFPubAPIRequest,
++) (*DeleteIndAPFPubAPIResponse, error) {
++	path, err := request.path()
++	if err != nil {
++		return nil, err
++	}
++	body, resp, err := do(ctx, a.client.cfg, http.MethodDelete, path, nil, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 204 {
++		return &DeleteIndAPFPubAPIResponse{}, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in DeleteIndAPFPubAPI", resp.StatusCode)
++}
+diff -ruN a/capif/PublishService/client.go b/capif/PublishService/client.go
+--- a/capif/PublishService/client.go
++++ b/capif/PublishService/client.go
+@@ -0,0 +1,40 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package PublishService
++
++// APIClient manages communication with the PublishService API v1.4.0.
++// In most cases there should be only one, shared, APIClient.
++type APIClient struct {
++	cfg    *Configuration
++	common service // Reuse a single struct instead of allocating one for each service on the heap.
++
++	// API Services
++	APFPublishedAPIsCollectionApi        *APFPublishedAPIsCollectionApiService
++	IndividualAPFPublishedAPIDocumentApi *IndividualAPFPublishedAPIDocumentApiService
++}
++
++type service struct {
++	client *APIClient
++}
++
++// NewAPIClient creates a new API client.
++func NewAPIClient(cfg *Configuration) *APIClient {
++	c := &APIClient{}
++	c.cfg = cfg
++	c.common.client = c
++
++	// API Services
++	c.APFPublishedAPIsCollectionApi = (*APFPublishedAPIsCollectionApiService)(&c.common)
++	c.IndividualAPFPublishedAPIDocumentApi = (*IndividualAPFPublishedAPIDocumentApiService)(&c.common)
++
++	return c
++}
+diff -ruN a/capif/PublishService/configuration.go b/capif/PublishService/configuration.go
+--- a/capif/PublishService/configuration.go
++++ b/capif/PublishService/configuration.go
+@@ -0,0 +1,93 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package PublishService
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/free5gc/openapi"
++)
++
++type Configuration struct {
++	url           string
++	basePath      string
++	host          string
++	defaultHeader map[string]string
++	userAgent     string
++	httpClient    *http.Client
++	MetricsHook   openapi.RequestMetricsHook
++}
++
++func NewConfiguration() *Configuration {
++	cfg := &Configuration{
++		basePath:      "https://example.com/published-apis/v1",
++		url:           "{apiRoot}/published-apis/v1",
++		defaultHeader: make(map[string]string),
++		userAgent:     "OpenAPI-Generator/1.0.0/go",
++		MetricsHook:   nil, // no-op unless the caller sets it
++	}
++	return cfg
++}
++
++func (c *Configuration) SetBasePath(apiRoot string) {
++	url := c.url
++
++	// Replace apiRoot
++	url = strings.Replace(url, "{"+"apiRoot"+"}", apiRoot, -1)
++
++	c.basePath = url
++}
++
++func (c *Configuration) BasePath() string {
++	return c.basePath
++}
++
++func (c *Configuration) Host() string {
++	return c.host
++}
++
++func (c *Configuration) SetHost(host string) {
++	c.host = host
++}
++
++func (c *Configuration) UserAgent() string {
++	return c.userAgent
++}
++
++func (c *Configuration) SetUserAgent(userAgent string) {
++	c.userAgent = userAgent
++}
++
++func (c *Configuration) DefaultHeader() map[string]string {
++	return c.defaultHeader
++}
++
++func (c *Configuration) AddDefaultHeader(key string, value string) {
++	c.defaultHeader[key] = value
++}
++
++func (c *Configuration) HTTPClient() *http.Client {
++	return c.httpClient
++}
++
++func (c *Configuration) SetHTTPClient(client *http.Client) {
++	c.httpClient = client
++}
++
++func (c *Configuration) Metrics() openapi.RequestMetricsHook {
++	return c.MetricsHook
++}
++
++func (c *Configuration) SetMetrics(h openapi.RequestMetricsHook) {
++	c.MetricsHook = h
++}
+diff -ruN a/capif/Security/api_common.go b/capif/Security/api_common.go
+--- a/capif/Security/api_common.go
++++ b/capif/Security/api_common.go
+@@ -0,0 +1,99 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package Security
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/url"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++// OperationError carries the error representation of a CAPIF operation: a
++// ProblemDetails for the error status codes of TS 29.122 table 5.2.6-1
++// (TS 29.222 clause 7.7), or the Location header of a 307/308 redirection
++// (TS 29.122 clause 5.2.10).
++type OperationError struct {
++	Location       string
++	ProblemDetails models.ProblemDetails
++}
++
++// mandatoryErrorCodes are the error status codes of TS 29.122 table 5.2.6-1,
++// plus 414 of the GET methods of TS 29.222.
++var mandatoryErrorCodes = map[int]bool{
++	400: true, 401: true, 403: true, 404: true, 406: true, 411: true, 413: true,
++	414: true, 415: true, 429: true, 500: true, 503: true,
++}
++
++// do sends a request with an optional JSON body and returns the raw response.
++func do(ctx context.Context, cfg *Configuration, method, path string, body interface{},
++	query url.Values,
++) ([]byte, *http.Response, error) {
++	localVarHeaderParams := map[string]string{
++		"Accept": "application/json, application/problem+json",
++	}
++	if body != nil {
++		localVarHeaderParams["Content-Type"] = "application/json"
++	}
++	if query == nil {
++		query = url.Values{}
++	}
++
++	r, err := openapi.PrepareRequest(ctx, cfg, cfg.BasePath()+path, method, body,
++		localVarHeaderParams, query, url.Values{}, "", "", nil)
++	if err != nil {
++		return nil, nil, err
++	}
++	return send(cfg, r)
++}
++
++func send(cfg *Configuration, r *http.Request) ([]byte, *http.Response, error) {
++	localVarHTTPResponse, err := openapi.CallAPI(cfg, r)
++	if err != nil || localVarHTTPResponse == nil {
++		return nil, nil, err
++	}
++
++	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
++	if err != nil {
++		return nil, nil, err
++	}
++	if err = localVarHTTPResponse.Body.Close(); err != nil {
++		return nil, nil, err
++	}
++	return localVarBody, localVarHTTPResponse, nil
++}
++
++// decodeError builds the GenericOpenAPIError for a non-successful status, or
++// returns false if the status is not declared for the operation.
++func decodeError(body []byte, resp *http.Response) (error, bool) {
++	apiError := openapi.GenericOpenAPIError{
++		RawBody:     body,
++		ErrorStatus: resp.StatusCode,
++	}
++	var v OperationError
++	switch {
++	case resp.StatusCode == 307 || resp.StatusCode == 308:
++		v.Location = resp.Header.Get("Location")
++	case mandatoryErrorCodes[resp.StatusCode]:
++		if len(body) > 0 {
++			// A body that is not a ProblemDetails is kept only in RawBody.
++			_ = openapi.Deserialize(&v.ProblemDetails, body, resp.Header.Get("Content-Type"))
++		}
++	default:
++		return nil, false
++	}
++	apiError.ErrorModel = v
++	return apiError, true
++}
+diff -ruN a/capif/Security/api_individual_trusted_api_invoker_store.go b/capif/Security/api_individual_trusted_api_invoker_store.go
+--- a/capif/Security/api_individual_trusted_api_invoker_store.go
++++ b/capif/Security/api_individual_trusted_api_invoker_store.go
+@@ -0,0 +1,225 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package Security
++
++import (
++	"context"
++	"net/http"
++	"net/url"
++	"strconv"
++
++	"github.com/free5gc/openapi"
++	"github.com/free5gc/openapi/models"
++)
++
++type IndividualTrustedAPIInvokerStoreApiService service
++
++// CreateSecIndTrustedAPIInvRequest
++type CreateSecIndTrustedAPIInvRequest struct {
++	ApiInvokerId    *string
++	ServiceSecurity *models.CapifServiceSecurity
++}
++
++func (r *CreateSecIndTrustedAPIInvRequest) SetApiInvokerId(ApiInvokerId string) {
++	r.ApiInvokerId = &ApiInvokerId
++}
++
++func (r *CreateSecIndTrustedAPIInvRequest) SetServiceSecurity(ServiceSecurity models.CapifServiceSecurity) {
++	r.ServiceSecurity = &ServiceSecurity
++}
++
++type CreateSecIndTrustedAPIInvResponse struct {
++	// URI of the "Individual trusted API invoker" resource.
++	Location        string
++	ServiceSecurity models.CapifServiceSecurity
++}
++
++/*
++CreateSecIndTrustedAPIInv obtains the security method of the service API
++interfaces of an API invoker (Obtain_Security_Method):
++PUT {apiRoot}/capif-security/v1/trustedInvokers/{apiInvokerId} (TS 29.222
++clause 8.5.2.3.3.3).
++
++@return CreateSecIndTrustedAPIInvResponse
++*/
++func (a *IndividualTrustedAPIInvokerStoreApiService) CreateSecIndTrustedAPIInv(
++	ctx context.Context, request *CreateSecIndTrustedAPIInvRequest,
++) (*CreateSecIndTrustedAPIInvResponse, error) {
++	var localVarReturnValue CreateSecIndTrustedAPIInvResponse
++
++	if request.ApiInvokerId == nil {
++		return nil, openapi.ReportError("apiInvokerId is required and must be specified")
++	}
++	body, resp, err := do(ctx, a.client.cfg, http.MethodPut,
++		"/trustedInvokers/"+url.PathEscape(*request.ApiInvokerId), request.ServiceSecurity, nil)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 201 {
++		err = openapi.Deserialize(&localVarReturnValue.ServiceSecurity, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		localVarReturnValue.Location = resp.Header.Get("Location")
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in CreateSecIndTrustedAPIInv", resp.StatusCode)
++}
++
++// GetSecIndTrustedAPIInvRequest
++type GetSecIndTrustedAPIInvRequest struct {
++	ApiInvokerId       *string
++	AuthenticationInfo *bool
++	AuthorizationInfo  *bool
++}
++
++func (r *GetSecIndTrustedAPIInvRequest) SetApiInvokerId(ApiInvokerId string) {
++	r.ApiInvokerId = &ApiInvokerId
++}
++
++func (r *GetSecIndTrustedAPIInvRequest) SetAuthenticationInfo(AuthenticationInfo bool) {
++	r.AuthenticationInfo = &AuthenticationInfo
++}
++
++func (r *GetSecIndTrustedAPIInvRequest) SetAuthorizationInfo(AuthorizationInfo bool) {
++	r.AuthorizationInfo = &AuthorizationInfo
++}
++
++type GetSecIndTrustedAPIInvResponse struct {
++	ServiceSecurity models.CapifServiceSecurity
++}
++
++/*
++GetSecIndTrustedAPIInv obtains the security information of an API invoker
++(Obtain_API_Invoker_Info): GET {apiRoot}/capif-security/v1/trustedInvokers/
++{apiInvokerId} (TS 29.222 clause 8.5.2.3.3.1).
++
++@return GetSecIndTrustedAPIInvResponse
++*/
++func (a *IndividualTrustedAPIInvokerStoreApiService) GetSecIndTrustedAPIInv(
++	ctx context.Context, request *GetSecIndTrustedAPIInvRequest,
++) (*GetSecIndTrustedAPIInvResponse, error) {
++	var localVarReturnValue GetSecIndTrustedAPIInvResponse
++
++	if request.ApiInvokerId == nil {
++		return nil, openapi.ReportError("apiInvokerId is required and must be specified")
++	}
++	query := url.Values{}
++	if request.AuthenticationInfo != nil {
++		query.Add("authenticationInfo", strconv.FormatBool(*request.AuthenticationInfo))
++	}
++	if request.AuthorizationInfo != nil {
++		query.Add("authorizationInfo", strconv.FormatBool(*request.AuthorizationInfo))
++	}
++	body, resp, err := do(ctx, a.client.cfg, http.MethodGet,
++		"/trustedInvokers/"+url.PathEscape(*request.ApiInvokerId), nil, query)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	if resp.StatusCode == 200 {
++		err = openapi.Deserialize(&localVarReturnValue.ServiceSecurity, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in GetSecIndTrustedAPIInv", resp.StatusCode)
++}
++
++// GetOAuthIndAPIInvRequest
++type GetOAuthIndAPIInvRequest struct {
++	SecurityId     *string
++	AccessTokenReq *models.CapifAccessTokenReq
++}
++
++func (r *GetOAuthIndAPIInvRequest) SetSecurityId(SecurityId string) {
++	r.SecurityId = &SecurityId
++}
++
++func (r *GetOAuthIndAPIInvRequest) SetAccessTokenReq(AccessTokenReq models.CapifAccessTokenReq) {
++	r.AccessTokenReq = &AccessTokenReq
++}
++
++type GetOAuthIndAPIInvResponse struct {
++	AccessTokenRsp models.CapifAccessTokenRsp
++}
++
++/*
++GetOAuthIndAPIInv obtains an access token (Obtain_Authorization):
++POST {apiRoot}/capif-security/v1/securities/{securityId}/token, with the
++request in application/x-www-form-urlencoded (TS 29.222 clauses 5.6.2.3.2 and
++8.5.2.3.4.4). To authenticate with HTTP Basic instead of client_secret, put an
++openapi.BasicAuth in ctx under openapi.ContextBasicAuth. A 400 or 401 response
++gives a models.CapifAccessTokenErr as the error model.
++
++@return GetOAuthIndAPIInvResponse
++*/
++func (a *IndividualTrustedAPIInvokerStoreApiService) GetOAuthIndAPIInv(
++	ctx context.Context, request *GetOAuthIndAPIInvRequest,
++) (*GetOAuthIndAPIInvResponse, error) {
++	var localVarReturnValue GetOAuthIndAPIInvResponse
++
++	if request.SecurityId == nil || request.AccessTokenReq == nil {
++		return nil, openapi.ReportError("securityId and the access token request are required and must be specified")
++	}
++	form := url.Values{}
++	form.Add("grant_type", request.AccessTokenReq.GrantType)
++	form.Add("client_id", request.AccessTokenReq.ClientId)
++	if request.AccessTokenReq.ClientSecret != "" {
++		form.Add("client_secret", request.AccessTokenReq.ClientSecret)
++	}
++	if request.AccessTokenReq.Scope != "" {
++		form.Add("scope", request.AccessTokenReq.Scope)
++	}
++	localVarHeaderParams := map[string]string{
++		"Content-Type": "application/x-www-form-urlencoded",
++		"Accept":       "application/json, application/problem+json",
++	}
++	r, err := openapi.PrepareRequest(ctx, a.client.cfg,
++		a.client.cfg.BasePath()+"/securities/"+url.PathEscape(*request.SecurityId)+"/token",
++		http.MethodPost, nil, localVarHeaderParams, url.Values{}, form, "", "", nil)
++	if err != nil {
++		return nil, err
++	}
++	body, resp, err := send(a.client.cfg, r)
++	if err != nil || resp == nil {
++		return nil, err
++	}
++
++	switch resp.StatusCode {
++	case 200:
++		err = openapi.Deserialize(&localVarReturnValue.AccessTokenRsp, body, resp.Header.Get("Content-Type"))
++		if err != nil {
++			return nil, err
++		}
++		return &localVarReturnValue, nil
++	case 400, 401:
++		apiError := openapi.GenericOpenAPIError{RawBody: body, ErrorStatus: resp.StatusCode}
++		var v models.CapifAccessTokenErr
++		if err = openapi.Deserialize(&v, body, resp.Header.Get("Content-Type")); err == nil && v.Error != "" {
++			apiError.ErrorModel = v
++			return nil, apiError
++		}
++	}
++	if apiError, ok := decodeError(body, resp); ok {
++		return nil, apiError
++	}
++	return nil, openapi.ReportError("%d is not a valid status code in GetOAuthIndAPIInv", resp.StatusCode)
++}
+diff -ruN a/capif/Security/client.go b/capif/Security/client.go
+--- a/capif/Security/client.go
++++ b/capif/Security/client.go
+@@ -0,0 +1,38 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package Security
++
++// APIClient manages communication with the Security API v1.4.0.
++// In most cases there should be only one, shared, APIClient.
++type APIClient struct {
++	cfg    *Configuration
++	common service // Reuse a single struct instead of allocating one for each service on the heap.
++
++	// API Services
++	IndividualTrustedAPIInvokerStoreApi *IndividualTrustedAPIInvokerStoreApiService
++}
++
++type service struct {
++	client *APIClient
++}
++
++// NewAPIClient creates a new API client.
++func NewAPIClient(cfg *Configuration) *APIClient {
++	c := &APIClient{}
++	c.cfg = cfg
++	c.common.client = c
++
++	// API Services
++	c.IndividualTrustedAPIInvokerStoreApi = (*IndividualTrustedAPIInvokerStoreApiService)(&c.common)
++
++	return c
++}
+diff -ruN a/capif/Security/configuration.go b/capif/Security/configuration.go
+--- a/capif/Security/configuration.go
++++ b/capif/Security/configuration.go
+@@ -0,0 +1,93 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package Security
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/free5gc/openapi"
++)
++
++type Configuration struct {
++	url           string
++	basePath      string
++	host          string
++	defaultHeader map[string]string
++	userAgent     string
++	httpClient    *http.Client
++	MetricsHook   openapi.RequestMetricsHook
++}
++
++func NewConfiguration() *Configuration {
++	cfg := &Configuration{
++		basePath:      "https://example.com/capif-security/v1",
++		url:           "{apiRoot}/capif-security/v1",
++		defaultHeader: make(map[string]string),
++		userAgent:     "OpenAPI-Generator/1.0.0/go",
++		MetricsHook:   nil, // no-op unless the caller sets it
++	}
++	return cfg
++}
++
++func (c *Configuration) SetBasePath(apiRoot string) {
++	url := c.url
++
++	// Replace apiRoot
++	url = strings.Replace(url, "{"+"apiRoot"+"}", apiRoot, -1)
++
++	c.basePath = url
++}
++
++func (c *Configuration) BasePath() string {
++	return c.basePath
++}
++
++func (c *Configuration) Host() string {
++	return c.host
++}
++
++func (c *Configuration) SetHost(host string) {
++	c.host = host
++}
++
++func (c *Configuration) UserAgent() string {
++	return c.userAgent
++}
++
++func (c *Configuration) SetUserAgent(userAgent string) {
++	c.userAgent = userAgent
++}
++
++func (c *Configuration) DefaultHeader() map[string]string {
++	return c.defaultHeader
++}
++
++func (c *Configuration) AddDefaultHeader(key string, value string) {
++	c.defaultHeader[key] = value
++}
++
++func (c *Configuration) HTTPClient() *http.Client {
++	return c.httpClient
++}
++
++func (c *Configuration) SetHTTPClient(client *http.Client) {
++	c.httpClient = client
++}
++
++func (c *Configuration) Metrics() openapi.RequestMetricsHook {
++	return c.MetricsHook
++}
++
++func (c *Configuration) SetMetrics(h openapi.RequestMetricsHook) {
++	c.MetricsHook = h
++}
+diff -ruN a/models/model_capif_access_token_claims.go b/models/model_capif_access_token_claims.go
+--- a/models/model_capif_access_token_claims.go
++++ b/models/model_capif_access_token_claims.go
+@@ -0,0 +1,64 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++import (
++	"time"
++
++	"github.com/golang-jwt/jwt/v5"
++)
++
++// CapifAccessTokenClaims represents the claims of an access token issued by a
++// CAPIF core function (TS 29.222 clause 8.5.4.2.8; TS 33.122 Annex C.2.2).
++//
++// TS 29.222 requires iss with the API invoker ID and types exp as a duration;
++// TS 33.122 C.2.2 requires client_id with the API invoker ID and has no iss;
++// RFC 7519 defines exp as a NumericDate. This model carries both iss and
++// client_id with the API invoker ID, and exp as a NumericDate, an integer that
++// also fits the DurationSec type of the YAML. The attribute resOwnerId, of the
++// RNAA feature, is not modelled.
++type CapifAccessTokenClaims struct {
++	Iss      string `json:"iss" yaml:"iss" bson:"iss,omitempty"`
++	ClientId string `json:"client_id" yaml:"client_id" bson:"client_id,omitempty"`
++	Scope    string `json:"scope" yaml:"scope" bson:"scope,omitempty"`
++	// Expiration time, seconds since 1970-01-01T00:00:00Z UTC (RFC 7519 clause 4.1.4).
++	Exp int64 `json:"exp" yaml:"exp" bson:"exp,omitempty"`
++}
++
++// The methods below let golang-jwt sign and verify the claims (jwt.Claims).
++
++func (c CapifAccessTokenClaims) GetExpirationTime() (*jwt.NumericDate, error) {
++	if c.Exp == 0 {
++		return nil, nil
++	}
++	return jwt.NewNumericDate(time.Unix(c.Exp, 0)), nil
++}
++
++func (c CapifAccessTokenClaims) GetIssuedAt() (*jwt.NumericDate, error) {
++	return nil, nil
++}
++
++func (c CapifAccessTokenClaims) GetNotBefore() (*jwt.NumericDate, error) {
++	return nil, nil
++}
++
++func (c CapifAccessTokenClaims) GetIssuer() (string, error) {
++	return c.Iss, nil
++}
++
++func (c CapifAccessTokenClaims) GetSubject() (string, error) {
++	return "", nil
++}
++
++func (c CapifAccessTokenClaims) GetAudience() (jwt.ClaimStrings, error) {
++	return nil, nil
++}
+diff -ruN a/models/model_capif_access_token_err.go b/models/model_capif_access_token_err.go
+--- a/models/model_capif_access_token_err.go
++++ b/models/model_capif_access_token_err.go
+@@ -0,0 +1,31 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifAccessTokenErr represents an error of an access token request (TS
++// 29.222 clause 8.5.4.2.9; RFC 6749 clause 5.2).
++type CapifAccessTokenErr struct {
++	// One of the CapifAccessTokenErrError values.
++	Error            string `json:"error" yaml:"error" bson:"error,omitempty"`
++	ErrorDescription string `json:"error_description,omitempty" yaml:"error_description" bson:"error_description,omitempty"`
++	ErrorUri         string `json:"error_uri,omitempty" yaml:"error_uri" bson:"error_uri,omitempty"`
++}
++
++// Values of the error attribute of CapifAccessTokenErr (table 8.5.5.3-1).
++const (
++	CapifAccessTokenErrError_INVALID_REQUEST        = "invalid_request"
++	CapifAccessTokenErrError_INVALID_CLIENT         = "invalid_client"
++	CapifAccessTokenErrError_INVALID_GRANT          = "invalid_grant"
++	CapifAccessTokenErrError_UNAUTHORIZED_CLIENT    = "unauthorized_client"
++	CapifAccessTokenErrError_UNSUPPORTED_GRANT_TYPE = "unsupported_grant_type"
++	CapifAccessTokenErrError_INVALID_SCOPE          = "invalid_scope"
++)
+diff -ruN a/models/model_capif_access_token_req.go b/models/model_capif_access_token_req.go
+--- a/models/model_capif_access_token_req.go
++++ b/models/model_capif_access_token_req.go
+@@ -0,0 +1,27 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifAccessTokenReq represents an access token request (TS 29.222 clause
++// 8.5.4.2.6). It is sent as application/x-www-form-urlencoded (NOTE 1 of
++// table 8.5.4.2.6-1), not as JSON. The attributes of the RNAA feature are not
++// modelled.
++type CapifAccessTokenReq struct {
++	// "client_credentials".
++	GrantType string `json:"grant_type" yaml:"grant_type" bson:"grant_type,omitempty"`
++	// The API invoker ID.
++	ClientId string `json:"client_id" yaml:"client_id" bson:"client_id,omitempty"`
++	// The onboarding secret of the API invoker.
++	ClientSecret string `json:"client_secret,omitempty" yaml:"client_secret" bson:"client_secret,omitempty"`
++	// "3gpp#aefId1:apiName1,apiName2;aefId2:apiName3".
++	Scope string `json:"scope,omitempty" yaml:"scope" bson:"scope,omitempty"`
++}
+diff -ruN a/models/model_capif_access_token_rsp.go b/models/model_capif_access_token_rsp.go
+--- a/models/model_capif_access_token_rsp.go
++++ b/models/model_capif_access_token_rsp.go
+@@ -0,0 +1,25 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifAccessTokenRsp represents an access token response (TS 29.222 clause
++// 8.5.4.2.7).
++type CapifAccessTokenRsp struct {
++	// JWS Compact Serialization of the signed CapifAccessTokenClaims.
++	AccessToken string `json:"access_token" yaml:"access_token" bson:"access_token,omitempty"`
++	// "Bearer".
++	TokenType string `json:"token_type" yaml:"token_type" bson:"token_type,omitempty"`
++	// Seconds after which the access token is considered expired.
++	ExpiresIn int32 `json:"expires_in" yaml:"expires_in" bson:"expires_in,omitempty"`
++	// The granted scope.
++	Scope string `json:"scope,omitempty" yaml:"scope" bson:"scope,omitempty"`
++}
+diff -ruN a/models/model_capif_aef_profile.go b/models/model_capif_aef_profile.go
+--- a/models/model_capif_aef_profile.go
++++ b/models/model_capif_aef_profile.go
+@@ -0,0 +1,29 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifAefProfile represents the AEF profile of a service API (TS 29.222
++// clause 8.2.4.2.4). Exactly one of domainName and interfaceDescriptions is
++// present. The attributes grantTypes, aefLocation, serviceKpis and ueIpRange,
++// of optional features, are not modelled.
++type CapifAefProfile struct {
++	// Identifier of the API exposing function.
++	AefId      string          `json:"aefId" yaml:"aefId" bson:"aefId,omitempty"`
++	Versions   []CapifVersion  `json:"versions" yaml:"versions" bson:"versions,omitempty"`
++	Protocol   CapifProtocol   `json:"protocol,omitempty" yaml:"protocol" bson:"protocol,omitempty"`
++	DataFormat CapifDataFormat `json:"dataFormat,omitempty" yaml:"dataFormat" bson:"dataFormat,omitempty"`
++	// Security methods supported by the AEF for all its interfaces.
++	SecurityMethods []CapifSecurityMethod `json:"securityMethods,omitempty" yaml:"securityMethods" bson:"securityMethods,omitempty"`
++	// Domain name used to build the apiRoot of the API URI.
++	DomainName            string                      `json:"domainName,omitempty" yaml:"domainName" bson:"domainName,omitempty"`
++	InterfaceDescriptions []CapifInterfaceDescription `json:"interfaceDescriptions,omitempty" yaml:"interfaceDescriptions" bson:"interfaceDescriptions,omitempty"`
++}
+diff -ruN a/models/model_capif_api_invoker_enrolment_details.go b/models/model_capif_api_invoker_enrolment_details.go
+--- a/models/model_capif_api_invoker_enrolment_details.go
++++ b/models/model_capif_api_invoker_enrolment_details.go
+@@ -0,0 +1,36 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++import (
++	"time"
++)
++
++// CapifApiInvokerEnrolmentDetails represents the onboarding information of
++// the API invoker (TS 29.222 clause 8.4.4.2.2). The attribute failureReasons
++// of the CAPIF_Ext1 feature is not modelled.
++type CapifApiInvokerEnrolmentDetails struct {
++	// API invoker ID assigned by the CAPIF core function. Absent in the onboarding request.
++	ApiInvokerId          string                      `json:"apiInvokerId,omitempty" yaml:"apiInvokerId" bson:"apiInvokerId,omitempty"`
++	OnboardingInformation *CapifOnboardingInformation `json:"onboardingInformation" yaml:"onboardingInformation" bson:"onboardingInformation,omitempty"`
++	// URI where the notifications are delivered.
++	NotificationDestination string              `json:"notificationDestination" yaml:"notificationDestination" bson:"notificationDestination,omitempty"`
++	RequestTestNotification bool                `json:"requestTestNotification,omitempty" yaml:"requestTestNotification" bson:"requestTestNotification,omitempty"`
++	WebsockNotifConfig      *WebsockNotifConfig `json:"websockNotifConfig,omitempty" yaml:"websockNotifConfig" bson:"websockNotifConfig,omitempty"`
++	// In a request, the APIs the API invoker wants; in a response, the APIs it is allowed to invoke.
++	ApiList *CapifApiList `json:"apiList,omitempty" yaml:"apiList" bson:"apiList,omitempty"`
++	// Generic information on the API invoker, such as the device or the application.
++	ApiInvokerInformation string     `json:"apiInvokerInformation,omitempty" yaml:"apiInvokerInformation" bson:"apiInvokerInformation,omitempty"`
++	ExpTime               *time.Time `json:"expTime,omitempty" yaml:"expTime" bson:"expTime,omitempty"`
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SupportedFeatures string `json:"supportedFeatures,omitempty" yaml:"supportedFeatures" bson:"supportedFeatures,omitempty"`
++}
+diff -ruN a/models/model_capif_api_list.go b/models/model_capif_api_list.go
+--- a/models/model_capif_api_list.go
++++ b/models/model_capif_api_list.go
+@@ -0,0 +1,17 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifApiList represents a list of service APIs (TS 29.222 clause 8.4.4.2.4).
++type CapifApiList struct {
++	ServiceAPIDescriptions []CapifServiceApiDescription `json:"serviceAPIDescriptions,omitempty" yaml:"serviceAPIDescriptions" bson:"serviceAPIDescriptions,omitempty"`
++}
+diff -ruN a/models/model_capif_check_authentication_req.go b/models/model_capif_check_authentication_req.go
+--- a/models/model_capif_check_authentication_req.go
++++ b/models/model_capif_check_authentication_req.go
+@@ -0,0 +1,21 @@
++/*
++ * AEF_Security_API
++ *
++ * API for AEF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifCheckAuthenticationReq represents an authentication check request of
++// an API invoker to an API exposing function (TS 29.222 clause 9.1.4.2.2).
++type CapifCheckAuthenticationReq struct {
++	// API invoker ID assigned by the CAPIF core function.
++	ApiInvokerId string `json:"apiInvokerId" yaml:"apiInvokerId" bson:"apiInvokerId,omitempty"`
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SupportedFeatures string `json:"supportedFeatures" yaml:"supportedFeatures" bson:"supportedFeatures,omitempty"`
++}
+diff -ruN a/models/model_capif_check_authentication_rsp.go b/models/model_capif_check_authentication_rsp.go
+--- a/models/model_capif_check_authentication_rsp.go
++++ b/models/model_capif_check_authentication_rsp.go
+@@ -0,0 +1,19 @@
++/*
++ * AEF_Security_API
++ *
++ * API for AEF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifCheckAuthenticationRsp represents the response to an authentication
++// check request (TS 29.222 clause 9.1.4.2.3).
++type CapifCheckAuthenticationRsp struct {
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SupportedFeatures string `json:"supportedFeatures" yaml:"supportedFeatures" bson:"supportedFeatures,omitempty"`
++}
+diff -ruN a/models/model_capif_communication_type.go b/models/model_capif_communication_type.go
+--- a/models/model_capif_communication_type.go
++++ b/models/model_capif_communication_type.go
+@@ -0,0 +1,21 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifCommunicationType is the communication type of a resource or custom operation (TS 29.222 clause 8.2.4.3.5).
++type CapifCommunicationType string
++
++// List of CapifCommunicationType
++const (
++	CapifCommunicationType_REQUEST_RESPONSE CapifCommunicationType = "REQUEST_RESPONSE"
++	CapifCommunicationType_SUBSCRIBE_NOTIFY CapifCommunicationType = "SUBSCRIBE_NOTIFY"
++)
+diff -ruN a/models/model_capif_custom_operation.go b/models/model_capif_custom_operation.go
+--- a/models/model_capif_custom_operation.go
++++ b/models/model_capif_custom_operation.go
+@@ -0,0 +1,22 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifCustomOperation represents a custom operation of a service API (TS
++// 29.222 clause 8.2.4.2.7).
++type CapifCustomOperation struct {
++	CommType CapifCommunicationType `json:"commType" yaml:"commType" bson:"commType,omitempty"`
++	// The {custOpName} part of the custom operation URI (TS 29.122 clause 5.2.4).
++	CustOpName  string           `json:"custOpName" yaml:"custOpName" bson:"custOpName,omitempty"`
++	Operations  []CapifOperation `json:"operations,omitempty" yaml:"operations" bson:"operations,omitempty"`
++	Description string           `json:"description,omitempty" yaml:"description" bson:"description,omitempty"`
++}
+diff -ruN a/models/model_capif_data_format.go b/models/model_capif_data_format.go
+--- a/models/model_capif_data_format.go
++++ b/models/model_capif_data_format.go
+@@ -0,0 +1,22 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifDataFormat is the data format used by a service API (TS 29.222 clause 8.2.4.3.4).
++type CapifDataFormat string
++
++// List of CapifDataFormat
++const (
++	CapifDataFormat_JSON      CapifDataFormat = "JSON"
++	CapifDataFormat_XML       CapifDataFormat = "XML"
++	CapifDataFormat_PROTOBUF3 CapifDataFormat = "PROTOBUF3"
++)
+diff -ruN a/models/model_capif_discovered_apis.go b/models/model_capif_discovered_apis.go
+--- a/models/model_capif_discovered_apis.go
++++ b/models/model_capif_discovered_apis.go
+@@ -0,0 +1,21 @@
++/*
++ * CAPIF_Discover_Service_API
++ *
++ * API for discovering service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifDiscoveredApis represents the service APIs that match a discovery
++// request (TS 29.222 clause 8.1.4.2.2). Without any match, the attribute
++// serviceAPIDescriptions is absent (cardinality 1..N).
++type CapifDiscoveredApis struct {
++	ServiceAPIDescriptions []CapifServiceApiDescription `json:"serviceAPIDescriptions,omitempty" yaml:"serviceAPIDescriptions" bson:"serviceAPIDescriptions,omitempty"`
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SuppFeat string `json:"suppFeat,omitempty" yaml:"suppFeat" bson:"suppFeat,omitempty"`
++}
+diff -ruN a/models/model_capif_interface_description.go b/models/model_capif_interface_description.go
+--- a/models/model_capif_interface_description.go
++++ b/models/model_capif_interface_description.go
+@@ -0,0 +1,27 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifInterfaceDescription represents the interface of an API exposing
++// function (TS 29.222 clause 8.2.4.2.3). Exactly one of ipv4Addr, ipv6Addr and
++// fqdn is present. The attribute grantTypes, of the RNAA feature, is not
++// modelled.
++type CapifInterfaceDescription struct {
++	Ipv4Addr string `json:"ipv4Addr,omitempty" yaml:"ipv4Addr" bson:"ipv4Addr,omitempty"`
++	Ipv6Addr string `json:"ipv6Addr,omitempty" yaml:"ipv6Addr" bson:"ipv6Addr,omitempty"`
++	Fqdn     string `json:"fqdn,omitempty" yaml:"fqdn" bson:"fqdn,omitempty"`
++	Port     int32  `json:"port,omitempty" yaml:"port" bson:"port,omitempty"`
++	// Deployment-specific path segments that start with "/".
++	ApiPrefix string `json:"apiPrefix,omitempty" yaml:"apiPrefix" bson:"apiPrefix,omitempty"`
++	// Security methods of this interface; they take precedence over those of the AEF profile.
++	SecurityMethods []CapifSecurityMethod `json:"securityMethods,omitempty" yaml:"securityMethods" bson:"securityMethods,omitempty"`
++}
+diff -ruN a/models/model_capif_onboarding_information.go b/models/model_capif_onboarding_information.go
+--- a/models/model_capif_onboarding_information.go
++++ b/models/model_capif_onboarding_information.go
+@@ -0,0 +1,24 @@
++/*
++ * CAPIF_API_Invoker_Management_API
++ *
++ * API for API invoker management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifOnboardingInformation represents the onboarding information of the API
++// invoker (TS 29.222 clause 8.4.4.2.5). The attribute onboardingCriteria of
++// the CAPIF_Ext1 feature is not modelled.
++type CapifOnboardingInformation struct {
++	// The public key of the API invoker.
++	ApiInvokerPublicKey string `json:"apiInvokerPublicKey" yaml:"apiInvokerPublicKey" bson:"apiInvokerPublicKey,omitempty"`
++	// The client certificate of the API invoker; its subject Common Name is the API invoker ID.
++	ApiInvokerCertificate string `json:"apiInvokerCertificate,omitempty" yaml:"apiInvokerCertificate" bson:"apiInvokerCertificate,omitempty"`
++	// The onboarding secret of the API invoker, provided by the CAPIF core function.
++	OnboardingSecret string `json:"onboardingSecret,omitempty" yaml:"onboardingSecret" bson:"onboardingSecret,omitempty"`
++}
+diff -ruN a/models/model_capif_operation.go b/models/model_capif_operation.go
+--- a/models/model_capif_operation.go
++++ b/models/model_capif_operation.go
+@@ -0,0 +1,24 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifOperation is an HTTP method supported by a resource or custom operation (TS 29.222 clause 8.2.4.3.7).
++type CapifOperation string
++
++// List of CapifOperation
++const (
++	CapifOperation_GET    CapifOperation = "GET"
++	CapifOperation_POST   CapifOperation = "POST"
++	CapifOperation_PUT    CapifOperation = "PUT"
++	CapifOperation_PATCH  CapifOperation = "PATCH"
++	CapifOperation_DELETE CapifOperation = "DELETE"
++)
+diff -ruN a/models/model_capif_protocol.go b/models/model_capif_protocol.go
+--- a/models/model_capif_protocol.go
++++ b/models/model_capif_protocol.go
+@@ -0,0 +1,23 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifProtocol is the protocol used by a service API (TS 29.222 clause 8.2.4.3.3).
++type CapifProtocol string
++
++// List of CapifProtocol
++const (
++	CapifProtocol_HTTP_1_1  CapifProtocol = "HTTP_1_1"
++	CapifProtocol_HTTP_2    CapifProtocol = "HTTP_2"
++	CapifProtocol_MQTT      CapifProtocol = "MQTT"
++	CapifProtocol_WEBSOCKET CapifProtocol = "WEBSOCKET"
++)
+diff -ruN a/models/model_capif_resource.go b/models/model_capif_resource.go
+--- a/models/model_capif_resource.go
++++ b/models/model_capif_resource.go
+@@ -0,0 +1,26 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifResource represents a resource of a service API (TS 29.222 clause
++// 8.2.4.2.6).
++type CapifResource struct {
++	ResourceName string                 `json:"resourceName" yaml:"resourceName" bson:"resourceName,omitempty"`
++	CommType     CapifCommunicationType `json:"commType" yaml:"commType" bson:"commType,omitempty"`
++	// The {apiSpecificSuffixes} part of the resource URI (TS 29.122 clause 5.2.4).
++	Uri string `json:"uri" yaml:"uri" bson:"uri,omitempty"`
++	// The custom operation of the resource, when there is only one.
++	CustOpName     string                 `json:"custOpName,omitempty" yaml:"custOpName" bson:"custOpName,omitempty"`
++	CustOperations []CapifCustomOperation `json:"custOperations,omitempty" yaml:"custOperations" bson:"custOperations,omitempty"`
++	Operations     []CapifOperation       `json:"operations,omitempty" yaml:"operations" bson:"operations,omitempty"`
++	Description    string                 `json:"description,omitempty" yaml:"description" bson:"description,omitempty"`
++}
+diff -ruN a/models/model_capif_security_information.go b/models/model_capif_security_information.go
+--- a/models/model_capif_security_information.go
++++ b/models/model_capif_security_information.go
+@@ -0,0 +1,31 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifSecurityInformation represents the security method of one service API
++// interface (TS 29.222 clause 8.5.4.2.3). Exactly one of interfaceDetails and
++// aefId is present. The attribute grantType, of the RNAA feature, is not
++// modelled.
++type CapifSecurityInformation struct {
++	InterfaceDetails *CapifInterfaceDescription `json:"interfaceDetails,omitempty" yaml:"interfaceDetails" bson:"interfaceDetails,omitempty"`
++	// Identifier of the API exposing function.
++	AefId string `json:"aefId,omitempty" yaml:"aefId" bson:"aefId,omitempty"`
++	// API identifier (SecurityInfoPerAPI feature).
++	ApiId               string                `json:"apiId,omitempty" yaml:"apiId" bson:"apiId,omitempty"`
++	PrefSecurityMethods []CapifSecurityMethod `json:"prefSecurityMethods" yaml:"prefSecurityMethods" bson:"prefSecurityMethods,omitempty"`
++	// Selected by the CAPIF core function; absent when there is no common method.
++	SelSecurityMethod CapifSecurityMethod `json:"selSecurityMethod,omitempty" yaml:"selSecurityMethod" bson:"selSecurityMethod,omitempty"`
++	// Authentication related information. The format is not defined by TS 29.222.
++	AuthenticationInfo string `json:"authenticationInfo,omitempty" yaml:"authenticationInfo" bson:"authenticationInfo,omitempty"`
++	// Authorization related information. The format is not defined by TS 29.222.
++	AuthorizationInfo string `json:"authorizationInfo,omitempty" yaml:"authorizationInfo" bson:"authorizationInfo,omitempty"`
++}
+diff -ruN a/models/model_capif_security_method.go b/models/model_capif_security_method.go
+--- a/models/model_capif_security_method.go
++++ b/models/model_capif_security_method.go
+@@ -0,0 +1,22 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifSecurityMethod is a CAPIF-2e security method of TS 33.122 clause 6.5.2 (TS 29.222 clause 8.2.4.3.6).
++type CapifSecurityMethod string
++
++// List of CapifSecurityMethod
++const (
++	CapifSecurityMethod_PSK   CapifSecurityMethod = "PSK"
++	CapifSecurityMethod_PKI   CapifSecurityMethod = "PKI"
++	CapifSecurityMethod_OAUTH CapifSecurityMethod = "OAUTH"
++)
+diff -ruN a/models/model_capif_service_api_description.go b/models/model_capif_service_api_description.go
+--- a/models/model_capif_service_api_description.go
++++ b/models/model_capif_service_api_description.go
+@@ -0,0 +1,35 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifServiceApiDescription represents the description of a service API as
++// published by the API publishing function (TS 29.222 clause 8.2.4.2.2). The
++// attributes apiStatus, pubApiPath and netSliceInfo, of optional features or
++// CCF interconnection, are not modelled.
++type CapifServiceApiDescription struct {
++	// The <apiName> of the API URI (TS 29.122 clause 5.2.4).
++	ApiName string `json:"apiName" yaml:"apiName" bson:"apiName,omitempty"`
++	// API identifier assigned by the CCF. Absent in the publication request.
++	ApiId       string            `json:"apiId,omitempty" yaml:"apiId" bson:"apiId,omitempty"`
++	AefProfiles []CapifAefProfile `json:"aefProfiles,omitempty" yaml:"aefProfiles" bson:"aefProfiles,omitempty"`
++	// Text description of the API.
++	Description string `json:"description,omitempty" yaml:"description" bson:"description,omitempty"`
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SupportedFeatures  string                     `json:"supportedFeatures,omitempty" yaml:"supportedFeatures" bson:"supportedFeatures,omitempty"`
++	ShareableInfo      *CapifShareableInformation `json:"shareableInfo,omitempty" yaml:"shareableInfo" bson:"shareableInfo,omitempty"`
++	ServiceAPICategory string                     `json:"serviceAPICategory,omitempty" yaml:"serviceAPICategory" bson:"serviceAPICategory,omitempty"`
++	// Features supported by the service API itself (TS 29.571 SupportedFeatures).
++	ApiSuppFeats string `json:"apiSuppFeats,omitempty" yaml:"apiSuppFeats" bson:"apiSuppFeats,omitempty"`
++	// CCF to contact for the details of the service API (CAPIF-6/6e only).
++	CcfId       string `json:"ccfId,omitempty" yaml:"ccfId" bson:"ccfId,omitempty"`
++	ApiProvName string `json:"apiProvName,omitempty" yaml:"apiProvName" bson:"apiProvName,omitempty"`
++}
+diff -ruN a/models/model_capif_service_security.go b/models/model_capif_service_security.go
+--- a/models/model_capif_service_security.go
++++ b/models/model_capif_service_security.go
+@@ -0,0 +1,26 @@
++/*
++ * CAPIF_Security_API
++ *
++ * API for CAPIF security management.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifServiceSecurity represents the security methods of the service API
++// interfaces of an API invoker (TS 29.222 clause 8.5.4.2.2). In a request,
++// the API invoker gives its preferred methods; in a response, the CAPIF core
++// function gives the selected ones.
++type CapifServiceSecurity struct {
++	SecurityInfo []CapifSecurityInformation `json:"securityInfo" yaml:"securityInfo" bson:"securityInfo,omitempty"`
++	// URI where the security related notifications are delivered.
++	NotificationDestination string              `json:"notificationDestination" yaml:"notificationDestination" bson:"notificationDestination,omitempty"`
++	RequestTestNotification bool                `json:"requestTestNotification,omitempty" yaml:"requestTestNotification" bson:"requestTestNotification,omitempty"`
++	WebsockNotifConfig      *WebsockNotifConfig `json:"websockNotifConfig,omitempty" yaml:"websockNotifConfig" bson:"websockNotifConfig,omitempty"`
++	// A string used to indicate the features supported by an API (TS 29.571).
++	SupportedFeatures string `json:"supportedFeatures,omitempty" yaml:"supportedFeatures" bson:"supportedFeatures,omitempty"`
++}
+diff -ruN a/models/model_capif_shareable_information.go b/models/model_capif_shareable_information.go
+--- a/models/model_capif_shareable_information.go
++++ b/models/model_capif_shareable_information.go
+@@ -0,0 +1,19 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++// CapifShareableInformation tells whether a service API can be published to
++// other CAPIF core functions (TS 29.222 clause 8.2.4.2.8).
++type CapifShareableInformation struct {
++	IsShareable   bool     `json:"isShareable" yaml:"isShareable" bson:"isShareable,omitempty"`
++	CapifProvDoms []string `json:"capifProvDoms,omitempty" yaml:"capifProvDoms" bson:"capifProvDoms,omitempty"`
++}
+diff -ruN a/models/model_capif_version.go b/models/model_capif_version.go
+--- a/models/model_capif_version.go
++++ b/models/model_capif_version.go
+@@ -0,0 +1,27 @@
++/*
++ * CAPIF_Publish_Service_API
++ *
++ * API for publishing service APIs.
++ *
++ * Source file: 3GPP TS 29.222 V19.8.0; Common API Framework for 3GPP Northbound APIs
++ * Url: https://www.3gpp.org/ftp/Specs/archive/29_series/29.222/
++ *
++ * API version: 1.4.0
++ */
++
++package models
++
++import (
++	"time"
++)
++
++// CapifVersion represents a version of a service API (TS 29.222 clause
++// 8.2.4.2.5).
++type CapifVersion struct {
++	// API major version in the URI, for example "v1".
++	ApiVersion string          `json:"apiVersion" yaml:"apiVersion" bson:"apiVersion,omitempty"`
++	Expiry     *time.Time      `json:"expiry,omitempty" yaml:"expiry" bson:"expiry,omitempty"`
++	Resources  []CapifResource `json:"resources,omitempty" yaml:"resources" bson:"resources,omitempty"`
++	// Custom operations without resource association.
++	CustOperations []CapifCustomOperation `json:"custOperations,omitempty" yaml:"custOperations" bson:"custOperations,omitempty"`
++}

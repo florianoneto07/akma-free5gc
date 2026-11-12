@@ -1,0 +1,325 @@
+diff --git a/amfcfg.yaml b/amfcfg.yaml
+index dccb1ae..b0b9830 100644
+--- a/amfcfg.yaml
++++ b/amfcfg.yaml
+@@ -5,3 +5,3 @@ info:
+ configuration:
+-  amfName: AMF # the name of this AMF
++  amfName: amf1.amf.5gc.mnc093.mcc208.3gppnetwork.org # the AMF Name (TS 23.003 cl. 28.3.2.5)
+   ngapIpList:  # the IP list of N2 interfaces on this AMF
+@@ -11,4 +11,6 @@ configuration:
+   # Service-based Interface (SBI) Configuration
++  nfInstanceId: 63db01ad-fce2-4fde-8b78-3a62c60f3b8e # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi:
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: amf1.amf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.18 # IP used to register to NRF
+@@ -17,4 +19,5 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/amf.pem # AMF TLS Certificate
+-      key: cert/amf.key # AMF TLS Private key
++      pem: cert/sba/amf.pem # AMF TLS Certificate
++      key: cert/sba/amf.key # AMF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+ 
+@@ -58,3 +61,3 @@ configuration:
+     - internet
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+diff --git a/ausfcfg.yaml b/ausfcfg.yaml
+index 1ec16b5..fc97683 100644
+--- a/ausfcfg.yaml
++++ b/ausfcfg.yaml
+@@ -5,4 +5,6 @@ info:
+ configuration:
++  nfInstanceId: 50188f39-0103-42de-9c96-08d90549a2c0 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: ausf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.9 # IP used to register to NRF
+@@ -11,7 +13,8 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/ausf.pem # AUSF TLS Certificate
+-      key: cert/ausf.key # AUSF TLS Private key
++      pem: cert/sba/ausf.pem # AUSF TLS Certificate
++      key: cert/sba/ausf.key # AUSF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+   serviceNameList: # the SBI services provided by this AUSF, refer to TS 29.509
+     - nausf-auth # Nausf_UEAuthentication service
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+@@ -26,3 +29,3 @@ configuration:
+     enable: true # derive K_AKMA and A-KID and register them at the AAnF when the UDM sends the AKMA indication
+-    # aanfUri: http://192.168.16.130:8010 # AAnF apiRoot; when absent the AAnF is discovered at the NRF
++    # aanfUri: https://aanf.5gc.mnc093.mcc208.3gppnetwork.org:8010 # AAnF apiRoot; when absent the AAnF is discovered at the NRF
+ 
+diff --git a/bsfcfg.yaml b/bsfcfg.yaml
+index 5f3d5fb..b8683c6 100644
+--- a/bsfcfg.yaml
++++ b/bsfcfg.yaml
+@@ -6,4 +6,6 @@ configuration:
+   bsfName: BSF # the name of this BSF
++  nfInstanceId: 19d6c78c-73ed-4add-b121-78f3581c2c66 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: bsf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.15 # IP used to register to NRF
+@@ -12,5 +14,6 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/bsf.pem # BSF TLS Certificate
+-      key: cert/bsf.key # BSF TLS Private key
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++      pem: cert/sba/bsf.pem # BSF TLS Certificate
++      key: cert/sba/bsf.key # BSF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+diff --git a/chfcfg.yaml b/chfcfg.yaml
+index 72dbd5d..72c699f 100644
+--- a/chfcfg.yaml
++++ b/chfcfg.yaml
+@@ -6,4 +6,6 @@ configuration:
+   chfName: CHF # the name of this CHF
++  nfInstanceId: 58591ae4-e433-4544-913f-8184ec62ac1a # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: chf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.113 # IP used to register to NRF
+@@ -12,5 +14,6 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/chf.pem # CHF TLS Certificate
+-      key: cert/chf.key # CHF TLS Private key
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++      pem: cert/sba/chf.pem # CHF TLS Certificate
++      key: cert/sba/chf.key # CHF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+diff --git a/nefcfg.yaml b/nefcfg.yaml
+index 293368b..47e3397 100644
+--- a/nefcfg.yaml
++++ b/nefcfg.yaml
+@@ -5,4 +5,6 @@ info:
+ configuration:
++  nfInstanceId: 8e73ad07-906c-4952-93ac-cd32bbb076ed # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi:
+-    scheme: http # The protocol for sbi (http or https)
++    scheme: https # The protocol for sbi (http or https)
++    fqdn: nef.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 192.168.16.130 # IP used to register to NRF; reachable from the external AF (AKMA, TS 33.535 cl. 6.3)
+@@ -11,5 +13,6 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/nef.pem # NEF TLS Certificate
+-      key: cert/nef.key # NEF TLS Private key
+-  nrfUri: http://127.0.0.10:8000 # A valid URI of NRF
++      pem: cert/sba/nef.pem # NEF TLS Certificate
++      key: cert/sba/nef.key # NEF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # A valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+@@ -55,3 +58,6 @@ configuration:
+           - 192.168.16.129
+-      - afId: af3.akma.example.FF00000001 # test only: accepted here and not by the AAnF (negative test E07)
++      - afId: af3.akma.example.FF00000001 # test only: outside the profile of the API invoker (negative test CP16)
++        sourceAddresses:
++          - 192.168.16.129
++      - afId: af5.akma.example.FF00000001 # test only: accepted here and by the CCF, not by the AAnF (negative test E07)
+         sourceAddresses:
+@@ -64,5 +70,7 @@ configuration:
+     interface: # published for 3gpp-akma (CAPIF-2e)
+-      ipv4Addr: 192.168.16.130
++      fqdn: nef.5gc.mnc093.mcc208.3gppnetwork.org
+       port: 8000
+     invokerInfoLifetime: 10m # how long the NEF keeps the data of an API invoker
++    invokerCa: cert/ccf-ca.pem # client certificates on CAPIF-2e (TS 33.122 cl. 6.5.2.3 step 5)
++    invokerCrl: false # they have no CRL distribution point yet
+     allowNrfTokens: true # 3gpp-akma also without CAPIF, with access tokens of the NRF (TS 29.522 cl. 6)
+diff --git a/nrfcfg.yaml b/nrfcfg.yaml
+index b4b0264..21e35ba 100644
+--- a/nrfcfg.yaml
++++ b/nrfcfg.yaml
+@@ -7,4 +7,6 @@ configuration:
+   MongoDBUrl: mongodb://127.0.0.1:27017 # a valid URL of the mongodb
++  nfInstanceId: cdee1983-45ab-41a6-8f5b-6f832d5206e8 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: nrf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.10 # IP used to serve NFs or register to another NRF
+@@ -12,2 +14,6 @@ configuration:
+     port: 8000 # port used to bind the service
++    tls: # the certificate of the SBI (TS 33.310 cl. 6.1.3c.3)
++      pem: cert/sba/nrf.pem # NRF TLS Certificate
++      key: cert/sba/nrf.key # NRF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+     cert: # the local path of TLS key
+diff --git a/nssfcfg.yaml b/nssfcfg.yaml
+index dbf5cec..1144578 100644
+--- a/nssfcfg.yaml
++++ b/nssfcfg.yaml
+@@ -6,4 +6,6 @@ configuration:
+   nssfName: NSSF # the name of this NSSF
++  nfInstanceId: 230cf6b8-a555-44d2-951b-46c1f99c052c # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: nssf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.31 # IP used to register to NRF
+@@ -12,4 +14,5 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/nssf.pem # NSSF TLS Certificate
+-      key: cert/nssf.key # NSSF TLS Private key
++      pem: cert/sba/nssf.pem # NSSF TLS Certificate
++      key: cert/sba/nssf.key # NSSF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+   serviceNameList: # the SBI services provided by this SMF, refer to TS 29.531
+@@ -17,3 +20,3 @@ configuration:
+     - nnssf-nssaiavailability # Nnssf_NSSAIAvailability service
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+@@ -42,3 +45,3 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 10
+@@ -49,3 +52,3 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 11
+@@ -56,5 +59,5 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 12
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 12
+@@ -65,3 +68,3 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 13
+@@ -71,3 +74,3 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 20
+@@ -78,3 +81,3 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 21
+@@ -85,3 +88,3 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 22
+@@ -92,3 +95,3 @@ configuration:
+         # the NRF to be used to select the NFs/services within the selected NSI, and an optonal ID
+-        - nrfId: http://127.0.0.10:8000/nnrf-nfm/v1/nf-instances
++        - nrfId: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000/nnrf-nfm/v1/nf-instances
+           nsiId: 23
+diff --git a/pcfcfg.yaml b/pcfcfg.yaml
+index e8de44e..c490ad2 100644
+--- a/pcfcfg.yaml
++++ b/pcfcfg.yaml
+@@ -6,4 +6,6 @@ configuration:
+   pcfName: PCF # the name of this PCF
++  nfInstanceId: 0e663921-9c8d-4714-8ee2-9e95b935c339 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: pcf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.7 # IP used to register to NRF
+@@ -12,7 +14,8 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/pcf.pem # PCF TLS Certificate
+-      key: cert/pcf.key # PCF TLS Private key
++      pem: cert/sba/pcf.pem # PCF TLS Certificate
++      key: cert/sba/pcf.key # PCF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+   timeFormat: 2019-01-02 15:04:05 # time format of this PCF
+   defaultBdtRefId: BdtPolicyId-   # BDT Reference ID, indicating transfer policies of background data transfer.
+-  nrfUri: http://127.0.0.10:8000  # a valid URI of NRF
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000  # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+diff --git a/smfcfg.yaml b/smfcfg.yaml
+index d5ef899..5ecf462 100644
+--- a/smfcfg.yaml
++++ b/smfcfg.yaml
+@@ -8,4 +8,6 @@ configuration:
+   # Service-based interface information
++  nfInstanceId: 5668c69e-db35-4954-9b51-8f7a477772a3 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi:
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: smf.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.2 # IP used to register to NRF
+@@ -14,4 +16,5 @@ configuration:
+     tls: # the local path of TLS key
+-      key: cert/smf.key # SMF TLS Certificate
+-      pem: cert/smf.pem # SMF TLS Private key
++      key: cert/sba/smf.key # SMF TLS Certificate
++      pem: cert/sba/smf.pem # SMF TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+ 
+@@ -115,3 +118,3 @@ configuration:
+ 
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+diff --git a/udmcfg.yaml b/udmcfg.yaml
+index e74368e..63ff1da 100644
+--- a/udmcfg.yaml
++++ b/udmcfg.yaml
+@@ -11,4 +11,6 @@ configuration:
+     - nudm-pp # Nudm_ParameterProvisionDataManagement service
++  nfInstanceId: 878d3e9f-16c2-4ba8-8587-e7a238604028 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: udm.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.3 # IP used to register to NRF
+@@ -17,5 +19,6 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/udm.pem # UDM TLS Certificate
+-      key: cert/udm.key # UDM TLS Private key
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++      pem: cert/sba/udm.pem # UDM TLS Certificate
++      key: cert/sba/udm.key # UDM TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate
+diff --git a/udrcfg.yaml b/udrcfg.yaml
+index 8713ef7..9bc9cf5 100644
+--- a/udrcfg.yaml
++++ b/udrcfg.yaml
+@@ -5,4 +5,6 @@ info:
+ configuration:
++  nfInstanceId: 9a7ed375-75f5-450d-a524-ed1d813fb164 # fixed: the one of the certificate (TS 33.310 cl. 6.1.3c.3)
+   sbi: # Service-based interface information
+-    scheme: http # the protocol for sbi (http or https)
++    scheme: https # the protocol for sbi (http or https)
++    fqdn: udr.5gc.mnc093.mcc208.3gppnetwork.org # by name (TS 29.510 cl. 6.1.6.2.2 NOTE 1); without it, by IP address
+     registerIPv4: 127.0.0.4 # IP used to register to NRF
+@@ -11,4 +13,5 @@ configuration:
+     tls: # the local path of TLS key
+-      pem: cert/udr.pem # UDR TLS Certificate
+-      key: cert/udr.key # UDR TLS Private key
++      pem: cert/sba/udr.pem # UDR TLS Certificate
++      key: cert/sba/udr.key # UDR TLS Private key
++      ca: cert/sba/sba-ca.pem # CA of the operator: the certificates of the peers
+   dbConnectorType: mongodb 
+@@ -17,3 +20,3 @@ configuration:
+     url: mongodb://localhost:27017 # URL of MongoDB
+-  nrfUri: http://127.0.0.10:8000 # a valid URI of NRF
++  nrfUri: https://nrf.5gc.mnc093.mcc208.3gppnetwork.org:8000 # a valid URI of NRF
+   nrfCertPem: cert/nrf.pem # NRF Certificate

@@ -47,12 +47,33 @@ mapfile -t patches < <(find "$patch_dir" -maxdepth 1 -name '*.patch' | sort)
 mapfile -t files < <(for p in "${patches[@]}"; do gitapply --numstat "$p"; done | cut -f3 | sort -u)
 gitstatus() { git -C "$root" status --porcelain "$@" -- "${files[@]}"; }
 
-applied() {
-    local p
-    for p in "${patches[@]}"; do
-        gitapply --reverse --check "$p" 2>/dev/null || return 1
+# series_check forward|reverse: apply the patches in order, or reverse them
+# from the last, on a scratch copy of the files they touch. A patch of a
+# series may depend on the previous ones, which "git apply --check" of each
+# patch alone does not allow for.
+series_check() {
+    local tmp f i rc=0
+    tmp="$(mktemp -d)"
+    for f in "${files[@]}"; do
+        if [ -e "$root/$f" ]; then
+            mkdir -p "$tmp/$(dirname "$f")"
+            cp -p "$root/$f" "$tmp/$f"
+        fi
     done
+    if [ "$1" = reverse ]; then
+        for ((i = ${#patches[@]} - 1; i >= 0; i--)); do
+            git -C "$tmp" apply --reverse ${prefix:+--directory="$prefix"} "${patches[$i]}" 2>/dev/null || { rc=1; break; }
+        done
+    else
+        for i in "${!patches[@]}"; do
+            git -C "$tmp" apply ${prefix:+--directory="$prefix"} "${patches[$i]}" || { rc=1; break; }
+        done
+    fi
+    rm -rf "$tmp"
+    return $rc
 }
+
+applied() { series_check reverse; }
 
 case "$action" in
 status)
@@ -68,7 +89,7 @@ apply)
             gitstatus --untracked-files=no >&2
             exit 1
         fi
-        for p in "${patches[@]}"; do gitapply --check "$p"; done
+        series_check forward || { echo "the patches of $patch_dir do not apply to $src" >&2; exit 1; }
         for p in "${patches[@]}"; do gitapply "$p"; echo "applied $(basename "$p")"; done
     fi
     if [ "$build" = false ]; then

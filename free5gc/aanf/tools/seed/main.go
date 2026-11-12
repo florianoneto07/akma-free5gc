@@ -6,15 +6,20 @@
 //	retrieve  plays the AF: sends Naanf_AKMA_ApplicationKey_Get
 //	          (TS 33.535 cl. 6.2.1) and prints K_AF and its expiry;
 //	remove    sends Naanf_AKMA_ContextRemove (TS 33.535 cl. 6.6);
+//	token     prints an access token of the NRF, for the negative tests;
 //	discover  queries the NRF for AAnF instances (Nnrf_NFDiscovery) and
 //	          prints their profiles;
 //	trigger-auth
 //	          does what the AAnF does to refresh K_AKMA (TS 33.535
 //	          cl. 6.4.4): sends Nudm_UECM_AuthTrigger to the UDM.
 //
+// With https URIs, the tool is a TLS client of the SBI: by default, with the
+// certificate of the role of the command, in ~/free5gc/cert/sba.
+//
 // With --nrf, register, remove and trigger-auth first obtain an OAuth2 access
-// token: the tool registers at the NRF as a temporary NF of type AF (the NRF
-// of free5GC only grants tokens to registered NFs) and deregisters on exit.
+// token: the tool registers at the NRF as a temporary NF, with the identity of
+// its certificate (the NRF of free5GC only grants tokens to registered NFs),
+// and deregisters on exit.
 // discover does the same to obtain a token for nnrf-disc.
 package main
 
@@ -26,6 +31,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,6 +49,7 @@ import (
 	Nnrf_NFDiscovery "github.com/free5gc/openapi/nrf/NFDiscovery"
 	Nnrf_NFManagement "github.com/free5gc/openapi/nrf/NFManagement"
 	"github.com/free5gc/openapi/oauth"
+	"github.com/free5gc/openapi/sbitls"
 	Nudm_UEContextManagement "github.com/free5gc/openapi/udm/UEContextManagement"
 )
 
@@ -50,13 +57,29 @@ import (
 // AF it registers at the NRF (TS 29.500 table 5.2.2.2-1).
 const seedUserAgent = "AF-seed"
 
-// defaultNfInstanceID is the NF instance ID of the temporary AF profile. It is
-// fixed so that the certificate the NRF signs for it (cert/af_<id>.pem) is
-// the same file on every run.
+// defaultNfInstanceID is the NF instance ID of the temporary AF profile,
+// without a TLS certificate.
 const defaultNfInstanceID = "76a7ade7-c7d6-4e09-8d66-2726fd6f2cb9"
 
+// certDir is the folder of the certificates of make-sba-certs.sh on the
+// free5GC host, under the home directory.
+const certDir = "free5gc/cert/sba"
+
+// commandCertificate is the certificate of each command: the role the tool
+// plays in it.
+var commandCertificate = map[string]string{
+	"register":     "seed-ausf",
+	"remove":       "seed-ausf",
+	"retrieve":     "af1",
+	"discover":     "seed-af",
+	"trigger-auth": "seed-af",
+	"token":        "seed-af",
+}
+
 func main() {
-	aanfFlag := &cli.StringFlag{Name: "aanf", Value: "http://192.168.16.130:8010", Usage: "AAnF apiRoot"}
+	aanfFlag := &cli.StringFlag{
+		Name: "aanf", Value: "https://aanf.5gc.mnc093.mcc208.3gppnetwork.org:8010", Usage: "AAnF apiRoot",
+	}
 	nrfFlags := []cli.Flag{
 		&cli.StringFlag{Name: "nrf", Usage: "NRF apiRoot; when set, an OAuth2 access token is obtained"},
 		&cli.StringFlag{Name: "nf-id", Value: defaultNfInstanceID, Usage: "NF instance ID of the temporary AF profile"},
@@ -116,7 +139,7 @@ func main() {
 				Name:  "trigger-auth",
 				Usage: "ask the UDM for a primary authentication of a SUPI (AAnF role, Nudm_UECM_AuthTrigger)",
 				Flags: append([]cli.Flag{
-					&cli.StringFlag{Name: "udm", Value: "http://127.0.0.3:8000", Usage: "UDM apiRoot"},
+					&cli.StringFlag{Name: "udm", Value: "https://udm.5gc.mnc093.mcc208.3gppnetwork.org:8000", Usage: "UDM apiRoot"},
 					&cli.StringFlag{Name: "supi", Required: true, Usage: "SUPI, SBI form (imsi-...)"},
 					// Negative tests: the request is sent as given.
 					&cli.StringFlag{Name: "method", Usage: "send with this HTTP method (test)"},
@@ -124,12 +147,66 @@ func main() {
 				}, nrfFlags...),
 				Action: triggerAuth,
 			},
+			{
+				Name:  "token",
+				Usage: "print an access token of the NRF (test)",
+				Flags: append([]cli.Flag{
+					&cli.StringFlag{Name: "target", Required: true, Usage: "NF type of the producer"},
+					&cli.StringFlag{Name: "scope", Required: true, Usage: "service name"},
+				}, nrfFlags...),
+				Action: token,
+			},
 		},
+	}
+	for _, command := range app.Commands {
+		command.Flags = append(command.Flags,
+			&cli.StringFlag{Name: "cert", Usage: "TLS client certificate; default: the one of the role of the command"},
+			&cli.StringFlag{Name: "key", Usage: "its private key; default: the .key next to it"},
+			&cli.StringFlag{Name: "ca", Usage: "CA of the servers; default: sba-ca.pem next to the certificate"})
+		command.Before = startTLS(commandCertificate[command.Name])
 	}
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "seed:", err)
 		os.Exit(1)
 	}
+}
+
+// startTLS makes the tool a TLS client of the SBI (TS 33.501 cl. 13.1.0). Without
+// the certificate of the role and without --cert, only http URIs work.
+func startTLS(name string) cli.BeforeFunc {
+	return func(c *cli.Context) error {
+		cert := c.String("cert")
+		if cert == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return err
+			}
+			cert = filepath.Join(home, certDir, name+".pem")
+			if _, err = os.Stat(cert); err != nil {
+				return nil
+			}
+		}
+		key := c.String("key")
+		if key == "" {
+			key = strings.TrimSuffix(cert, ".pem") + ".key"
+		}
+		ca := c.String("ca")
+		if ca == "" {
+			ca = filepath.Join(filepath.Dir(cert), "sba-ca.pem")
+		}
+		return sbitls.Init(sbitls.Config{Certificate: cert, Key: key, CA: ca})
+	}
+}
+
+// profileIdentity is the NF instance ID and the NF type of the temporary
+// profile: the ones of the TLS certificate, or else an AF with --nf-id.
+func profileIdentity(c *cli.Context) (string, models.NrfNfManagementNfType) {
+	if tlsContext := sbitls.Current(); tlsContext != nil {
+		if types := tlsContext.NfTypes(); len(types) > 0 {
+			return tlsContext.NfInstanceId(), models.NrfNfManagementNfType(types[0])
+		}
+	}
+	return c.String("nf-id"), models.NrfNfManagementNfType_AF
 }
 
 func akmaClient(apiRoot string) *Naanf_AKMA.APIClient {
@@ -138,10 +215,12 @@ func akmaClient(apiRoot string) *Naanf_AKMA.APIClient {
 	return Naanf_AKMA.NewAPIClient(cfg)
 }
 
-// tokenContext returns a context with an access token for naanf-akma when
-// --nrf is set, and a function that deregisters the temporary AF profile.
+// tokenContext returns a context with an access token for naanf-akma, with
+// the scope of storing and removing keys (TS 29.535 table 5.1.9-1), when --nrf
+// is set, and a function that deregisters the temporary AF profile.
 func tokenContext(c *cli.Context) (context.Context, func(), error) {
-	return tokenContextFor(c, models.NrfNfManagementNfType_AANF, models.ServiceName_NAANF_AKMA)
+	return tokenContextFor(c, models.NrfNfManagementNfType_AANF,
+		models.ServiceName_NAANF_AKMA+" "+oauth.ScopeNaanfAkmaAnchorKey)
 }
 
 // tokenContextFor is tokenContext for another target NF type and scope.
@@ -152,14 +231,14 @@ func tokenContextFor(c *cli.Context, target models.NrfNfManagementNfType, scope 
 	if nrfURI == "" {
 		return context.Background(), func() {}, nil
 	}
-	nfID := c.String("nf-id")
+	nfID, nfType := profileIdentity(c)
 	cfg := Nnrf_NFManagement.NewConfiguration()
 	cfg.SetBasePath(nrfURI)
 	nrf := Nnrf_NFManagement.NewAPIClient(cfg)
 
 	profile := models.NrfNfManagementNfProfile{
 		NfInstanceId: nfID,
-		NfType:       models.NrfNfManagementNfType_AF,
+		NfType:       nfType,
 		NfStatus:     models.NrfNfManagementNfStatus_REGISTERED,
 	}
 	rsp, err := nrf.NFInstanceIDDocumentApi.RegisterNFInstance(context.Background(),
@@ -167,9 +246,9 @@ func tokenContextFor(c *cli.Context, target models.NrfNfManagementNfType, scope 
 	if err != nil {
 		return nil, nil, fmt.Errorf("temporary registration at the NRF: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "registered at the NRF as AF %s\n", nfID)
+	fmt.Fprintf(os.Stderr, "registered at the NRF as %s %s\n", nfType, nfID)
 	cleanup := func() {
-		ctx, _, err := oauth.GetTokenCtx(models.NrfNfManagementNfType_AF, models.NrfNfManagementNfType_NRF,
+		ctx, _, err := oauth.GetTokenCtx(nfType, models.NrfNfManagementNfType_NRF,
 			nfID, nrfURI, string(models.ServiceName_NNRF_NFM))
 		if err != nil {
 			ctx = context.Background()
@@ -179,7 +258,7 @@ func tokenContextFor(c *cli.Context, target models.NrfNfManagementNfType, scope 
 			fmt.Fprintf(os.Stderr, "deregistration at the NRF failed: %v\n", err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "deregistered AF %s from the NRF\n", nfID)
+		fmt.Fprintf(os.Stderr, "deregistered %s %s from the NRF\n", nfType, nfID)
 	}
 
 	oauth2, _ := rsp.NrfNfManagementNfProfile.CustomInfo["oauth2"].(bool)
@@ -187,7 +266,7 @@ func tokenContextFor(c *cli.Context, target models.NrfNfManagementNfType, scope 
 		fmt.Fprintln(os.Stderr, "the NRF does not require OAuth2; no access token requested")
 		return context.Background(), cleanup, nil
 	}
-	ctx, _, err := oauth.GetTokenCtx(models.NrfNfManagementNfType_AF, target, nfID, nrfURI, string(scope))
+	ctx, _, err := oauth.GetTokenCtx(nfType, target, nfID, nrfURI, string(scope))
 	if err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("access token request: %w", err)
@@ -355,6 +434,24 @@ func triggerAuth(c *cli.Context) error {
 		return errors.New(msg)
 	}
 	fmt.Println("accepted (204)")
+	return nil
+}
+
+func token(c *cli.Context) error {
+	ctx, cleanup, err := tokenContextFor(c, models.NrfNfManagementNfType(c.String("target")),
+		models.ServiceName(c.String("scope")))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	tok, err := bearer(ctx)
+	if err != nil {
+		return err
+	}
+	if tok == "" {
+		return errors.New("no access token: the NRF does not require OAuth2, or --nrf is missing")
+	}
+	fmt.Println(tok)
 	return nil
 }
 

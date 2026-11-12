@@ -1,0 +1,302 @@
+diff --git a/internal/sbi/consumer/aanf_service.go b/internal/sbi/consumer/aanf_service.go
+index 91b4ea9..6b11216 100644
+--- a/internal/sbi/consumer/aanf_service.go
++++ b/internal/sbi/consumer/aanf_service.go
+@@ -3,9 +3,11 @@ package consumer
+ import (
+ 	"context"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/pkg/errors"
+ 
++	"github.com/florianoneto07/akma-free5gc/shared/akma/akid"
+ 	ausf_context "github.com/free5gc/ausf/internal/context"
+ 	"github.com/free5gc/ausf/internal/logger"
+ 	"github.com/free5gc/openapi"
+@@ -20,29 +22,52 @@ type naanfService struct {
+ 
+ 	mu      sync.RWMutex
+ 	clients map[string]*Naanf_AKMA.APIClient
++	// found keeps the AAnF found at the NRF for each Routing Indicator, ""
++	// for the default one, during the validity period of the search result
++	// (TS 29.510 cl. 5.3.2.2.1).
++	found map[string]aanfInstance
+ }
+ 
+-func (s *naanfService) getClient(uri string) *Naanf_AKMA.APIClient {
++// aanfInstance is an AAnF to send the key material to: its apiRoot and, when
++// it was found at the NRF, its NF instance ID and until when the result of
++// the search is valid.
++type aanfInstance struct {
++	key     string
++	uri     string
++	nfId    string
++	expires time.Time
++}
++
++// getClient returns the client of the AAnF at uri. Its requests carry the
++// User-Agent with the NF type and the 3gpp-Sbi-NF-Peer-Info header
++// (TS 29.500 table 5.2.2.2-1 and cl. 5.2.3.2.21).
++func (s *naanfService) getClient(uri, aanfId string) *Naanf_AKMA.APIClient {
++	key := uri + " " + aanfId
+ 	s.mu.RLock()
+-	client, ok := s.clients[uri]
++	client, ok := s.clients[key]
+ 	s.mu.RUnlock()
+ 	if ok {
+ 		return client
+ 	}
++	self := ausf_context.GetSelf()
+ 	cfg := Naanf_AKMA.NewConfiguration()
+ 	cfg.SetBasePath(uri)
++	cfg.SetUserAgent(openapi.NfAgent(models.NrfNfManagementNfType_AUSF, self.NfId))
++	if info := openapi.NfPeerInfo(self.NfId, aanfId); info != "" {
++		cfg.AddDefaultHeader(openapi.HeaderNfPeerInfo, info)
++	}
+ 	client = Naanf_AKMA.NewAPIClient(cfg)
+ 
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+-	s.clients[uri] = client
++	s.clients[key] = client
+ 	return client
+ }
+ 
+ // RegisterAKMAKey sends Naanf_AKMA_AnchorKey_Register to the AAnF that
+ // serves the Routing Indicator rid (TS 29.535 cl. 4.2.2.2.2).
+ func (s *naanfService) RegisterAKMAKey(ctx context.Context, rid string, info models.AkmaKeyInfo) error {
+-	uri, err := s.aanfUri(rid)
++	aanf, err := s.aanf(rid)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -58,35 +83,88 @@ func (s *naanfService) RegisterAKMAKey(ctx context.Context, rid string, info mod
+ 
+ 	req := &Naanf_AKMA.RegisterAKMAKeyRequest{}
+ 	req.SetAkmaKeyInfo(info)
+-	_, err = s.getClient(uri).RegisterTheAKMARelatedKeyMaterialApi.RegisterAKMAKey(ctx, req)
++	_, err = s.getClient(aanf.uri, aanf.nfId).RegisterTheAKMARelatedKeyMaterialApi.RegisterAKMAKey(ctx, req)
++	var apiErr openapi.GenericOpenAPIError
++	if err != nil && !errors.As(err, &apiErr) {
++		// No answer from the AAnF found: the next request
++		// searches again.
++		s.forget(aanf.key)
++	}
+ 	return err
+ }
+ 
+-// aanfUri returns the configured AAnF apiRoot or, when none is configured,
+-// discovers an AAnF at the NRF with the Routing Indicator (TS 33.535 cl. 6.7;
+-// TS 29.510 table 6.2.3.2.3.1-1).
+-func (s *naanfService) aanfUri(rid string) (string, error) {
++// aanf returns the configured AAnF apiRoot or, when none is configured, an
++// AAnF found at the NRF (TS 33.535 cl. 6.7; TS 29.510 table 6.2.3.2.3.1-1).
++// The search goes with the Routing Indicator, or without it for the default
++// one, "0" (TS 23.003 cl. 2.2B): then "the AAnF NF consumer can select any
++// AAnF instance within the home network of the UE". A result is reused while
++// it is valid (TS 29.510 cl. 5.3.2.2.1).
++func (s *naanfService) aanf(rid string) (aanfInstance, error) {
+ 	self := ausf_context.GetSelf()
+ 	if self.AkmaAanfUri != "" {
+ 		logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (configured)", rid, self.AkmaAanfUri)
+-		return self.AkmaAanfUri, nil
++		return aanfInstance{uri: self.AkmaAanfUri}, nil
++	}
++	key := rid
++	if rid == string(akid.DefaultRID) {
++		key = ""
++	}
++	if found, ok := s.lookup(key); ok {
++		logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (search result reused)", rid, found.uri)
++		return found, nil
+ 	}
+ 	target := models.NrfNfManagementNfType_AANF
+ 	requester := models.NrfNfManagementNfType_AUSF
+ 	param := Nnrf_NFDiscovery.SearchNFInstancesRequest{
+-		TargetNfType:     &target,
+-		RequesterNfType:  &requester,
+-		ServiceNames:     []models.ServiceName{models.ServiceName_NAANF_AKMA},
+-		RoutingIndicator: &rid,
++		TargetNfType:    &target,
++		RequesterNfType: &requester,
++		ServiceNames:    []models.ServiceName{models.ServiceName_NAANF_AKMA},
++	}
++	if key != "" {
++		param.RoutingIndicator = &rid
+ 	}
+ 	res, err := s.consumer.SendSearchNFInstances(self.NrfUri, target, requester, param)
+ 	if err != nil {
+-		return "", errors.Wrap(err, "AAnF discovery")
++		return aanfInstance{}, errors.Wrap(err, "AAnF discovery")
+ 	}
+-	_, uri, err := openapi.GetServiceNfProfileAndUri(res.NfInstances, models.ServiceName_NAANF_AKMA)
++	profile, uri, err := openapi.GetServiceNfProfileAndUri(res.NfInstances, models.ServiceName_NAANF_AKMA)
+ 	if err != nil {
+-		return "", errors.Wrap(err, "AAnF discovery")
++		return aanfInstance{}, errors.Wrap(err, "AAnF discovery")
++	}
++	found := aanfInstance{
++		key: key, uri: uri, nfId: profile.NfInstanceId,
++		expires: time.Now().Add(time.Duration(res.ValidityPeriod) * time.Second),
+ 	}
+-	logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (discovered at the NRF)", rid, uri)
+-	return uri, nil
++	s.store(found)
++	if key == "" {
++		logger.AkmaLog.Infof("AAnF for the default Routing Indicator: %s (discovered at the NRF, any AAnF)", uri)
++	} else {
++		logger.AkmaLog.Infof("AAnF for Routing Indicator %s: %s (discovered at the NRF)", rid, uri)
++	}
++	return found, nil
++}
++
++func (s *naanfService) lookup(key string) (aanfInstance, bool) {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	found, ok := s.found[key]
++	if !ok || !time.Now().Before(found.expires) {
++		return aanfInstance{}, false
++	}
++	return found, true
++}
++
++func (s *naanfService) store(found aanfInstance) {
++	if !time.Now().Before(found.expires) {
++		return
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.found[found.key] = found
++}
++
++func (s *naanfService) forget(key string) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	delete(s.found, key)
+ }
+diff --git a/internal/sbi/consumer/consumer.go b/internal/sbi/consumer/consumer.go
+index 2a82f3c..723fb03 100644
+--- a/internal/sbi/consumer/consumer.go
++++ b/internal/sbi/consumer/consumer.go
+@@ -39,6 +39,7 @@ func NewConsumer(ausf ConsumerAusf) (*Consumer, error) {
+ 	c.naanfService = &naanfService{
+ 		consumer: c,
+ 		clients:  make(map[string]*Naanf_AKMA.APIClient),
++		found:    make(map[string]aanfInstance),
+ 	}
+ 
+ 	return c, nil
+diff --git a/internal/sbi/processor/akma_test.go b/internal/sbi/processor/akma_test.go
+index 8794741..32fa187 100644
+--- a/internal/sbi/processor/akma_test.go
++++ b/internal/sbi/processor/akma_test.go
+@@ -99,6 +99,8 @@ type recorder struct {
+ 	queries  []string
+ 	requests []models.AkmaKeyInfo
+ 	paths    []string
++	agents   []string
++	peers    []string
+ }
+ 
+ func h2cServer(t *testing.T, h http.Handler) *httptest.Server {
+@@ -117,6 +119,8 @@ func fakeAanf(t *testing.T, rec *recorder) *httptest.Server {
+ 		rec.mu.Lock()
+ 		rec.paths = append(rec.paths, r.Method+" "+r.URL.Path)
+ 		rec.requests = append(rec.requests, info)
++		rec.agents = append(rec.agents, r.Header.Get("User-Agent"))
++		rec.peers = append(rec.peers, r.Header.Get("3gpp-Sbi-NF-Peer-Info"))
+ 		rec.mu.Unlock()
+ 		w.Header().Set("Content-Type", "application/json")
+ 		_, _ = w.Write(body)
+@@ -128,7 +132,7 @@ func fakeNrf(t *testing.T, rec *recorder, aanf *httptest.Server) *httptest.Serve
+ 	host, portStr, err := net.SplitHostPort(aanf.Listener.Addr().String())
+ 	require.NoError(t, err)
+ 	port, _ := strconv.Atoi(portStr)
+-	result := models.SearchResult{NfInstances: []models.NrfNfDiscoveryNfProfile{{
++	result := models.SearchResult{ValidityPeriod: 100, NfInstances: []models.NrfNfDiscoveryNfProfile{{
+ 		NfInstanceId: "b6f417f0-06fa-4c38-b291-33066f5a5fe7",
+ 		NfType:       models.NrfNfManagementNfType_AANF,
+ 		NfStatus:     models.NrfNfManagementNfStatus_REGISTERED,
+@@ -195,6 +199,81 @@ func TestRegisterAkmaDiscoversAanf(t *testing.T) {
+ 	require.Equal(t, models.AkmaKeyInfo{Supi: vecSupi, AKId: vecAKID, KAkma: vecKakma}, rec.requests[0])
+ }
+ 
++// With the default Routing Indicator, "0" (TS 23.003
++// cl. 2.2B), the search goes without it and any AAnF will do (TS 33.535
++// cl. 6.7).
++func TestRegisterAkmaDefaultRid(t *testing.T) {
++	rec := &recorder{}
++	aanf := fakeAanf(t, rec)
++	nrf := fakeNrf(t, rec, aanf)
++	setAusfAkma(t, true, nrf.URL, "")
++
++	p := newTestProcessor(t)
++	p.registerAkma(akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf, routingId: "0"}, testPlmns)
++
++	require.Len(t, rec.queries, 1)
++	require.NotContains(t, rec.queries[0], "routing-indicator")
++	require.Contains(t, rec.queries[0], "target-nf-type=AANF")
++	require.Len(t, rec.requests, 1)
++}
++
++// The result of the search is reused during its validity
++// period (TS 29.510 cl. 5.3.2.2.1), for the same Routing Indicator only.
++func TestRegisterAkmaReusesSearch(t *testing.T) {
++	rec := &recorder{}
++	aanf := fakeAanf(t, rec)
++	nrf := fakeNrf(t, rec, aanf)
++	setAusfAkma(t, true, nrf.URL, "")
++
++	p := newTestProcessor(t)
++	req := akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf, routingId: "0000"}
++	p.registerAkma(req, testPlmns)
++	p.registerAkma(req, testPlmns)
++	require.Len(t, rec.queries, 1, "the second registration reuses the search")
++	require.Len(t, rec.requests, 2)
++
++	req.routingId = "0"
++	p.registerAkma(req, testPlmns)
++	require.Len(t, rec.queries, 2, "another Routing Indicator, another search")
++}
++
++// Without an answer from the AAnF found, the next registration searches
++// again.
++func TestRegisterAkmaSearchesAgainWithoutAnswer(t *testing.T) {
++	rec := &recorder{}
++	aanf := fakeAanf(t, rec)
++	nrf := fakeNrf(t, rec, aanf)
++	setAusfAkma(t, true, nrf.URL, "")
++
++	p := newTestProcessor(t)
++	req := akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf, routingId: "0000"}
++	aanf.Close()
++	p.registerAkma(req, testPlmns)
++	p.registerAkma(req, testPlmns)
++	require.Len(t, rec.queries, 2)
++}
++
++// The User-Agent with the NF type and the
++// 3gpp-Sbi-NF-Peer-Info header (TS 29.500 table 5.2.2.2-1, cl. 5.2.3.2.21).
++func TestRegisterAkmaHeaders(t *testing.T) {
++	rec := &recorder{}
++	aanf := fakeAanf(t, rec)
++	nrf := fakeNrf(t, rec, aanf)
++	setAusfAkma(t, true, nrf.URL, "")
++	self := ausf_context.GetSelf()
++	nfId := self.NfId
++	t.Cleanup(func() { self.NfId = nfId })
++	self.NfId = "3d5c6fd4-6e8f-4fae-a7ea-6b8c3a6a1f10"
++
++	p := newTestProcessor(t)
++	p.registerAkma(akmaRequest{supi: vecSupi, supiOrSuci: vecSuci, kausf: vecKausf, routingId: "0000"}, testPlmns)
++
++	require.Equal(t, []string{"AUSF-3d5c6fd4-6e8f-4fae-a7ea-6b8c3a6a1f10"}, rec.agents)
++	require.Equal(t, []string{
++		"srcinst=3d5c6fd4-6e8f-4fae-a7ea-6b8c3a6a1f10; dstinst=b6f417f0-06fa-4c38-b291-33066f5a5fe7",
++	}, rec.peers)
++}
++
+ // With akma.aanfUri configured, the NRF is not asked.
+ func TestRegisterAkmaConfiguredUri(t *testing.T) {
+ 	rec := &recorder{}

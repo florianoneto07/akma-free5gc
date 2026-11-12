@@ -1,0 +1,21 @@
+diff --git a/nefcfg.yaml b/nefcfg.yaml
+index 5126155..293368b 100644
+--- a/nefcfg.yaml
++++ b/nefcfg.yaml
+@@ -56,6 +56,16 @@ configuration:
+       - afId: af3.akma.example.FF00000001 # test only: accepted here and not by the AAnF (negative test E07)
+         sourceAddresses:
+           - 192.168.16.129
++  capif: # CAPIF (TS 29.522 cl. 7): the NEF as API publishing and exposing function
++    ccfUri: http://127.0.0.1:8020 # internal interface of the CCF, CAPIF-3/4 (http until TLS on the SBI)
++    apfId: nef-apf
++    aefId: nef-aef
++    tokenPublicKey: cert/ccf-token.pub.pem # checks the access tokens of the CCF, ES256 (TS 33.122 cl. 6.5.2.3 step 7)
++    interface: # published for 3gpp-akma (CAPIF-2e)
++      ipv4Addr: 192.168.16.130
++      port: 8000
++    invokerInfoLifetime: 10m # how long the NEF keeps the data of an API invoker
++    allowNrfTokens: true # 3gpp-akma also without CAPIF, with access tokens of the NRF (TS 29.522 cl. 6)
+ 
+ logger: # log output setting
+   enable: true # true or false

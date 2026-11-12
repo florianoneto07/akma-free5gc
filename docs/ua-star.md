@@ -168,7 +168,7 @@ An AF outside the operator network asks the NEF instead ([nef-akma-api.md](nef-a
 | `403` with `K_AKMA_NOT_PRESENT` | `403`, cause `AKMA_KEY_NOT_AVAILABLE` |
 | `403` without cause (AF outside the policy), another HTTP error, network failure | `503`, cause `AANF_UNAVAILABLE` |
 
-- **Selection of the AAnF.** The address of the AAnF is configured in the AF (TS 33.535 cl. 6.7, *"locally configured"*). There is no OAuth2 token: the AAnF authorizes the AF by its source address.
+- **Selection of the AAnF.** The URI of the AAnF is configured in the AF (TS 33.535 cl. 6.7, *"locally configured"*). There is no OAuth2 token: the AF reaches the AAnF over mutual TLS, and the AAnF authorizes it by the NF instance ID of its client certificate ([aanf.md](aanf.md), section 4).
 - **Active context.** The stored K_AF holds until `expiry`, and the AF never uses it after that (cl. 4.4.0: maximum lifetime). K_AF stays in memory and never shows in a log.
 
 ## 7. Expiry of K_AF
@@ -231,8 +231,9 @@ The profiles of TS 24.109 Annex K, with the Ua\* identifiers of TS 33.220 H.3, d
 | `qop` | `[auth]` | `auth-int` optional |
 | `nonceLifetime` | `300s` | |
 | `kafExpiry` | `refetch` | or `reject` |
-| `aanfUri` | `http://192.168.16.130:8010` | TS 33.535 cl. 6.7, local configuration |
-| `nefUri`, `nrfUri`, `nfInstanceId` | | AF outside the operator network, in place of `aanfUri` ([nef-akma-api.md](nef-akma-api.md)) |
+| `aanfUri` | `https://aanf.5gc.mnc093.mcc208.3gppnetwork.org:8010` | TS 33.535 cl. 6.7, local configuration |
+| `sbiTls` | `certificate`, `key`, `ca` | the client certificate of the AF and the CA of the operator ([sbi-tls.md](sbi-tls.md)) |
+| `capif` | | AF outside the operator network, an API invoker of CAPIF, in place of `aanfUri` ([capif.md](capif.md)) |
 | `anonymous` | `false` | `true`: anonymous user access (TS 33.535 cl. 6.2.2) |
 | `clockOffset` | | test only: shifts the clock of the AF |
 

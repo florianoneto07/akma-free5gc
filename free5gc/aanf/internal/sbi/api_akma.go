@@ -6,7 +6,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/netip"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/internal/util"
 	"github.com/florianoneto07/akma-free5gc/free5gc/aanf/pkg/factory"
 	"github.com/free5gc/openapi/models"
+	"github.com/free5gc/openapi/oauth"
 )
 
 // MaxJSONBodySize is the maximum size of a JSON body: 16 million octets
@@ -31,19 +31,20 @@ const apiName = "/naanf-akma/"
 type Route struct {
 	Name    string
 	Pattern string
-	// Token tells whether the operation requires an OAuth2 access token.
-	// Naanf_AKMA_ApplicationKey_Get is authorized by local policy instead
-	// (TS 33.535 cl. 6.2.1 step 2): the AF does not reach the NRF. A NEF
-	// sends a token, which is verified when present (cl. 6.3 step 3).
-	Token   bool
+	// Scope is the scope that the operation requires besides the one of the
+	// service (TS 29.535 table 5.1.9-1). Empty: no OAuth2 access token is
+	// required. Naanf_AKMA_ApplicationKey_Get is authorized by local policy
+	// instead (TS 33.535 cl. 6.2.1 step 2): the AF does not reach the NRF. A
+	// NEF sends a token, which is verified when present (cl. 6.3 step 3).
+	Scope   string
 	Handler gin.HandlerFunc
 }
 
 func (s *Server) getAkmaRoutes() []Route {
 	return []Route{
-		{"RegisterAKMAKey", "/register-anchorkey", true, s.HTTPRegisterAKMAKey},
-		{"GetAKMAAPPKeyMaterial", "/retrieve-applicationkey", false, s.HTTPGetAKMAAPPKeyMaterial},
-		{"RemoveContext", "/remove-context", true, s.HTTPRemoveContext},
+		{"RegisterAKMAKey", "/register-anchorkey", oauth.ScopeNaanfAkmaAnchorKey, s.HTTPRegisterAKMAKey},
+		{"GetAKMAAPPKeyMaterial", "/retrieve-applicationkey", "", s.HTTPGetAKMAAPPKeyMaterial},
+		{"RemoveContext", "/remove-context", oauth.ScopeNaanfAkmaAnchorKey, s.HTTPRemoveContext},
 	}
 }
 
@@ -51,8 +52,8 @@ func (s *Server) applyAkmaRoutes(router *gin.Engine) {
 	group := router.Group(factory.AanfAkmaResUriPrefix)
 	for _, r := range s.getAkmaRoutes() {
 		handlers := []gin.HandlerFunc{checkContentLength}
-		if r.Token {
-			handlers = append(handlers, s.authorizationCheck(models.ServiceName_NAANF_AKMA))
+		if r.Scope != "" {
+			handlers = append(handlers, s.authorizationCheck(r.Scope))
 		}
 		handlers = append(handlers, r.Handler)
 		// All operations are custom operations invoked with POST
@@ -76,22 +77,17 @@ func (s *Server) HTTPGetAKMAAPPKeyMaterial(c *gin.Context) {
 	if !readJSON(c, &req) {
 		return
 	}
-	token := c.Request.Header.Get("Authorization")
-	if token != "" {
-		if err := s.Context().AuthorizationCheck(token, models.ServiceName_NAANF_AKMA); err != nil {
+	var grant *oauth.Grant
+	if token := c.Request.Header.Get("Authorization"); token != "" {
+		var err error
+		grant, err = s.Context().AuthorizationCheck(token, c.Request.TLS, oauth.ScopeNaanfAkmaApplicationKey)
+		if err != nil {
 			logger.UtilLog.Debugf("Authorization check failed: %v", err)
-			writeUnauthorized(c, token)
+			oauth.WriteTokenError(c.Writer, c.Request, err)
 			return
 		}
 	}
-	// The source address is taken from the connection, never from
-	// forwarding headers, which the AF could set.
-	ap, err := netip.ParseAddrPort(c.Request.RemoteAddr)
-	if err != nil {
-		util.WriteProblem(c, util.Problem(http.StatusInternalServerError, util.CauseSystemFailure, ""))
-		return
-	}
-	s.Processor().RetrieveApplicationKey(c, &req, ap.Addr().Unmap(), token != "")
+	s.Processor().RetrieveApplicationKey(c, &req, grant)
 }
 
 // HTTPRemoveContext is POST .../remove-context.
@@ -104,30 +100,19 @@ func (s *Server) HTTPRemoveContext(c *gin.Context) {
 }
 
 // authorizationCheck verifies the OAuth2 access token when OAuth2 is
-// required (TS 29.535 cl. 5.1.9; TS 33.501 cl. 13.4.1). A missing or invalid
-// token is answered with 401 and a WWW-Authenticate challenge (RFC 6750
-// cl. 3).
-func (s *Server) authorizationCheck(serviceName models.ServiceName) gin.HandlerFunc {
+// required (TS 29.535 cl. 5.1.9; TS 33.501 cl. 13.4.1), with the scope of the
+// operation. A refusal is answered as in TS 29.500 cl. 6.7.3.
+func (s *Server) authorizationCheck(scope string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.Request.Header.Get("Authorization")
-		if err := s.Context().AuthorizationCheck(token, serviceName); err != nil {
+		if _, err := s.Context().AuthorizationCheck(token, c.Request.TLS, scope); err != nil {
 			logger.UtilLog.Debugf("Authorization check failed: %v", err)
-			writeUnauthorized(c, token)
+			oauth.WriteTokenError(c.Writer, c.Request, err)
+			c.Abort()
 			return
 		}
 		c.Next()
 	}
-}
-
-// writeUnauthorized answers 401 with a WWW-Authenticate challenge
-// (RFC 6750 cl. 3; TS 29.500 cl. 6.7.3).
-func writeUnauthorized(c *gin.Context, token string) {
-	if token == "" {
-		c.Header("WWW-Authenticate", `Bearer`)
-	} else {
-		c.Header("WWW-Authenticate", `Bearer error="invalid_token"`)
-	}
-	util.WriteProblem(c, util.Problem(http.StatusUnauthorized, "", "access token missing or invalid"))
 }
 
 // checkContentLength rejects a Content-Length header whose value is not a
